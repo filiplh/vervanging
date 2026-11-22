@@ -80,9 +80,14 @@ or error messages. Never use production data or production systems for developme
 
 ### Unconfirmed claims
 
-Anything that could not be verified (a rule interpretation, a manual check on a real target, a product question) is
-marked with `⚠` in code and docs, and listed under "Needs confirmation" in the PR. Never
-present it as fact.
+Anything that could not be verified (a rule interpretation, a manual check on a real target, a product question, how
+users or devices will behave) is marked with `⚠` in code and docs, and listed under "Needs confirmation" in the PR.
+Never present it as fact.
+
+A write-up that judges impact (a spike, a review, a list of findings) keeps what was seen or measured apart from what
+is judged. It says once, at the top, that the judged parts (why it matters, the priority) are for the owner to
+confirm. A reviewer raises a missing split as one finding for the whole write-up, not one per sentence (#42 took
+three review rounds over it).
 
 ## Human gates
 
