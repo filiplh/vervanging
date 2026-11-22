@@ -8,9 +8,11 @@
 //   clients.claim(), and no page is ever reloaded. It takes over at the next app start, once no page uses the old
 //   version, and then removes the old caches.
 //
-// Every release that changes any file in ASSETS must change VERSION, or phones keep the old files.
+// VERSION is a digest of every file in ASSETS and of this file (without the VERSION line). setup.test.js computes it
+// and fails, printing the new line to paste, when a cached file or this worker changed and VERSION did not. So every
+// release gets its own cache: phones see the new worker, and it never writes into the cache the open app is using.
 
-const VERSION = '2026-11-22.1';
+const VERSION = '4742c9a49b8c3ebb';
 const CACHE = `vervanging-${VERSION}`;
 
 // Paths relative to this file (served at /sw.js). './' is the page itself (index.html); it is cached under '/' only,

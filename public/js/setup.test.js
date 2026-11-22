@@ -4,6 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, relative, basename } from 'node:path';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 import { createStore } from './store.js';
 import { makePlan, planStats } from './planner.js';
 import {
@@ -508,18 +509,22 @@ function servedFiles() {
   return walk(PUBLIC).filter((f) => f !== '.assetsignore' && !ignore.some((re) => re.test(basename(f))));
 }
 
-// Runs sw.js in a sandbox with fake caches and fetch; returns its handlers and what it did.
-function loadServiceWorker() {
+// Runs sw.js in a sandbox with fake caches and fetch; returns its handlers and what it did. Two workers given the same
+// `stores` share one Cache Storage, as an old and a new version do in the browser; `server` gives each file's body.
+function loadServiceWorker({
+  source = readPublic('sw.js').toString(),
+  stores = new Map([['vervanging-old', new Map()], ['other-app', new Map()]]),
+  server = (url) => `body of ${url}`,
+} = {}) {
   const listeners = {};
   const calls = { skipWaiting: 0, claim: 0, added: [], deleted: [], opened: [], fetched: [] };
-  const stores = new Map([['vervanging-old', new Map()], ['other-app', new Map()]]);
   const origin = 'https://vervanging.test';
   const cacheFor = (name) => {
     if (!stores.has(name)) stores.set(name, new Map());
     const entries = stores.get(name);
     return {
       addAll: async (requests) => {
-        for (const r of requests) { calls.added.push({ url: r.url, cache: r.cache }); entries.set(r.url, `body of ${r.url}`); }
+        for (const r of requests) { calls.added.push({ url: r.url, cache: r.cache }); entries.set(r.url, server(r.url)); }
       },
       match: async (key, { ignoreSearch = false } = {}) => {
         let url = typeof key === 'string' ? key : key.url;
@@ -545,7 +550,7 @@ function loadServiceWorker() {
     },
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(readPublic('sw.js').toString(), context, { filename: 'sw.js' });
+  vm.runInContext(source, context, { filename: 'sw.js' });
   const value = (name) => vm.runInContext(name, context);
   async function run(type, extra = {}) {
     const waits = [];
@@ -579,6 +584,66 @@ test('service worker: every file the page links or imports is in its list', () =
   }
   assert.ok(refs.includes('js/app.js') && refs.includes('js/planner.js') && refs.includes('styles.css'), 'the scan finds links and imports');
   for (const ref of refs) assert.ok(assets.has(ref), `${ref} is cached`);
+});
+
+// The cache version sw.js must carry: sha256 over every cached file (its path, byte length and bytes, in ASSETS order)
+// and over sw.js itself without its VERSION line, first 16 hex characters. Any change to a cached file or to the worker
+// gives a new cache name, so a new version never writes into the cache the open app is using.
+const VERSION_LINE = /^const VERSION = '[^']*';\n/m;
+function cacheDigest(assets, read, swSource) {
+  const hash = createHash('sha256');
+  const add = (name, bytes) => { hash.update(`${name}\n${bytes.length}\n`); hash.update(bytes); };
+  for (const path of assets) add(path, read(path === './' ? 'index.html' : path));
+  add('sw.js', Buffer.from(swSource.replace(VERSION_LINE, '')));
+  return hash.digest('hex').slice(0, 16);
+}
+
+test('service worker: VERSION is the digest of the cached files and the worker, so a release always gets a new cache', () => {
+  const source = readPublic('sw.js').toString();
+  assert.equal(source.match(new RegExp(VERSION_LINE.source, 'gm'))?.length, 1, "sw.js has one line: const VERSION = '...';");
+  const assets = [...loadServiceWorker().value('ASSETS')];
+  const expected = cacheDigest(assets, readPublic, source);
+  assert.equal(loadServiceWorker().value('VERSION'), expected,
+    `public/sw.js must name the digest of the files it caches. Set its VERSION line to:\nconst VERSION = '${expected}';`);
+});
+
+test('service worker digest: changes with any cached byte, the list or the worker, not with the VERSION line alone', () => {
+  const files = { 'index.html': Buffer.from('<p>page</p>'), 'js/a.js': Buffer.from('a'), 'js/b.js': Buffer.from('b') };
+  const read = (path) => files[path];
+  const sw = "const VERSION = 'x';\nconst ASSETS = [];\n";
+  const base = cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw);
+  assert.match(base, /^[0-9a-f]{16}$/);
+  assert.equal(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw.replace("'x'", "'y'")), base, 'VERSION line excluded');
+  assert.notEqual(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, `${sw}// changed\n`), base, 'worker changed');
+  assert.notEqual(cacheDigest(['./', 'js/a.js'], read, sw), base, 'a file left out');
+  assert.notEqual(cacheDigest(['./', 'js/b.js', 'js/a.js'], read, sw), base, 'order');
+  files['js/b.js'] = Buffer.from('B');
+  assert.notEqual(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw), base, 'one byte of a file');
+  files['js/a.js'] = Buffer.from('ab');
+  files['js/b.js'] = Buffer.from('');
+  assert.notEqual(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw), base, 'bytes moved between files');
+});
+
+test('service worker: an old and a new version keep separate caches; the open app keeps its files until the next start', async () => {
+  const stores = new Map();
+  const oldSource = readPublic('sw.js').toString();
+  const newSource = oldSource.replace(VERSION_LINE, "const VERSION = 'next-release';\n");
+  const old = loadServiceWorker({ source: oldSource, stores, server: (url) => `old ${url}` });
+  await old.run('install');
+  await old.run('activate');
+  const live = old.request('/js/live.js');
+  assert.equal(await old.run('fetch', { request: live }), `old ${live.url}`);
+
+  const next = loadServiceWorker({ source: newSource, stores, server: (url) => `new ${url}` });
+  await next.run('install'); // installed in the background, waiting: the old worker still controls the app
+  assert.equal(await old.run('fetch', { request: live }), `old ${live.url}`, 'mid-match: still the old file');
+  assert.equal(await old.run('fetch', { request: old.request('/', { mode: 'navigate' }) }), `old ${old.origin}/`);
+  assert.deepEqual([...stores.keys()].sort(), [old.value('CACHE'), next.value('CACHE')].sort(), 'two caches side by side');
+  assert.equal(next.calls.skipWaiting + next.calls.claim, 0, 'the new version does not take over by itself');
+
+  await next.run('activate'); // the next app start, once no page uses the old version
+  assert.deepEqual([...stores.keys()], [next.value('CACHE')], 'the old cache is removed');
+  assert.equal(await next.run('fetch', { request: live }), `new ${live.url}`);
 });
 
 test('service worker: install stores the files fresh in a versioned cache and does not take over the open app', async () => {
