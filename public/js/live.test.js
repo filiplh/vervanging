@@ -535,3 +535,62 @@ test('live screen: Extra minuten next to In the zone; the note says the block is
   button(view, 'Ongedaan maken').fire('click');
   assert.deepEqual(JSON.parse(data.get('vervanging.match.v1')).extra, []);
 });
+
+// ---------- minutes at a glance (#32) ----------
+
+const overviewCells = (view) => {
+  const ol = find(view, 'ol', (e) => e.className === 'overview')[0];
+  return ol ? find(ol, 'li').map((li) => ({
+    number: find(li, 'span', (s) => s.className === 'number')[0].text,
+    minutes: find(li, 'span', (s) => s.className === 'min')[0].text,
+    on: li.className === 'on',
+    out: li.className === 'out',
+    text: li.text,
+  })) : null;
+};
+
+test('minutes at a glance: at the top, every player in jersey order with minutes, on-court players marked', () => {
+  // twelve players whose ids are not in jersey order, so the screen has to sort by number
+  const numbers12 = [12, 3, 7, 1, 10, 5, 9, 2, 11, 4, 8, 6];
+  const players = numbers12.map((n, i) => ({ id: i + 1, name: `Speler${n}`, number: String(n) }));
+  const ids = players.map((p) => p.id);
+  const plan = makePlan({ players: ids, start: [1, 2, 3, 4, 5], schedule: 'equal', seed: 3 });
+  const setup = { savedAt: '2026-11-22T10:00:00.000Z', opponent: 'BC Test', schedule: 'equal', seed: 3, players, startingFive: [1, 2, 3, 4, 5], plan };
+  const { view } = open(setup);
+
+  const top = view.children.filter((c) => c instanceof FakeElement);
+  const at = (pred) => top.findIndex(pred);
+  const overviewAt = at((c) => c.tag === 'ol' && c.className === 'overview');
+  assert.ok(overviewAt > 0, 'the overview is on the screen');
+  assert.ok(overviewAt < at((c) => c.tag === 'section'), 'above Op het veld');
+  assert.ok(overviewAt < at((c) => c.tag === 'table'), 'above the full table, which stays');
+  assert.equal(at((c) => c.className === 'sub-time') + 1, overviewAt, 'right under the sub time');
+
+  const check = () => {
+    const cells = overviewCells(view);
+    assert.deepEqual(cells.map((c) => c.number), Array.from({ length: 12 }, (_, i) => `#${i + 1}`), 'jersey order');
+    const rows = minuteRows(view);
+    assert.deepEqual(cells.map((c) => c.minutes), rows.map((r) => r.minutes), 'the same minutes as the full table');
+    const court = numbers(listOf(view, 'court')).map((n) => `#${n}`);
+    assert.deepEqual(cells.filter((c) => c.on).map((c) => c.number).sort(), court.sort(), 'on court marked');
+    for (const c of cells.filter((x) => x.on)) assert.match(c.text, /\(op het veld\)/, 'said for screen readers too');
+  };
+  check();
+  wisselButton(view).fire('click');
+  wisselButton(view).fire('click');
+  check();
+  assert.ok(overviewCells(view).some((c) => c.minutes !== '0:00' && c.minutes !== '3:20'), 'minutes grow');
+});
+
+test('minutes at a glance: a player who went uit is marked out, and the end screen shows only the full table', () => {
+  const { view } = open();
+  const row = find(view, 'tr', (tr) => find(tr, 'span', (sp) => sp.className === 'number' && sp.text === '#1').length > 0)[0];
+  find(row, 'button', (b) => b.text === 'Uit')[0].fire('click');
+  const one = overviewCells(view).find((c) => c.number === '#1');
+  assert.deepEqual({ on: one.on, out: one.out, minutes: one.minutes }, { on: false, out: true, minutes: '3:20' });
+  assert.match(one.text, /\(uit\)/);
+  for (let b = 0; b < 12; b++) wisselButton(view).fire('click');
+  assert.equal(h1(view), 'Einde match');
+  assert.equal(overviewCells(view), null, 'no overview after the end: the table is at the top there');
+  assert.equal(minuteRows(view).length, 8);
+});

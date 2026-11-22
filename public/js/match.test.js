@@ -4,7 +4,7 @@ import { makePlan, planStats, maxSubsFrom, blockCounts } from './planner.js';
 import {
   startMatch, wissel, undo, canUndo, applyAction, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
   normaliseMatchState, MatchError, MATCH_VERSION, uit, terug, proposedBench, capHolds, livePlan, replacements,
-  extraSeconds,
+  extraSeconds, minutesOverview,
 } from './match.js';
 import { seededRandom } from './planner.js';
 
@@ -588,4 +588,32 @@ test('extra minuten late, with a chosen bench player: the reward is exactly one 
       }
     }
   }
+});
+
+test('minutesOverview: every player in player order, seconds as minutesSoFar, on court as onCourt, out marked', () => {
+  const check = (state, label) => {
+    const overview = minutesOverview(state);
+    assert.deepEqual(overview.map((e) => e.player), state.players, `${label}: player order`);
+    const minutes = minutesSoFar(state);
+    const court = onCourt(state);
+    for (const e of overview) {
+      assert.equal(e.seconds, minutes[e.player], `${label}: seconds of ${e.player}`);
+      assert.equal(e.onCourt, court.includes(e.player), `${label}: on court ${e.player}`);
+      assert.equal(e.out, state.out.includes(e.player), `${label}: out ${e.player}`);
+    }
+    assert.equal(overview.filter((e) => e.onCourt).length, 5, `${label}: five on court`);
+  };
+  for (const schedule of ['equal', 'five']) {
+    let state = startMatch(planFor(schedule));
+    for (let b = 1; b <= state.blocks; b++) { check(state, `${schedule} block ${b}`); state = wissel(state); }
+    check(state, `${schedule} ended`);
+  }
+  // uit on court: the replacement is marked on court, the player who went uit is out and keeps the block's seconds
+  const start = startMatch(planFor('equal'));
+  const out = uit(start, 1);
+  check(out, 'after uit');
+  const one = minutesOverview(out).find((e) => e.player === 1);
+  assert.deepEqual(one, { player: 1, seconds: 200, onCourt: false, out: true });
+  assert.deepEqual(minutesOverview(startMatch(planFor('equal'))).slice(0, 2),
+    [{ player: 1, seconds: 200, onCourt: true, out: false }, { player: 2, seconds: 200, onCourt: true, out: false }]);
 });
