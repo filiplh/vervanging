@@ -34,7 +34,7 @@ feeling".
 - Overtime (#13)
 - Positions and position balance (#9)
 - Accounts, sync, sharing with staff or parents (#5)
-- Printing or exporting (grill, last question)
+- Printing or exporting (#23)
 ### Success criteria
 - With 12 players present, the generated equal-minutes plan gives every player exactly 5 blocks (16:40), with 2
   changes at every sub moment; checked by unit tests (#6, #21).
@@ -44,14 +44,14 @@ feeling".
 ## Decisions
 | # | Decision | Chosen | What it changes | Status | Source |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Stack | Plain HTML/CSS/JS ES modules in `public/`, no build, no npm dependencies; Cloudflare Worker serves static assets; tests with `node --test` | Every ticket stays inside `public/` and `*.test.js`; no installs | Decided | [grill D1](grill/2026-11-22-whole-product.md#decisions) (install PR #2) |
+| 1 | Stack | Plain HTML/CSS/JS ES modules in `public/`, no build, no npm dependencies; Cloudflare Worker serves static assets; tests with `node --test` | App code in `public/`, tests as `*.test.js`; no installs | Decided | [grill D1](grill/2026-11-22-whole-product.md#decisions) (install PR #2) |
 | 2 | Languages | On-screen text Dutch (`nl`) only; code, issues and plan in English | All UI strings in Dutch | Decided | [grill D2](grill/2026-11-22-whole-product.md#decisions) |
 | 3 | Releases | Manual production releases; first release approved by the owner | The app never changes mid-match | Decided | [grill D3](grill/2026-11-22-whole-product.md#decisions) |
 | 4 | How time is tracked | Fixed time blocks, no game clock; minutes = blocks × block length; sub at the first dead ball after a block ends | No timer code; the model is blocks, not seconds | Decided | [grill D4](grill/2026-11-22-whole-product.md#decisions) · ADR-001 |
 | 5 | Premises | One coach alone on a phone; no league playing-time rule applies; one device, data on the phone, no login or sync | No backend; one-handed, fast UI | Decided | [grill D5](grill/2026-11-22-whole-product.md#decisions) · ADR-002 |
 | 6 | Schedules | Equal minutes: 12 blocks of 3:20 (subs at 6:40 and 3:20 each quarter). 5-minute blocks: 8 blocks of 5:00 (sub at 5:00 and at quarter breaks) | The planner works for any block count | Decided | [grill D6](grill/2026-11-22-whole-product.md#decisions) |
 | 7 | Plan before the match | Generated grid players × blocks, spread; coach swaps two players before tip-off | Setup shows an editable grid | Decided | [grill D7](grill/2026-11-22-whole-product.md#decisions) |
-| 8 | In the zone | One tap at a block change keeps a player due off on court; the bench player who missed the block gets the zone player's next planned block; with none left, the overview shows +1/−1 | Live replanning with swap-back | Decided | [grill D8](grill/2026-11-22-whole-product.md#decisions) |
+| 8 | In the zone | One tap at a block change keeps a player due off on court; the bench player who missed the block gets the zone player's next planned block where the bench player is not already on; with no such block left, the difference stays and the overview shows +1/−1 | Live replanning with swap-back | Decided | [grill D8](grill/2026-11-22-whole-product.md#decisions) |
 | 9 | Who sits when a zone player stays; positions | App proposes the incoming player with most minutes so far (ties: roster order), coach can change; positions ignored | No position data | Decided | [grill D9](grill/2026-11-22-whole-product.md#decisions) |
 | 10 | Team history | Per-match minutes stored; a setup switch "houd rekening met vorige matchen" gives uneven blocks to the fewest total minutes (else random); "wis geschiedenis" resets | One stored list, one sort | Decided | [grill D10](grill/2026-11-22-whole-product.md#decisions) |
 | 11 | Absent and dropped-out players | Attendance at setup; "uit"/"terug" re-spread remaining blocks, fewest minutes this match first, through one "replan remaining blocks" function | Planner must replan from any block | Decided (one function: agent's call, reversible) | [grill D11](grill/2026-11-22-whole-product.md#decisions) |
@@ -66,6 +66,7 @@ feeling".
 | 20 | Starting five | Coach picks it; the app plans the rest from there | Planner takes a fixed first block | Decided | [grill D20](grill/2026-11-22-whole-product.md#decisions) |
 | 21 | Sub rule | As few changes as possible per sub moment, normally 2, at most 3; 3 only to keep sits ≤ 15:00 or after a live change | Planner constraint; verified for 12 players | Decided | [grill D21](grill/2026-11-22-whole-product.md#decisions) |
 | 22 | Quarter breaks | The sub limit applies there too | One rule everywhere | Decided | [grill D22](grill/2026-11-22-whole-product.md#decisions) |
+| 23 | Printing, export | Out of scope for now | None | Decided | [grill D23](grill/2026-11-22-whole-product.md#decisions) |
 
 ## Architecture
 - [ADR-001](adr/001-fixed-blocks-no-game-clock.md) Fixed time blocks, no game clock (accepted): playing time is

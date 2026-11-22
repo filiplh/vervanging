@@ -17,8 +17,6 @@ Depth: deep · Read: owner's idea text (Dutch, in session), README.md, AGENTS.md
 gap: league playing-time rules: none apply (premise 3, owner knows)
 
 ## Open (frontier)
-| ID | Question | Risk | Who can answer |
-| --- | --- | --- | --- |
 None.
 
 ## Decisions
@@ -34,6 +32,19 @@ None.
 | D8 | "In the zone": at a block change, one tap keeps a player who is due off on court. The player who missed this block gets the zone player's next planned block (the next one where the bench player is not already on). With no block left to swap, the difference stays and the overview shows it (+1/−1 block) | one tap, fairness kept | user |
 | D9 | When a zone player stays on, the app proposes which incoming player stays off: the one with the most minutes so far (ties: roster order); the coach can tap another. Positions are ignored in v1 | fits budget; development team | user |
 | D10 | Team history: after each match the app stores each player's minutes on the phone. A switch at match start ("houd rekening met vorige matchen") decides who gets blocks that cannot be split equally (B's extra blocks, spare blocks with fewer players): on → fewest total minutes so far, off → random. A "wis geschiedenis" button resets for a new season. History changes nothing else | small: one list, one sort | user |
+| D11 | Attendance is ticked at match setup; the plan is made for the players present. During a match, "uit" (fouls, injury) and "terug" re-spread the remaining blocks over the available players so match totals stay as equal as possible (fewest minutes this match first; history breaks ties when its switch is on). Both use one "replan remaining blocks" function | foul-outs happen most games | user (behaviour), agent's call, reversible (one function) |
+| D12 | Live screen: block number, sub time on the official clock ("wissel op 6:40"), who is on court, who goes off and comes on next; one big "Wissel" button moves to the next block when the coach actually subs. No timer | simplest live flow | user |
+| D13 | Overtime is not planned or counted in v1 | rare; keeps block math clean | user |
+| D14 | Roster entered once and stored on the phone: first name and jersey number, up to 15 players; attendance per match | | user |
+| D15 | Works offline after the first visit (service worker) and can be added to the home screen | bad reception in sports halls | user |
+| D16 | Fixed blocks, no timer, stand after devil's advocate: real minutes drift (subs wait for a dead ball, ±1 min per block); fairness is counted in blocks and evens out over the match and season | keeps every action one tap | user |
+| D17 | "Ongedaan maken" undoes the last live action (Wissel, in the zone, uit/terug); one step | double tap in a hurry (pre-mortem) | user |
+| D18 | Match state is saved after every tap and restored exactly after a reload or restart; the screen is kept awake during a match where the browser allows it (Wake Lock) | phone locks, reloads (pre-mortem) | user |
+| D19 | Match setup is one screen: attendance (last match pre-ticked), schedule, history switch, plan check with swaps, start; opponent name optional; under a minute | setup skipped before tip-off (pre-mortem) | user |
+| D20 | The coach picks the starting five on the setup screen; the app plans the remaining blocks from there | coach's call on who starts (last question) | user |
+| D21 | Sub rule for both schedules: as few changes per sub moment as possible, normally 2, at most 3; 3 only when 2 would make a player sit more than 15:00 in a row, or after a live change (in the zone, uit, terug). Checked by search for 12 players: equal plan uses 2 at every change (longest sit 13:20, longest stint 10:00); 5-minute plan needs 3 at some changes to keep sits ≤ 15:00 (with strict 2 a player sits 25:00) | fewer changes keep lineups together; no one waits half a match (last question, then the numbers) | user |
+| D22 | The sub limit applies at quarter breaks too | one rule, simpler to read and plan | user |
+| D23 | Printing and exporting are out of scope for now | "I don't need printing or anything at the moment" (last question) | user |
 
 ## Assumptions to test
 | ID | Assumption | How to test | Owner |
