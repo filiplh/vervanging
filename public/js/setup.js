@@ -1,7 +1,7 @@
 // Roster and match setup screens (docs/PLAN.md decisions #7, #14, #19, #20).
 // Roster entries carry a stable numeric id; the planner works with those ids, the screen shows names and numbers.
 
-import { makePlan, swapPlayers, planStats, PlanError, ON_COURT } from './planner.js';
+import { makePlan, swapPlayers, planStats, PlanError, ON_COURT, SCHEDULES } from './planner.js';
 
 export const MAX_PLAYERS = 15;
 const MAX_NAME = 20;
@@ -14,7 +14,7 @@ export function normaliseRoster(raw) {
   const seen = new Set();
   for (const p of Array.isArray(raw?.players) ? raw.players : []) {
     if (!Number.isInteger(p?.id) || seen.has(p.id)) continue;
-    if (typeof p.name !== 'string' || typeof p.number !== 'string') continue;
+    if (typeof p.name !== 'string' || !p.name.trim() || typeof p.number !== 'string' || !/^\d{1,2}$/.test(p.number)) continue;
     seen.add(p.id);
     players.push({ id: p.id, name: p.name, number: p.number });
   }
@@ -50,11 +50,44 @@ export function removePlayer(roster, id) {
   return { ...roster, players: roster.players.filter((p) => p.id !== id) };
 }
 
+// The last attendance read from the store: a list of player ids, or null when there is none or it is damaged.
+export function normaliseAttendance(raw) {
+  return Array.isArray(raw) ? raw.filter((id) => Number.isInteger(id)) : null;
+}
+
 // Who is ticked present when setup opens: the last match's selection, or everyone when there is none yet.
-export function initialAttendance(roster, last) {
+export function initialAttendance(roster, raw) {
   const ids = roster.players.map((p) => p.id);
-  if (!Array.isArray(last)) return ids;
+  const last = normaliseAttendance(raw);
+  if (!last) return ids;
   return ids.filter((id) => last.includes(id));
+}
+
+// A match setup read from the store, or null when it is missing or its shape is damaged, so no screen
+// (the #start placeholder now, the live screen in #7) ever renders from broken data.
+export function normaliseMatchSetup(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const { players: rawPlayers, startingFive, plan, schedule, opponent = '', seed, savedAt } = raw;
+  if (!Array.isArray(rawPlayers) || !Array.isArray(startingFive) || !Object.hasOwn(SCHEDULES, String(schedule))) return null;
+  if (typeof opponent !== 'string') return null;
+  const roster = normaliseRoster({ players: rawPlayers });
+  if (roster.players.length !== rawPlayers.length || roster.players.length < ON_COURT) return null;
+  const ids = new Set(roster.players.map((p) => p.id));
+  const isFive = (court) => Array.isArray(court) && court.length === ON_COURT && new Set(court).size === ON_COURT
+    && court.every((id) => ids.has(id));
+  if (!isFive(startingFive)) return null;
+  const { blocks } = SCHEDULES[schedule];
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.grid) || plan.grid.length !== blocks
+    || !plan.grid.every(isFive) || !Array.isArray(plan.start) || !isFive(plan.start)) return null;
+  return {
+    savedAt: typeof savedAt === 'string' ? savedAt : null,
+    opponent,
+    schedule,
+    seed: Number.isInteger(seed) ? seed : null,
+    players: roster.players,
+    startingFive: startingFive.slice(),
+    plan,
+  };
 }
 
 export function formatSeconds(seconds) {
@@ -350,4 +383,26 @@ export function setupScreen(root, { store, onStart }) {
   }
 
   render();
+}
+
+// ---------- placeholder after "Start" ----------
+
+// Until the live screen (#7) exists, "Start" lands here: the setup is saved, nothing more happens yet.
+// A damaged saved setup shows a Dutch message and a way back instead of breaking the page.
+export function startedScreen(root, { store }) {
+  const setup = normaliseMatchSetup(store.load('matchSetup'));
+  if (!setup) {
+    root.replaceChildren(
+      el('h1', {}, 'Geen match gevonden'),
+      el('p', { className: 'note' }, 'De opgeslagen match kon niet gelezen worden. Stel de match opnieuw in.'),
+      el('a', { className: 'button primary', href: '#match' }, 'Naar de match'));
+    return;
+  }
+  const five = setup.players.filter((p) => setup.startingFive.includes(p.id)).sort(byNumber).map(playerLabel);
+  root.replaceChildren(
+    el('h1', {}, 'Match opgeslagen'),
+    setup.opponent && el('p', {}, `Tegen ${setup.opponent}.`),
+    el('p', {}, `Basisvijf: ${five.join(', ')}.`),
+    el('p', { className: 'note' }, 'Het wedstrijdscherm komt in een volgende versie.'),
+    el('a', { className: 'button', href: '#match' }, 'Terug naar de match'));
 }
