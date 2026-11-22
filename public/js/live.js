@@ -1,6 +1,7 @@
 // Live match screen (#start): one tap per wissel, in the zone, uit and terug, undo, minutes so far, and the
-// end-of-match minutes. Decisions: docs/PLAN.md #4, #8, #9, #11, #12, #17, #18. The match state (match.js) is saved after every tap and restored after a
-// reload; a missing or damaged saved setup shows a Dutch message instead of breaking the page.
+// end-of-match minutes, with the screen kept awake during the match. Decisions: docs/PLAN.md #4, #8, #9, #11, #12,
+// #17, #18. The match state (match.js) is saved after every tap and restored after a reload; a missing or damaged
+// saved setup shows a Dutch message instead of breaking the page.
 
 import { el, normaliseMatchSetup, formatSeconds, byNumber } from './setup.js';
 import { SCHEDULES } from './planner.js';
@@ -64,9 +65,61 @@ export function repairHistory(store, setup, state) {
   return true;
 }
 
-export function liveScreen(root, { store }) {
+// Keeps the screen on during a match (decision #18) with the Screen Wake Lock API. set(true) asks for the lock,
+// set(false) lets it go. The browser drops the lock when the page is hidden, so it is asked for again when the page
+// is visible again and still wanted. Where the API is missing or refuses (low battery, page not visible) nothing
+// happens and nothing is shown: the match works the same without it.
+export function createWakeLock(nav, doc) {
+  let wanted = false;
+  let sentinel = null;
+  let pending = false;
+
+  const letGo = (lock) => { Promise.resolve().then(() => lock.release()).catch(() => {}); };
+
+  async function acquire() {
+    if (!wanted || sentinel || pending || !nav?.wakeLock || doc?.visibilityState === 'hidden') return;
+    pending = true;
+    try {
+      const lock = await nav.wakeLock.request('screen');
+      if (wanted) {
+        sentinel = lock;
+        lock.addEventListener?.('release', () => { if (sentinel === lock) sentinel = null; });
+      } else {
+        letGo(lock); // the match ended while the browser was still answering
+      }
+    } catch {
+      // refused or not supported: the match goes on with the normal screen timeout
+    } finally {
+      pending = false;
+    }
+  }
+
+  doc?.addEventListener?.('visibilitychange', () => { if (doc.visibilityState === 'visible') acquire(); });
+
+  return {
+    set(on) {
+      wanted = on;
+      if (on) return acquire();
+      if (sentinel) { letGo(sentinel); sentinel = null; }
+      return Promise.resolve();
+    },
+    get held() { return sentinel !== null; },
+  };
+}
+
+let screenLock = null;
+
+// The page's one wake lock: on while the live screen shows a match in progress, off otherwise (app.js turns it off
+// when another screen opens).
+export function keepScreenAwake(on) {
+  screenLock ??= createWakeLock(globalThis.navigator, globalThis.document);
+  return screenLock.set(on);
+}
+
+export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
   const setup = normaliseMatchSetup(store.load('matchSetup'));
   if (!setup) {
+    keepAwake(false);
     root.replaceChildren(
       el('h1', {}, 'Geen match gevonden'),
       el('p', { className: 'note' }, 'De opgeslagen match kon niet gelezen worden. Stel de match opnieuw in.'),
@@ -191,6 +244,7 @@ export function liveScreen(root, { store }) {
   }
 
   function render() {
+    keepAwake(!state.ended);
     root.replaceChildren(...(state.ended ? ended() : playing()).filter(Boolean));
   }
 
