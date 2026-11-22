@@ -14,6 +14,7 @@ Status: phase 2 · Built from: [grill 2026-11-22 whole product](grill/2026-11-22
 | Substitutions | Coach picks the starting five; then normally 2 changes per sub moment, at most 3 (a change may take off more when that is every player marked uit, #21), nobody sits more than 15:00 in a row (#20, #21, #22) |
 | Live | One "Wissel" button per block; "in the zone" keeps a player on and hands a block back later; "uit"/"terug"; undo (#8, #11, #12, #17) |
 | Data | One phone, no login, no sync; roster and per-match minutes stored on the phone (#5, #10, #14) |
+| Phase 2 | Extra minuten to reward a player on purpose; minutes at a glance during a match and per season; gradual catch-up for missed matches that leaves rewards alone (#25–#28) |
 | Robustness | Every tap saved; screen kept awake; works offline (#15, #18) |
 | Stack | Static HTML/CSS/JS, no build, no dependencies, on a Cloudflare Worker; manual releases (#1, #3) |
 
@@ -36,7 +37,8 @@ feeling".
 - Accounts, sync, sharing with staff or parents (#5)
 - Printing or exporting (#23)
 ### Success criteria
-- With 12 players present, the generated equal-minutes plan gives every player exactly 5 blocks (16:40), with 2
+- With 12 players present and the history switch off (#28 may then give one block more to players behind), the
+  generated equal-minutes plan gives every player exactly 5 blocks (16:40), with 2
   changes at every sub moment; checked by unit tests (#6, #21).
 - Match setup takes under one minute on the coach's phone, timed by the coach before the first real match (#19).
 - The coach uses the app for a whole real match or scrimmage without falling back to gut feel (A1).
@@ -53,7 +55,7 @@ feeling".
 | 7 | Plan before the match | Generated grid players × blocks, spread; coach swaps two players before tip-off | Setup shows an editable grid | Decided | [grill D7](grill/2026-11-22-whole-product.md#decisions) |
 | 8 | In the zone | One tap at a block change keeps a player due off on court; the bench player who missed the block gets the zone player's next planned block where the bench player is not already on; with no such block left, the difference stays and the overview shows +1/−1 | Live replanning with swap-back | Decided | [grill D8](grill/2026-11-22-whole-product.md#decisions) |
 | 9 | Who sits when a zone player stays; positions | App proposes the incoming player with most minutes so far (ties: roster order), coach can change; positions ignored | No position data | Decided | [grill D9](grill/2026-11-22-whole-product.md#decisions) |
-| 10 | Team history | Per-match minutes stored; a setup switch "houd rekening met vorige matchen" gives uneven blocks to the fewest total minutes (else random); "wis geschiedenis" resets | One stored list, one sort | Decided; "changes nothing else" replaced by #28 | [grill D10](grill/2026-11-22-whole-product.md#decisions) |
+| 10 | Team history | Per-match minutes stored; a setup switch "houd rekening met vorige matchen" gives uneven blocks to the fewest total minutes (else random); "wis geschiedenis" resets | One stored list, one sort | Decided; partly replaced by #28 (history now also drives catch-up, not only the uneven blocks) | [grill D10](grill/2026-11-22-whole-product.md#decisions) |
 | 11 | Absent and dropped-out players | Attendance at setup. "Uit" for a player on court: a replacement comes on at once, preferably a player due on at the next wissel (fewest minutes first), so that wissel has one change less; with none (the last block), the bench player with the fewest minutes. The block counts for the player who started it; the replacement's minutes in it are not counted (no clock). The remaining blocks are re-spread (fewest minutes this match first, through one "replan remaining blocks" function) only when the player was planned in a later block. "Uit" for a player on the bench removes them from later blocks. "Uit" is possible in the last block. "Terug" brings a player back from the next block | Planner must replan from any block | Decided (one function: agent's call, reversible; the uit rules: owner's decision, 2026-11-22) | [grill D11](grill/2026-11-22-whole-product.md#decisions) · [uit decision on #9](https://github.com/filiplh/vervanging/issues/9#issuecomment-7084717144) · PR #19 |
 | 12 | Live screen | Block number, sub time ("wissel op 6:40"), on court, off/on next; one big "Wissel" button; no timer | One main screen | Decided | [grill D12](grill/2026-11-22-whole-product.md#decisions) |
 | 13 | Overtime | Not planned or counted | None | Decided | [grill D13](grill/2026-11-22-whole-product.md#decisions) |
@@ -71,7 +73,7 @@ feeling".
 | 25 | Extra minuten | A second option next to In the zone: the kept player does not give the block back; the blocks left are spread over the others, fewest minutes first; undoable; the sub rule (#21) holds | Live engine and screen | Decided | [phase 2 D2](grill/2026-11-22-phase-2.md#decisions) |
 | 26 | Season totals | The Spelers screen shows each player's total minutes over all saved matches and the number of matches; Wis geschiedenis resets it | Roster screen reads the team history (#10) | Decided | [phase 2 D3](grill/2026-11-22-phase-2.md#decisions) |
 | 27 | Minutes at a glance | A compact overview of every player's minutes so far at the top of the live screen; the full table stays below | Live screen | Decided | [phase 2 D4](grill/2026-11-22-phase-2.md#decisions) |
-| 28 | Catching up missed matches | With the history switch on, players behind on season minutes get at most one block more per match than the equal share, from the players furthest ahead (at most one less each), until level; switch off: unchanged. Replaces "history changes nothing else" in #10 | Planner targets from history | Decided | [phase 2 D7](grill/2026-11-22-phase-2.md#decisions) |
+| 28 | Catching up missed matches | With the history switch on, players behind on season minutes get at most one block more per match than the equal share, from the players furthest ahead (at most one less each), until level; switch off: unchanged. Minutes from Extra minuten are left out of the totals it compares, so rewards stay. Replaces the first grill's "history changes nothing else" (#10) | Planner targets from history; the history keeps extra minuten apart | Decided | [phase 2 D7, D8](grill/2026-11-22-phase-2.md#decisions) |
 
 ## Architecture
 - [ADR-001](adr/001-fixed-blocks-no-game-clock.md) Fixed time blocks, no game clock (accepted): playing time is
@@ -88,7 +90,7 @@ Index: [adr/README.md](adr/README.md).
 | # | Assumption | How to test | Owner | Tested in | Source |
 | --- | --- | --- | --- | --- | --- |
 | A1 | One "Wissel" tap per block beats gut-feel tracking, so the app is used for a whole match | Use it in one real match or scrimmage; passes if the coach never falls back to gut feel mid-match | owner (coach) | Phase 1 exit: passed 2026-11-22 (#12) | [grill A1](grill/2026-11-22-whole-product.md#assumptions-to-test) |
-| A4 | Extra minuten stays rare, so equal minutes remains the norm over a season | After three matches, season totals differ by at most a few blocks between players who attended the same matches | owner (coach) | after phase 2 | [phase 2 A1](grill/2026-11-22-phase-2.md#assumptions-to-test) |
+| A4 | Extra minuten stays rare, so equal minutes remains the norm over a season | After three matches, the coach counts the matches in which Extra minuten was used: at most one of the three passes | owner (coach) | after phase 2 | [phase 2 A1](grill/2026-11-22-phase-2.md#assumptions-to-test) |
 | A2 | Block drift (±1 min per block) does not make fairness visibly wrong to players or parents | Ask after 3 matches whether anyone noticed unequal minutes | owner (coach) | after phase 1 | [grill A2](grill/2026-11-22-whole-product.md#assumptions-to-test) |
 | A3 | A plan meeting #21 exists for 8–12 players in both schedules, with any starting five | Unit tests over 8–12 players and several starting fives, both schedules; on failure the planner relaxes the sit limit, never the sub cap, and says so | builder | Phase 0 (planner) | [grill A3](grill/2026-11-22-whole-product.md#assumptions-to-test) |
 
@@ -146,7 +148,8 @@ a match and over the season.
 - [ ] Minutes at a glance at the top of the live screen (#27)
 - [ ] Season totals per player on the Spelers screen, from the team history (#26, #10)
 - [ ] Gradual catch-up for players behind on season minutes when the history switch is on (#28, #10, #21)
-- **Exit:** At a real match or scrimmage, the coach uses Extra minuten for one player at least once, reads the minutes
-  at the top of the live screen without scrolling, and after the match sees that player's higher total on the Spelers
-  screen. With the history switch on, a player who missed an earlier match gets one block more than the equal share in
-  the plan. Checked by the owner.
+- **Exit:** At a real match or scrimmage, the coach uses Extra minuten for one player at least once and reads every
+  player's minutes at the top of the live screen without scrolling. After the match, the Spelers screen shows that
+  player's season total one block higher than the players who played the same matches without extra minuten. When a
+  player missed an earlier match, the next plan with the history switch on gives them one block more than the equal
+  share, and the rewarded player no block less. Checked by the owner.
