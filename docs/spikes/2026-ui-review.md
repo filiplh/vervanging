@@ -83,8 +83,8 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
   redrawn in the same spot at once and takes the second tap. In code, each click applies, saves and redraws with no
   guard (`act` in `public/js/live.js`). No screenshot can show the two-tap sequence; for the button and its spot, see
   [block 1](2026-ui-review/10-live-blok1-light.png) (context, before the taps).
-- **Why it matters:** a coach in a hurry taps twice, or taps again because nothing seemed to happen (see P2-2). One
-  block is then skipped: the wrong players come on, and the minutes go wrong until the coach notices and taps
+- **Why it matters:** ⚠ the risk (not observed with coaches) is a coach in a hurry tapping twice, or again because
+  nothing seemed to happen (see P2-2). If two taps arrive, one block is skipped: the wrong players come on, and the minutes go wrong until the coach notices and taps
   Ongedaan maken. Ongedaan maken undoes one step, so a double tap on the second-to-last wissel also ends the match.
   ⚠ Whether real iOS Safari passes a fast double tap to the page as two clicks, or treats it as a zoom gesture, was
   not checked on a device.
@@ -114,8 +114,8 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
   ([light](2026-ui-review/18-live-laatste-blok-light.png), [dark](2026-ui-review/18-live-laatste-blok-dark.png),
   [end screen](2026-ui-review/19-einde-light.png)).
 - **Why it matters:** at a glance the screen says the match is over while the last block is still being played. The
-  button that really ends it sits where Wissel always was, in the same colour, so a coach who taps from habit ends
-  the match one block early. Ongedaan maken on the end screen saves it, but only if the coach sees the mistake.
+  button that really ends it sits where Wissel always was, in the same colour. ⚠ The risk (not observed with
+  coaches) is a coach who taps from habit ending the match one block early. Ongedaan maken on the end screen saves it, but only if the coach sees the mistake.
 - **Fix (S):** on the last block, show "Laatste blok" in `.sub-time` (⚠ copy to confirm) and keep "Einde match" on
   the button only.
 
@@ -137,8 +137,9 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
 - **Element:** `.overview li.on`.
 - **Seen:** players on court get a 2 px green border and bold text. In light mode that green is 2.90:1 against the
   grey border of the other cells ([screenshot](2026-ui-review/10-live-blok1-light.png)).
-- **Why it matters:** in a bright hall, or with the phone at an angle, the twelve cells look alike, so the coach falls
-  back on the "Op het veld" list below, which takes 5 more rows of the screen.
+- **Why it matters:** at 2.90:1 the border is below the 3:1 WCAG asks for non-text contrast. ⚠ In a bright hall, or
+  with the phone at an angle, the cells may look alike (not tried on a device), and the coach would fall back on the
+  "Op het veld" list below, which takes 5 more rows of the screen.
 - **Fix (S):** give on-court cells a filled background (a tint of `--on`), not only a border.
 
 ### P3-2 · Live: "Minuten tot nu" counts the block being played as already played
@@ -285,7 +286,7 @@ extra minuten. No "Avoid" word shows on screen.
   colour, and ⚠ whether iOS reopens a dropped home-screen app at `start_url` or at the last URL (this decides how bad
   P1-2 is in practice).
 - **Real iPhone Safari rendering:** fonts (Chrome used the macOS system font, as Safari would, but sizes may differ),
-  ⚠ double-tap handling (P2-1), ⚠ autocorrect on names (P3-9), and sunlight readability of the contrast points (P2-4,
-  P3-1, P3-6).
+  ⚠ double-tap handling (P2-1), ⚠ autocorrect on names (P3-9), and ⚠ readability in a bright hall of the contrast points
+  (P2-4, P3-1, P3-6).
 - **15 players:** the run used 11. With 15 the overview takes three rows and the setup page grows by about 400 px.
   Not walked.
