@@ -2,7 +2,7 @@
 // Roster entries carry a stable numeric id; the planner works with those ids, the screen shows names and numbers.
 
 import { makePlan, swapPlayers, planStats, PlanError, ON_COURT, SCHEDULES } from './planner.js';
-import { normaliseHistory, clearHistory, extraPriority } from './history.js';
+import { normaliseHistory, clearHistory, extraPriority, seasonSummary } from './history.js';
 
 export const MAX_PLAYERS = 15;
 const MAX_NAME = 20;
@@ -96,6 +96,20 @@ export function formatSeconds(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+// A season total: m:ss, or h:mm:ss from an hour on.
+export function formatDuration(seconds) {
+  const s = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
+  if (s < 3600) return formatSeconds(s);
+  const m = Math.floor(s / 60) % 60;
+  return `${Math.floor(s / 3600)}:${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// The line above the roster that says what the totals behind each name are (decision #26).
+export function seasonNote(matches) {
+  if (matches === 0) return 'Speeltijd dit seizoen: nog geen matchen bewaard.';
+  return `Speeltijd dit seizoen, over ${matches} bewaarde ${matches === 1 ? 'match' : 'matchen'}.`;
+}
+
 export function playerLabel(p) {
   return `#${p.number} ${p.name}`;
 }
@@ -123,6 +137,8 @@ export function el(tag, props = {}, ...children) {
 
 export function rosterScreen(root, { store }) {
   let roster = normaliseRoster(store.load('roster'));
+  // Season totals from the team history (decision #26); "Wis geschiedenis" on the Match screen resets them.
+  const season = seasonSummary(normaliseHistory(store.load('history')));
   let editingId = null;
   let message = '';
 
@@ -176,6 +192,8 @@ export function rosterScreen(root, { store }) {
       : el('ul', { className: 'roster' }, roster.players.slice().sort(byNumber).map((p) =>
         el('li', { className: p.id === editingId ? 'editing' : null },
           el('span', { className: 'player' }, el('span', { className: 'number' }, `#${p.number}`), ' ', p.name),
+          el('span', { className: 'number season-total' },
+            el('span', { className: 'visually-hidden' }, 'speeltijd '), formatDuration(season.totals[String(p.id)] ?? 0)),
           el('button', { type: 'button', onclick: () => { editingId = p.id; message = ''; render(); } }, 'Wijzig'),
           el('button', { type: 'button', className: 'danger', onclick: () => remove(p) }, 'Verwijder'))));
 
@@ -183,6 +201,7 @@ export function rosterScreen(root, { store }) {
       el('h1', {}, 'Spelers ', el('span', { className: 'count' }, `${roster.players.length} van ${MAX_PLAYERS}`)),
       form,
       el('p', { className: 'message', role: 'alert' }, message),
+      ...(roster.players.length > 0 ? [el('p', { className: 'note season-note' }, seasonNote(season.matches))] : []),
       list,
     );
     if (editing || nameDraft != null) root.querySelector('input[name="name"]')?.focus();

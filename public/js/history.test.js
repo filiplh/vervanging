@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { makePlan, planStats } from './planner.js';
 import {
   emptyHistory, normaliseHistory, recordMatch, forgetMatch, hasMatch, clearHistory, totalSeconds, extraPriority,
-  startedAfterClear,
+  startedAfterClear, seasonSummary,
 } from './history.js';
 
 const ids = (n) => Array.from({ length: n }, (_, i) => i + 1);
@@ -109,4 +111,54 @@ test('players in the history who are not present take no extra place', () => {
   const plan = makePlan({ players: nine, start: [1, 5, 6, 7, 8], schedule: 'five', seed: 2, extraPriority: extraPriority(history, nine, 2) });
   const { minutes } = planStats(plan);
   for (const p of nine) assert.equal(minutes[p], p <= 4 ? 1500 : 1200, `player ${p}`);
+});
+
+// ---------- season totals (decision #26) ----------
+
+test('seasonSummary: totals over several matches, players missing from some matches count only where they played', () => {
+  let history = emptyHistory();
+  history = recordMatch(history, 'm1', { 1: 600, 2: 1200, 3: 0 });
+  history = recordMatch(history, 'm2', { 1: 900, 4: 300 }); // 2 and 3 absent
+  history = recordMatch(history, 'm3', { 2: 2400.5, 4: 3600 });
+  assert.deepEqual(seasonSummary(history), { matches: 3, totals: { 1: 1500, 2: 3600.5, 3: 0, 4: 3900 } });
+  assert.deepEqual(seasonSummary(normaliseHistory(sample)).matches, 2);
+});
+
+test('seasonSummary: an empty, a cleared and a damaged history give no matches and no totals', () => {
+  assert.deepEqual(seasonSummary(emptyHistory()), { matches: 0, totals: {} });
+  const cleared = clearHistory(normaliseHistory(sample), '2026-11-22T10:00:00.000Z');
+  assert.deepEqual(seasonSummary(cleared), { matches: 0, totals: {} });
+  for (const raw of [null, 'x', [], { matches: 'x' }, { matches: [null, { id: 3 }, { id: 'a', seconds: [] }] }]) {
+    assert.deepEqual(seasonSummary(normaliseHistory(raw)), { matches: 0, totals: {} });
+  }
+  // Damaged seconds inside a good entry are dropped, the rest still counts.
+  const partly = normaliseHistory({ matches: [{ id: 'a', seconds: { 1: 600, 2: -5, 3: 'x' } }, { id: 'b', seconds: { 1: 60 } }] });
+  assert.deepEqual(seasonSummary(partly), { matches: 2, totals: { 1: 660 } });
+});
+
+const SIM = fileURLToPath(new URL('../../scripts/sim.mjs', import.meta.url));
+const FIXTURE = (name) => fileURLToPath(new URL(`../../scripts/fixtures/${name}`, import.meta.url));
+const sim = (...args) => spawnSync(process.execPath, [SIM, ...args], { encoding: 'utf8' });
+
+test('runner history: the sample and the empty fixture give matches and totals', () => {
+  const full = sim('history', '--history', FIXTURE('history-sample.json'), '--json');
+  assert.equal(full.status, 0, full.stderr);
+  const out = JSON.parse(full.stdout);
+  assert.equal(out.matches, 2);
+  for (const p of ids(12)) assert.equal(out.totals[p], p <= 4 ? 0 : 3000, `player ${p}`);
+  const empty = sim('history', '--history', FIXTURE('history-empty.json'), '--json');
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.deepEqual(JSON.parse(empty.stdout), { matches: 0, totals: {} });
+  assert.deepEqual(normaliseHistory(JSON.parse(readFileSync(FIXTURE('history-empty.json'), 'utf8'))),
+    JSON.parse(readFileSync(FIXTURE('history-empty.json'), 'utf8')), 'the empty fixture has the stored shape');
+});
+
+test('runner history: a missing or unreadable file exits 2 with one line about the history on stderr', () => {
+  for (const args of [['--history', FIXTURE('does-not-exist.json')], ['--history', SIM], []]) {
+    const run = sim('history', ...args, '--json');
+    assert.equal(run.status, 2, `args ${args.join(' ')}`);
+    assert.equal(run.stdout, '');
+    assert.equal(run.stderr.trim().split('\n').length, 1);
+    assert.match(run.stderr, /history/);
+  }
 });
