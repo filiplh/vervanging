@@ -9,6 +9,7 @@
 
 import {
   replanRemaining, repairRemaining, evenTargets, blockCounts, maxSubsFrom, MAX_SUBS, ON_COURT, PlanError,
+  seededRandom,
 } from './planner.js';
 
 export const MATCH_VERSION = 2;
@@ -131,35 +132,71 @@ function keepOn(state, keep, bench, extra = false) {
 }
 
 // Extra minuten (decision #25): the kept player plays the block on top and gives nothing back. Their match total
-// becomes the planned total plus one block; the places left after the next block go to the other available players,
-// fewest blocks first (ties to the lowest number), under the sub rule; when no plan fits, the last-resort repair.
+// becomes the planned total plus one block (never more); the places left after the next block go to the other
+// available players, fewest blocks first, under the sub rule. Ties are tried in several orders, then with the others
+// up to two blocks apart; only when no plan fits does the last-resort repair run, after which the kept player is
+// swapped out of later blocks until their total is exactly planned plus one (where the sub rule allows it).
 function extraOn(state, kept, keep, totals, fixed) {
   const avail = available(state);
   const prefix = blockCounts(kept.slice(0, fixed), state.players);
   const left = state.blocks - fixed;
-  const targets = Object.fromEntries(state.players.map((p) => [p, prefix[p]]));
-  targets[keep] = Math.min(totals[keep] + 1, prefix[keep] + left);
-  let places = ON_COURT * left - (targets[keep] - prefix[keep]);
-  const others = avail.filter((p) => p !== keep).sort((a, b) => a - b);
-  while (places > 0) {
-    let best = null;
-    for (const p of others) {
-      if (targets[p] - prefix[p] >= left) continue;
-      if (best === null || targets[p] < targets[best]) best = p;
+  const target = Math.min(totals[keep] + 1, prefix[keep] + left);
+  const others = avail.filter((p) => p !== keep);
+  const shareOut = (order, spread) => {
+    const targets = Object.fromEntries(state.players.map((p) => [p, prefix[p]]));
+    targets[keep] = target;
+    let places = ON_COURT * left - (target - prefix[keep]);
+    while (places > 0) {
+      let best = null;
+      for (const p of order) {
+        if (targets[p] - prefix[p] >= left) continue;
+        if (best === null || targets[p] < targets[best] - (spread - 1)) best = p;
+      }
+      if (best === null) return null;
+      targets[best] += 1;
+      places -= 1;
     }
-    if (best === null) break;
-    targets[best] += 1;
-    places -= 1;
+    return targets;
+  };
+  const random = seededRandom(state.block * 31 + keep);
+  const orders = [others.slice().sort((a, b) => a - b)];
+  for (let i = 0; i < 12; i++) orders.push(others.slice().sort(() => random() - 0.5));
+  for (const spread of [1, 2]) {
+    for (const order of orders) {
+      const targets = shareOut(order, spread);
+      if (!targets) continue;
+      try {
+        return replanRemaining({
+          grid: kept, players: state.players, available: avail, fromBlock: fixed, targets,
+          blockSeconds: state.blockSeconds, seed: state.block,
+        });
+      } catch (error) {
+        if (!(error instanceof PlanError)) throw error;
+      }
+    }
   }
-  try {
-    return replanRemaining({
-      grid: kept, players: state.players, available: avail, fromBlock: fixed, targets,
-      blockSeconds: state.blockSeconds, seed: state.block,
-    });
-  } catch (error) {
-    if (!(error instanceof PlanError)) throw error;
-    return repairRemaining({ grid: kept, players: state.players, available: avail, fromBlock: fixed });
+  const repaired = repairRemaining({ grid: kept, players: state.players, available: avail, fromBlock: fixed });
+  return holdTotal(repaired, keep, target, fixed, avail, state);
+}
+
+// Swaps `keep` out of later blocks (latest first) for an available bench player with the fewest blocks, while their
+// total is above `target` and the sub rule still holds, so a reward is never more than the one block recorded.
+function holdTotal(grid, keep, target, fixed, avail, state) {
+  let out = copyGrid(grid);
+  for (let k = out.length - 1; k >= fixed && blockCounts(out, state.players)[keep] > target; k--) {
+    if (!out[k].includes(keep)) continue;
+    const counts = blockCounts(out, state.players);
+    const bench = avail.filter((p) => p !== keep && !out[k].includes(p)).sort((a, b) => counts[a] - counts[b] || a - b);
+    for (const p of bench) {
+      const swapped = copyGrid(out);
+      swapped[k] = sorted(swapped[k].filter((q) => q !== keep).concat(p));
+      if (capHolds(actualGrid(swapped, state.block, state.replaced), state.block - 1, state.out)) {
+        out = swapped;
+        break;
+      }
+    }
   }
+  return out;
 }
 
 // "wissel": on to the next block; at the last block it ends the match. After the end it changes nothing.

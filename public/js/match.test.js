@@ -559,3 +559,33 @@ test('extra minuten: undo takes it back; the state saves and restores; a 1.1.0 s
   bad.extra = [keep, keep];
   assert.equal(normaliseMatchState(bad, plan, 's'), null, 'one wissel adds at most one entry');
 });
+
+test('extra minuten late, with a chosen bench player: the reward is exactly one block, also when only the repair fits', () => {
+  // The review's reproduction (PR #37): 11 players, 5-minute schedule, seed 1, extra minuten at the sixth change.
+  const plan = planFor('five', 11, 1);
+  const planned = blockCounts(plan.grid, plan.players);
+  let state = times(startMatch(plan), 5);
+  state = wissel(state, { keep: 1, bench: 9, extra: true });
+  assert.ok(capHolds(livePlan(state), state.block - 1, state.out));
+  const end = times(state, plan.blocks);
+  assert.equal(minutesSoFar(end)[1], (planned[1] + 1) * plan.blockSeconds);
+  assert.equal(extraSeconds(end)[1], plan.blockSeconds);
+  // Every keep and bench pair at every change, 8 to 12 players: the kept player ends at planned + 1, never more.
+  for (const schedule of ['equal', 'five']) {
+    for (let n = 8; n <= 12; n += 2) {
+      const p = planFor(schedule, n, 3);
+      const base = blockCounts(p.grid, p.players);
+      let s = startMatch(p);
+      for (let b = 1; b < p.blocks; b++) {
+        const { off, on } = nextChange(s);
+        for (const keep of off) {
+          for (const bench of on) {
+            const done = times(wissel(s, { keep, bench, extra: true }), p.blocks);
+            assert.equal(minutesSoFar(done)[keep] / p.blockSeconds, base[keep] + 1, `${schedule} ${n} block ${b} keep ${keep} bench ${bench}`);
+          }
+        }
+        s = wissel(s);
+      }
+    }
+  }
+});
