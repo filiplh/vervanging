@@ -1,6 +1,6 @@
 // Store: a small wrapper over localStorage. Data stays on the phone (ADR-002).
 // One key per thing, each with its own version in the key ("vervanging.roster.v1"), so a later shape gets a new key
-// and a migration can still read the old one. History (#10) adds its things to THINGS.
+// and a migration can still read the old one.
 
 const PREFIX = 'vervanging';
 
@@ -9,6 +9,7 @@ export const THINGS = {
   attendance: 1, // [id, ...] of the players present at the last started match
   matchSetup: 1, // the match setup saved by "Start", read by the live screen
   match: 1, // the live match state (match.js), saved after every tap
+  history: 1, // { useHistory, matches: [{ id, seconds }] }: finished matches' seconds per player (history.js)
 };
 
 export function keyOf(thing, version = THINGS[thing]) {

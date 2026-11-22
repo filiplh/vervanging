@@ -2,6 +2,7 @@
 // Roster entries carry a stable numeric id; the planner works with those ids, the screen shows names and numbers.
 
 import { makePlan, swapPlayers, planStats, PlanError, ON_COURT, SCHEDULES } from './planner.js';
+import { normaliseHistory, clearHistory, extraPriority } from './history.js';
 
 export const MAX_PLAYERS = 15;
 const MAX_NAME = 20;
@@ -201,6 +202,7 @@ export function setupScreen(root, { store, onStart }) {
   let schedule = 'equal';
   let opponent = '';
   let seed = newSeed();
+  let history = normaliseHistory(store.load('history'));
   let plan = null;
   let selected = null;
   let message = '';
@@ -211,7 +213,8 @@ export function setupScreen(root, { store, onStart }) {
     if (start.length !== ON_COURT || present.size < ON_COURT) return;
     try {
       const ids = players.filter((p) => present.has(p.id)).map((p) => p.id);
-      plan = makePlan({ players: ids, start, schedule, seed });
+      const priority = history.useHistory ? extraPriority(history, ids, seed) : [];
+      plan = makePlan({ players: ids, start, schedule, seed, extraPriority: priority });
     } catch (error) {
       if (!(error instanceof PlanError)) throw error;
       message = 'Er kon geen plan gemaakt worden. Probeer "Ander plan".';
@@ -254,6 +257,29 @@ export function setupScreen(root, { store, onStart }) {
       }
       selected = null;
     }
+    render();
+  }
+
+  // The switch and "Wis geschiedenis" (decision #10). The switch is remembered with the history. True when saved.
+  function saveHistory(next) {
+    history = next;
+    const ok = store.save('history', history);
+    if (!ok) message = 'Opslaan lukte niet: de browser weigert opslag.';
+    return ok;
+  }
+
+  function toggleHistory() {
+    message = '';
+    saveHistory({ ...history, useHistory: !history.useHistory });
+    replan();
+    render();
+  }
+
+  function wipeHistory() {
+    if (!window.confirm('De geschiedenis van alle vorige matchen wissen?')) return;
+    message = '';
+    if (saveHistory(clearHistory(history))) message = 'Geschiedenis gewist.';
+    replan();
     render();
   }
 
@@ -308,6 +334,20 @@ export function setupScreen(root, { store, onStart }) {
       el('div', { className: 'choices' },
         option('equal', 'Gelijke minuten'),
         option('five', 'Blokken van 5 minuten')));
+  }
+
+  function historySection() {
+    const count = history.matches.length;
+    return el('section', { 'aria-labelledby': 'h-history' },
+      el('h2', { id: 'h-history' }, 'Vorige matchen'),
+      el('label', { className: 'check' },
+        el('input', { type: 'checkbox', name: 'useHistory', checked: history.useHistory, onchange: toggleHistory }),
+        el('span', {}, 'Houd rekening met vorige matchen')),
+      el('p', { className: 'note' }, count === 0
+        ? 'Nog geen matchen bewaard.'
+        : `${count} ${count === 1 ? 'match' : 'matchen'} bewaard. Aan: de extra blokken gaan naar wie in vorige matchen het minst speelde.`),
+      el('div', { className: 'form-actions' },
+        el('button', { type: 'button', className: 'danger', disabled: count === 0, onclick: wipeHistory }, 'Wis geschiedenis')));
   }
 
   function opponentSection() {
@@ -377,6 +417,7 @@ export function setupScreen(root, { store, onStart }) {
       el('h1', {}, 'Match'),
       attendanceSection(),
       scheduleSection(),
+      historySection(),
       opponentSection(),
       planSection(),
     );

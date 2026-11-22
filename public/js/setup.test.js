@@ -236,15 +236,17 @@ test('roster screen: a refused write shows a Dutch message', () => {
 
 // ---------- setup screen ----------
 
-const checkboxes = (view) => find(view, 'input', (e) => e.attrs.type === 'checkbox');
+const checkboxes = (view) => find(view, 'input', (e) => e.attrs.type === 'checkbox' && e.attrs.name !== 'useHistory');
+const historySwitch = (view) => find(view, 'input', (e) => e.attrs.name === 'useHistory')[0];
 const radios = (view) => find(view, 'input', (e) => e.attrs.type === 'radio');
 const rows = (view) => find(view, 'tbody')[0]?.children ?? [];
 const rowCells = (row) => row.children.slice(1, -1).map((c) => c.className).join(',');
 
-function openSetup({ players = 10, attendance } = {}) {
+function openSetup({ players = 10, attendance, history } = {}) {
   const env = memoryStore();
   env.store.save('roster', rosterOf(players));
   if (attendance) env.store.save('attendance', attendance);
+  if (history !== undefined) env.store.save('history', history);
   env.view = new FakeElement('main');
   env.started = [];
   setupScreen(env.view, { store: env.store, onStart: (s) => env.started.push(s) });
@@ -375,4 +377,84 @@ test('setup screen: Start with refused storage shows a message and does not leav
   button(view, 'Start').fire('click');
   assert.equal(started.length, 0);
   assert.match(pageText(view), /Opslaan lukte niet/);
+});
+
+// ---------- team history on the setup screen (decision #10) ----------
+
+const minutesById = (view) => Object.fromEntries(rows(view).map((r) => {
+  const number = Number(find(r, 'span', (e) => e.className === 'number')[0].text.slice(1));
+  const [m, sec] = r.children.at(-1).text.split(':').map(Number);
+  return [number, m * 60 + sec];
+}));
+
+// 12 players, ids = numbers; players 1 to 4 never played, the others played 3000 seconds.
+const sampleHistory = (useHistory) => ({
+  useHistory,
+  matches: [{ id: 'm1', seconds: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [i + 1, i < 4 ? 0 : 3000])) }],
+});
+
+test('setup screen: with the switch on, the extra blocks go to the players with the fewest minutes so far', () => {
+  for (let run = 0; run < 5; run++) { // a new random seed each time the screen opens
+    const { view } = openSetup({ players: 12, history: sampleHistory(true) });
+    assert.equal(historySwitch(view).checked, true, 'the saved switch is shown');
+    radios(view)[1].fire('change'); // five: 40 places for 12 players, 4 extras
+    pickFive(view);
+    const minutes = minutesById(view);
+    for (let p = 1; p <= 12; p++) assert.equal(minutes[p], p <= 4 ? 1200 : 900, `player ${p}`);
+  }
+});
+
+test('setup screen: the switch toggles, is saved, and replans', () => {
+  const { view, raw, store } = openSetup({ players: 12, history: sampleHistory(false) });
+  assert.match(pageText(view), /Houd rekening met vorige matchen/);
+  assert.equal(historySwitch(view).checked, false, 'off by default in this history');
+  radios(view)[1].fire('change');
+  pickFive(view);
+  historySwitch(view).fire('change');
+  assert.equal(raw('history').useHistory, true);
+  assert.equal(historySwitch(view).checked, true);
+  const minutes = minutesById(view);
+  for (let p = 1; p <= 4; p++) assert.equal(minutes[p], 1200);
+  const next = new FakeElement('main');
+  setupScreen(next, { store, onStart() {} });
+  assert.equal(historySwitch(next).checked, true, 'remembered for the next match');
+  historySwitch(view).fire('change');
+  assert.equal(raw('history').useHistory, false);
+  assert.equal(raw('history').matches.length, 1, 'the switch changes nothing else');
+});
+
+test('setup screen: no history at all still plans, with the switch on or off', () => {
+  const { view, raw } = openSetup({ players: 12 });
+  assert.equal(historySwitch(view).checked, false);
+  assert.match(pageText(view), /Nog geen matchen bewaard/);
+  assert.equal(button(view, 'Wis geschiedenis').disabled, true);
+  pickFive(view);
+  historySwitch(view).fire('change');
+  assert.equal(raw('history').useHistory, true);
+  assert.equal(rows(view).length, 12);
+});
+
+test('setup screen: Wis geschiedenis asks first, and empties the history only when confirmed', () => {
+  const { view, raw } = openSetup({ players: 12, history: sampleHistory(true) });
+  assert.match(pageText(view), /1 match bewaard/);
+  const asked = [];
+  globalThis.window = { confirm: (q) => { asked.push(q); return false; } };
+  button(view, 'Wis geschiedenis').fire('click');
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /geschiedenis/);
+  assert.equal(raw('history').matches.length, 1, 'cancelled: nothing wiped');
+  globalThis.window = { confirm: () => true };
+  button(view, 'Wis geschiedenis').fire('click');
+  assert.deepEqual(raw('history'), { useHistory: true, matches: [] });
+  assert.match(pageText(view), /Geschiedenis gewist/);
+  assert.match(pageText(view), /Nog geen matchen bewaard/);
+});
+
+test('setup screen: a damaged stored history is treated as empty', () => {
+  for (const history of [42, 'x', [], { matches: 'x' }, { useHistory: 'yes', matches: [null, { id: 3 }] }]) {
+    const { view } = openSetup({ players: 12, history });
+    assert.equal(historySwitch(view).checked, false);
+    pickFive(view);
+    assert.equal(rows(view).length, 12);
+  }
 });

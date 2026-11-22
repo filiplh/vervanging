@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Command-line runner over the planner and the match engine, so their behaviour can be checked from outside without a
 // browser. Players are numbered 1..n.
-//   node scripts/sim.mjs plan --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>] [--json]
+//   node scripts/sim.mjs plan --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
+//                             [--history <file> [--use-history]] [--json]
+//     --history reads a team history file in the shape the app stores (public/js/history.js; player ids are the
+//     player numbers); --use-history gives the uneven extra places to the players with the fewest total seconds in it.
 //   node scripts/sim.mjs match --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
 //                              [--actions <action,...>] [--json]
 //     Actions are comma-separated: wissel, undo ("wissel*11" repeats one 11 times), wissel:keep=P (in the zone:
@@ -11,6 +14,8 @@
 // Prints one JSON object on stdout. Invalid input: exit status 2, one line on stderr, nothing on stdout.
 import { makePlan, swapPlayers, planStats, PlanError } from '../public/js/planner.js';
 import { startMatch, applyAction, onCourt, minutesSoFar, MatchError } from '../public/js/match.js';
+import { normaliseHistory, extraPriority } from '../public/js/history.js';
+import { readFileSync } from 'node:fs';
 
 class UsageError extends Error {}
 
@@ -21,7 +26,7 @@ function parse(argv) {
     const arg = rest[i];
     if (!arg.startsWith('--')) throw new UsageError(`unexpected argument "${arg}"`);
     const key = arg.slice(2);
-    if (key === 'json') { opts.json = true; continue; }
+    if (key === 'json' || key === 'use-history') { opts[key] = true; continue; }
     const value = rest[i + 1];
     if (value === undefined || value.startsWith('--')) throw new UsageError(`--${key} needs a value`);
     opts[key] = value;
@@ -42,6 +47,20 @@ function positiveInt(text, name) {
   return n;
 }
 
+function readHistory(file) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    throw new UsageError(`cannot read the history file "${file}" (${error.code ?? 'error'})`);
+  }
+  try {
+    return normaliseHistory(JSON.parse(text));
+  } catch {
+    throw new UsageError(`the history file "${file}" is not valid JSON`);
+  }
+}
+
 function planFrom(opts) {
   if (opts.players === undefined) throw new UsageError('--players is required');
   if (opts.start === undefined) throw new UsageError('--start is required');
@@ -49,7 +68,10 @@ function planFrom(opts) {
   const players = Array.from({ length: count }, (_, i) => i + 1);
   const start = numberList(opts.start, 'start');
   const seed = opts.seed === undefined ? 1 : positiveInt(opts.seed, 'seed');
-  let plan = makePlan({ players, start, schedule: opts.schedule ?? 'equal', seed });
+  const history = opts.history === undefined ? null : readHistory(opts.history);
+  if (opts['use-history'] && !history) throw new UsageError('--use-history needs --history <file>');
+  const priority = opts['use-history'] ? extraPriority(history, players, seed) : [];
+  let plan = makePlan({ players, start, schedule: opts.schedule ?? 'equal', seed, extraPriority: priority });
   if (opts.swap !== undefined) {
     const pair = numberList(opts.swap, 'swap');
     if (pair.length !== 2) throw new UsageError('--swap takes two player numbers');

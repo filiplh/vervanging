@@ -17,9 +17,10 @@ test('one versioned key per thing', () => {
   assert.equal(keyOf('roster'), 'vervanging.roster.v1');
   assert.equal(keyOf('attendance'), 'vervanging.attendance.v1');
   assert.equal(keyOf('matchSetup'), 'vervanging.matchSetup.v1');
+  assert.equal(keyOf('history'), 'vervanging.history.v1');
   assert.equal(keyOf('roster', 2), 'vervanging.roster.v2');
   assert.throws(() => keyOf('nope'), /unknown store thing/);
-  assert.deepEqual(Object.keys(THINGS).sort(), ['attendance', 'match', 'matchSetup', 'roster']);
+  assert.deepEqual(Object.keys(THINGS).sort(), ['attendance', 'history', 'match', 'matchSetup', 'roster']);
 });
 
 test('save then load round-trips through JSON under the versioned key', () => {
