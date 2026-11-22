@@ -6,8 +6,8 @@
 ## Context
 The coach wants every player of a development-focused U14 team to get fair playing time over 4 × 10 minutes, and uses
 the app alone on the bench during the match. Following the official, stopped game clock would mean pausing and
-starting a timer on every whistle. The owner asked for "simple fixed timeblocks… no need for detailed gameclock
-tracking. keep it simple." The devil's advocate in the grill raised the cost: substitutions wait for a dead ball, so a
+starting a timer on every whistle. The owner asked for "simple fixed timeblocks would probably be the easiest. no need
+for detailed gameclock tracking. keep it simple." The devil's advocate in the grill raised the cost: substitutions wait for a dead ball, so a
 planned 3:20 block can really last 2:40 or 4:20, and a player shown at 16:40 may have played 14 to 19 minutes.
 
 ## Decision

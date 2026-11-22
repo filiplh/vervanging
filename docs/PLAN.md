@@ -94,7 +94,7 @@ None.
 | --- | --- | --- |
 | Lost match state | Phone locks or page reloads mid-match and the plan is gone | Save after every tap and restore (#18); undo (#17) |
 | Planner cannot meet the sub rule for some attendance | With 9 players the plan breaks the 2–3 cap or a sit gets very long | A3 tests in phase 0; the planner relaxes the sit limit, never the cap, and shows it |
-| Browser clears stored data | iOS Safari removes site storage after about 7 days without a visit unless the app is on the home screen, so history disappears between weekly matches | Phase 1: home-screen install (#15), and the setup screen tells the coach to add it (agent's call) |
+| Browser clears stored data | ⚠ iOS Safari removes site storage after about 7 days without a visit unless the app is on the home screen, so history disappears between weekly matches | Phase 1: home-screen install (#15), and the setup screen tells the coach to add it (agent's call) |
 | App changes mid-match | A release lands during a game | Manual releases only (#3) |
 | Fairness drift | Players notice unequal real minutes | Accepted (#16); A2 checks it |
 
@@ -111,13 +111,14 @@ production URL.
       meeting the sub rule, with unit tests over 8–12 players (#6, #7, #20, #21, #22, A3)
 - [ ] Roster and match setup screen: name + number, attendance (last match pre-ticked), starting five, schedule,
       plan grid with swaps, start (#14, #19, #20, #7, #2)
-- [ ] Live screen: block, sub time, on court, off/on next, "Wissel", undo, minutes per player; state saved after every
-      tap and restored after reload (#12, #17, #18, #4)
+- [ ] Live screen: block, sub time, on court, off/on next, "Wissel", undo, minutes per player; an end-of-match screen
+      with each player's minutes; state saved after every tap and restored after reload (#12, #17, #18, #4)
 - [ ] Deploy: Wrangler config serving `public/` as static assets for Worker `vervanging`; first production release
       approved by the owner (#1, #3)
-- **Exit:** On the coach's phone at the production URL, the coach enters 12 players, sets up an equal-minutes match
-  in under one minute, taps "Wissel" through all 12 blocks with one reload in the middle, and the end screen shows
-  16:40 for every player. Checked by the owner.
+- **Exit:** On the coach's phone at the production URL, the coach enters 12 players, then sets up an equal-minutes
+  match in under one minute (roster entry not counted), taps "Wissel" at each of the 11 sub moments and ends the match
+  after block 12, with one reload in the middle, and the end-of-match screen shows 16:40 for every player. Checked by
+  the owner.
 
 ### Phase 1: real matches
 Goal: the app handles what happens in a real game and keeps history, offline.

@@ -25,7 +25,7 @@ None.
 | D1 | Stack: plain HTML/CSS/JS, no build, no dependencies, served by a Cloudflare Worker; tests with `node --test` | 4-hour budget, no setup | user (install PR #2) |
 | D2 | On-screen text Dutch (`nl`) only; code, issues and plan in English | users are a Flemish coach and staff | user (install PR #2) |
 | D3 | Releases to production are manual; first release approved by the owner | the app must never change mid-match | user (install PR #2) |
-| D4 | No game-clock tracking. Playing time is counted in fixed time blocks; a player's minutes = blocks played × block length. Subs happen at the first dead ball after a block ends | "simple fixed timeblocks would probably be the easiest… keep it simple" | user |
+| D4 | No game-clock tracking. Playing time is counted in fixed time blocks; a player's minutes = blocks played × block length. Subs happen at the first dead ball after a block ends | "simple fixed timeblocks would probably be the easiest. no need for detailed gameclock tracking. keep it simple." | user |
 | D5 | Premises confirmed: one coach alone on a phone on the bench; no league playing-time rule applies; one device, data on the phone, no login or sync | premise round | user |
 | D6 | Two schedules. Equal minutes: 12 blocks of 3:20 (subs at 6:40 and 3:20 in each quarter), every player 5 blocks = 16:40 with 12 players. 5-minute blocks: 8 blocks of 5:00 (sub at 5:00 and at quarter breaks); with 12 players 4 play 4 blocks (20 min), 8 play 3 (15 min) | 200 player-minutes / 12 is only exact with 60 places | user |
 | D7 | Before the match the app generates the full plan as a grid (players × blocks), spread so nobody sits or plays long runs in a row; the coach can swap two players before tip-off | a plan to read at a glance | user |
@@ -37,7 +37,7 @@ None.
 | D13 | Overtime is not planned or counted in v1 | rare; keeps block math clean | user |
 | D14 | Roster entered once and stored on the phone: first name and jersey number, up to 15 players; attendance per match | | user |
 | D15 | Works offline after the first visit (service worker) and can be added to the home screen | bad reception in sports halls | user |
-| D16 | Fixed blocks, no timer, stand after devil's advocate: real minutes drift (subs wait for a dead ball, ±1 min per block); fairness is counted in blocks and evens out over the match and season | keeps every action one tap | user |
+| D16 | Fixed blocks, no timer, stand after devil's advocate: real minutes drift (subs wait for a dead ball, ±1 min per block); fairness is counted in blocks and evens out over the match and season | keeps every action one tap; the devil's advocate example was a planned 3:20 block really lasting 2:40 or 4:20, so a player shown at 16:40 may play 14 to 19 minutes | user |
 | D17 | "Ongedaan maken" undoes the last live action (Wissel, in the zone, uit/terug); one step | double tap in a hurry (pre-mortem) | user |
 | D18 | Match state is saved after every tap and restored exactly after a reload or restart; the screen is kept awake during a match where the browser allows it (Wake Lock) | phone locks, reloads (pre-mortem) | user |
 | D19 | Match setup is one screen: attendance (last match pre-ticked), schedule, history switch, plan check with swaps, start; opponent name optional; under a minute | setup skipped before tip-off (pre-mortem) | user |
@@ -58,7 +58,7 @@ None.
 | --- | --- | --- | --- |
 
 ## Proposed follow-ups
-- (approved) Plan: factory-plan writes the plan from D1–D22, with one phase sized to the ~4-hour budget and an exit test of one real (or scrimmage) match without falling back to gut feel (A1).
+- (approved) Plan: factory-plan writes the plan from D1–D23, with one phase sized to the ~4-hour budget and an exit test of one real (or scrimmage) match without falling back to gut feel (A1).
 - (approved) ADR candidates (hard to reverse, surprising, real trade-off): D4/D16 (fixed blocks, no game clock) and D5 (one device, data only on the phone).
 - (approved) Glossary terms: blok (block), wissel (sub moment), in the zone, uit/terug, schema (gelijke minuten / blokken van 5 minuten).
 - (approved) Commit this log with the plan PR (no separate PR).

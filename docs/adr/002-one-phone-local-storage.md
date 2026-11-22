@@ -15,8 +15,9 @@ often have poor reception.
 
 ## Consequences
 - No server code, no accounts, no personal data leaves the phone.
-- Data is lost if the phone is lost or the browser clears site data; iOS Safari clears it after about 7 days without a
-  visit unless the app is on the home screen, so phase 1 adds the home-screen install and a hint.
+- Data is lost if the phone is lost or the browser clears site data; iOS Safari may clear it after about 7 days without
+  a visit unless the app is on the home screen (⚠ unconfirmed: from memory of WebKit's storage policy, check before
+  phase 1), so phase 1 adds the home-screen install and a hint.
 - A second device (an assistant) or a season export would need a new ADR.
 
 ## Alternatives considered
