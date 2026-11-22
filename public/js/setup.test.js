@@ -10,6 +10,7 @@ import { makePlan, planStats } from './planner.js';
 import {
   MAX_PLAYERS, normaliseRoster, checkPlayer, addPlayer, editPlayer, removePlayer, normaliseAttendance,
   initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen, isInstalled,
+  formatDuration, seasonNote,
 } from './setup.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
@@ -237,6 +238,68 @@ test('roster screen: a refused write shows a Dutch message', () => {
   rosterScreen(view, { store });
   fillForm(view, 'Lien', '7');
   assert.match(pageText(view), /Opslaan lukte niet/);
+});
+
+// ---------- season totals on the roster screen (decision #26) ----------
+
+test('formatDuration: m:ss under an hour, h:mm:ss from an hour; seasonNote counts the saved matches', () => {
+  assert.equal(formatDuration(0), '0:00');
+  assert.equal(formatDuration(3000), '50:00');
+  assert.equal(formatDuration(3599.4), '59:59');
+  assert.equal(formatDuration(3600), '1:00:00');
+  assert.equal(formatDuration(3 * 3600 + 5 * 60 + 7), '3:05:07');
+  assert.equal(formatDuration(-1), '0:00');
+  assert.equal(formatDuration(NaN), '0:00');
+  assert.match(seasonNote(0), /nog geen matchen bewaard/);
+  assert.match(seasonNote(1), /over 1 bewaarde match\./);
+  assert.match(seasonNote(2), /over 2 bewaarde matchen\./);
+});
+
+function openRoster(history) {
+  const env = memoryStore();
+  env.store.save('roster', rosterOf(6));
+  if (history !== undefined) env.store.save('history', history);
+  env.view = new FakeElement('main');
+  rosterScreen(env.view, { store: env.store });
+  return env;
+}
+const totalsShown = (view) => find(view, 'li').map((li) => find(li, 'span', (e) => e.className.includes('season-total'))[0].children.at(-1).text);
+
+test('roster screen: each player shows the season total and the note the match count; no minutes shows 0:00', () => {
+  const history = {
+    useHistory: false,
+    clearedAt: null,
+    matches: [
+      { id: '2026-11-01T10:00:00.000Z', seconds: { 1: 1500, 2: 1200, 3: 2000 } },
+      { id: '2026-11-08T10:00:00.000Z', seconds: { 1: 2100.4, 2: 300, 4: 45 } }, // 3 absent, 4 only here
+    ],
+  };
+  const { view } = openRoster(history);
+  assert.deepEqual(totalsShown(view), ['1:00:00', '25:00', '33:20', '0:45', '0:00', '0:00']);
+  assert.match(pageText(view), /over 2 bewaarde matchen/);
+});
+
+test('roster screen: no history, a damaged one or a cleared one shows 0:00 for everyone', () => {
+  const cleared = { useHistory: true, clearedAt: '2026-11-22T10:00:00.000Z', matches: [] };
+  for (const history of [undefined, 42, 'x', { matches: [null, { id: 3 }] }, cleared]) {
+    const { view } = openRoster(history);
+    assert.deepEqual(totalsShown(view), Array(6).fill('0:00'), `history ${JSON.stringify(history)}`);
+    assert.match(pageText(view), /nog geen matchen bewaard/);
+  }
+  const empty = new FakeElement('main');
+  rosterScreen(empty, { store: memoryStore().store });
+  assert.doesNotMatch(pageText(empty), /Speeltijd/, 'no note without players');
+});
+
+test('roster screen: Wis geschiedenis on the Match screen resets the totals', () => {
+  const env = openSetup({ players: 6, history: { useHistory: false, clearedAt: null, matches: [{ id: 'm1', seconds: { 1: 600 } }] } });
+  const before = new FakeElement('main');
+  rosterScreen(before, { store: env.store });
+  assert.equal(totalsShown(before)[0], '10:00');
+  button(env.view, 'Wis geschiedenis').fire('click');
+  const after = new FakeElement('main');
+  rosterScreen(after, { store: env.store });
+  assert.deepEqual(totalsShown(after), Array(6).fill('0:00'));
 });
 
 // ---------- setup screen ----------

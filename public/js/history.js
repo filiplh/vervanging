@@ -82,6 +82,12 @@ export function totalSeconds(history) {
   return totals;
 }
 
+// The season totals (decision #26), as the Spelers screen and the runner show them: the number of saved matches and
+// the total seconds per player id over all of them. A player in no saved match is not in `totals` (counts as 0).
+export function seasonSummary(history) {
+  return { matches: history.matches.length, totals: totalSeconds(history) };
+}
+
 // The present players ordered for the uneven extra places (the planner's `extraPriority`): fewest total seconds first;
 // a player not in the history counts as 0; players in the history who are not present are ignored. Ties are put in
 // a random order from `seed`, so the same seed and history give the same plan.

@@ -13,10 +13,13 @@
 //     once; on court, a replacement comes on, the block still counts for P) and terug=P (from the next block on).
 //     Prints the final match state; onCourt shows the current block as it is on court, and overview lists every
 //     player in number order with seconds (as minutes), onCourt and out (the live screen's minutes at a glance).
+//   node scripts/sim.mjs history --history <file> [--json]
+//     Prints the season totals of a team history file (decision #26, the Spelers screen): matches (the number of
+//     saved matches) and totals (seconds per player id over all of them; a player in no match is left out).
 // Prints one JSON object on stdout. Invalid input: exit status 2, one line on stderr, nothing on stdout.
 import { makePlan, swapPlayers, planStats, PlanError } from '../public/js/planner.js';
 import { startMatch, applyAction, onCourt, minutesSoFar, extraSeconds, minutesOverview, MatchError } from '../public/js/match.js';
-import { normaliseHistory, extraPriority } from '../public/js/history.js';
+import { normaliseHistory, extraPriority, seasonSummary } from '../public/js/history.js';
 import { readFileSync } from 'node:fs';
 
 class UsageError extends Error {}
@@ -130,10 +133,16 @@ function runMatch(opts) {
   };
 }
 
+function runHistory(opts) {
+  if (opts.history === undefined) throw new UsageError('--history <file> is required');
+  return seasonSummary(readHistory(opts.history));
+}
+
 function main(argv) {
   const { command, opts } = parse(argv);
   if (command === 'match') return runMatch(opts);
-  if (command !== 'plan') throw new UsageError(`unknown command "${command ?? ''}": use plan or match`);
+  if (command === 'history') return runHistory(opts);
+  if (command !== 'plan') throw new UsageError(`unknown command "${command ?? ''}": use plan, match or history`);
   const plan = planFrom(opts);
   const stats = planStats(plan);
   return {
