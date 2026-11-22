@@ -107,7 +107,7 @@ jobs:
     permissions:
       contents: read
       issues: write # the held-release issue and the approval links on held pull requests
-      pull-requests: read # the pull requests merged in the range, their gate records, reviews and holds
+      pull-requests: write # reads the pull requests merged in the range, their gate records, reviews and holds; the approval link on held pull requests needs write (local edit of the cloudflare-workers recipe template until factory-update brings the fix, #25)
       checks: read # the check runs on each gated head
       actions: read # whether a failed job really ran, or Actions never started it (local evidence counts only then)
       statuses: read # the commit statuses on each gated head
