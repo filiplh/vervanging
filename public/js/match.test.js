@@ -11,6 +11,7 @@ const players = (n) => Array.from({ length: n }, (_, i) => i + 1);
 const planFor = (schedule, n = 12, seed = 1) => makePlan({ players: players(n), start: [1, 2, 3, 4, 5], schedule, seed });
 const times = (state, n, fn = wissel) => { for (let i = 0; i < n; i++) state = fn(state); return state; };
 const roundTrip = (state) => JSON.parse(JSON.stringify(state));
+const applyAll = (state, actions) => actions.reduce((s, a) => applyAction(s, a), state);
 
 test('a new match is at block 1 with the basisvijf on court and nothing to undo', () => {
   const state = startMatch(planFor('equal'), 'saved-1');
@@ -367,7 +368,7 @@ test('random mixed sequences: the sub rule, nobody out playing, one-step undo an
   let cases = 0;
   for (const schedule of ['equal', 'five']) {
     for (let n = 8; n <= 12; n++) {
-      for (let seed = 1; seed <= 6; seed++) {
+      for (let seed = 1; seed <= 25; seed++) {
         const plan = planFor(schedule, n, seed);
         const random = seededRandom(seed * 97 + n);
         let state = startMatch(plan, 's');
@@ -381,12 +382,12 @@ test('random mixed sequences: the sub rule, nobody out playing, one-step undo an
             else if (x < 0.35) {
               const pool = state.players.filter((p) => !state.out.includes(p));
               state = uit(state, pool[Math.floor(random() * pool.length)]);
-            } else if (x < 0.45 && state.out.length) state = terug(state, state.out[0]);
+            } else if (x < 0.45 && state.out.length) state = terug(state, state.out[Math.floor(random() * state.out.length)]);
             else if (x < 0.5) state = undo(state);
             else state = wissel(state);
           } catch (error) {
             if (!(error instanceof MatchError)) throw error;
-            assert.match(error.message, /last block|at least 5|no change left|the match has ended/, error.message);
+            assert.match(error.message, /last block|at least 5|no change left|the match has ended|no player is left/, error.message);
             state = wissel(state);
           }
           cases += 1;
@@ -399,7 +400,7 @@ test('random mixed sequences: the sub rule, nobody out playing, one-step undo an
       }
     }
   }
-  assert.ok(cases > 500);
+  assert.ok(cases > 2000);
 });
 
 // ---------- uit during a block: immediate replacement (owner's decision on #9) ----------
@@ -464,5 +465,28 @@ test('damaged replacement pairs are refused on load', () => {
     assert.equal(normaliseMatchState({ ...good, replaced }, plan, 's'), null, JSON.stringify(replaced));
   }
   const ended = roundTrip(times(startMatch(plan, 's'), 12));
-  assert.equal(normaliseMatchState({ ...ended, replaced: [[2, 6]] }, plan, 's'), null);
+  assert.equal(normaliseMatchState({ ...ended, replaced: [[1, 6]] }, plan, 's'), null, 'after the end: pairs of the last block only (1 did not start it)');
+});
+
+test('F4: a starter who left the block and came back with terug is not picked as a replacement in that block', () => {
+  const plan = planFor('equal', 8);
+  const state = applyAll(startMatch(plan, 's'), ['wissel', 'wissel', { type: 'uit', player: 6 }, { type: 'terug', player: 6 }, { type: 'uit', player: 3 }]);
+  assert.ok(replacements(state).every(([, r]) => !state.grid[state.block - 1].includes(r)), 'no starter of this block comes back on in it');
+  assert.equal(new Set(onCourt(state)).size, 5);
+  assert.deepEqual(normaliseMatchState(roundTrip(state), plan, 's'), state, 'the state reloads');
+  const next = wissel(state);
+  assert.deepEqual(normaliseMatchState(roundTrip(next), plan, 's'), next, 'and so does the next block, with its undo snapshot');
+  assert.deepEqual(normaliseMatchState(roundTrip(undo(next)), plan, 's'), undo(next));
+});
+
+test('uit in the last block: the replacement is still on court after Einde match', () => {
+  const plan = planFor('equal');
+  const last = times(startMatch(plan), 11);
+  const player = onCourt(last)[0];
+  const out = uit(last, player);
+  const ended = wissel(out);
+  assert.equal(ended.ended, true);
+  assert.deepEqual(onCourt(ended), onCourt(out), 'the line-up that finished the match');
+  assert.deepEqual(normaliseMatchState(roundTrip(ended), plan, null), ended);
+  assert.deepEqual(minutesSoFar(ended), minutesSoFar(wissel(last)), 'minutes unchanged: the block counts for the starter');
 });

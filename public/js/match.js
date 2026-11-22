@@ -135,7 +135,7 @@ export function wissel(state, { keep = null, bench = null } = {}) {
   const previous = snapshot(state);
   if (state.block >= state.blocks) {
     if (keep != null) throw new MatchError('no change left: this is the last block');
-    return { ...state, ended: true, replaced: [], previous };
+    return { ...state, ended: true, previous }; // the last block's replacements stay: they finished the match
   }
   const grid = keep == null ? state.grid : keepOn(state, keep, bench);
   return { ...state, grid, block: state.block + 1, replaced: [], previous };
@@ -188,9 +188,14 @@ export function uit(state, player) {
   let replaced = copyPairs(state.replaced);
   let fromNext = false;
   if (court.includes(player)) {
-    const pick = (list) => list.filter((p) => !out.includes(p) && !court.includes(p)).sort(fewest)[0];
+    // A starter of this block who already left it (uit, even when back with terug, which counts from the next block)
+    // does not come back on in the same block.
+    const startedHere = state.grid[state.block - 1];
+    const pick = (list) => list.filter((p) => !out.includes(p) && !court.includes(p) && !startedHere.includes(p))
+      .sort(fewest)[0];
     const early = nextRow ? pick(nextRow) : undefined;
     const replacement = early ?? pick(state.players);
+    if (replacement === undefined) throw new MatchError('no player is left to come on');
     fromNext = early !== undefined;
     const pair = replaced.find(([, r]) => r === player); // the player was a replacement already
     if (pair) pair[1] = replacement;
@@ -302,12 +307,11 @@ function validOut(out, fresh) {
     && fresh.players.length - out.length >= ON_COURT;
 }
 
-// [starter, replacement] pairs for the current block: each starter is in the current block's credited line-up, each
-// replacement is available and not in it, all distinct; none after the end.
+// [starter, replacement] pairs for the current block (after the end, the last block): each starter is in the block's
+// credited line-up, each replacement is available and not in it, all distinct.
 function validReplaced(p, fresh) {
   const { replaced } = p;
   if (!Array.isArray(replaced)) return false;
-  if (p.ended && replaced.length > 0) return false;
   const row = Array.isArray(p.grid) ? p.grid[p.block - 1] : null;
   if (!Array.isArray(row)) return false;
   const seen = new Set();
