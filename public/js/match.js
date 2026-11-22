@@ -17,7 +17,25 @@ export class MatchError extends Error {}
 
 const sorted = (list) => list.slice().sort((a, b) => a - b);
 const copyGrid = (grid) => grid.map((court) => court.slice());
-const snapshot = (state) => ({ block: state.block, ended: state.ended, grid: copyGrid(state.grid), out: state.out.slice() });
+const copyPairs = (pairs) => pairs.map(([a, b]) => [a, b]);
+const snapshot = (state) => ({
+  block: state.block, ended: state.ended, grid: copyGrid(state.grid), out: state.out.slice(),
+  replaced: copyPairs(state.replaced),
+});
+
+// The current block as it is on court: a player marked uit there has left at once and a replacement came on
+// (decision on #9, 22 Nov 2026). `replaced` holds [starter, replacement] pairs for the current block only; the grid
+// keeps the starter, because the block's minutes count for the player who started it.
+function actualRow(row, replaced) {
+  return sorted(row.map((p) => { const pair = replaced.find(([a]) => a === p); return pair ? pair[1] : p; }));
+}
+
+// The grid with the current block as it is on court: the one to count subs on and to plan from.
+function actualGrid(grid, block, replaced) {
+  const actual = copyGrid(grid);
+  actual[block - 1] = actualRow(grid[block - 1], replaced);
+  return actual;
+}
 
 // A new match from a plan (planner.js › makePlan, after swaps): block 1 is being played, nothing to undo.
 // `setupSavedAt` ties the state to the saved match setup, so a state from an older setup is never restored.
@@ -34,6 +52,7 @@ export function startMatch(plan, setupSavedAt = null) {
     base: copyGrid(grid), // the plan as set up; ties a saved state to its plan
     grid: copyGrid(grid),
     out: [],
+    replaced: [],
     block: 1,
     ended: false,
     previous: null,
@@ -90,7 +109,7 @@ function keepOn(state, keep, bench) {
     if (!kept[k].includes(keep) || kept[k].includes(q)) continue;
     const swapped = copyGrid(kept);
     swapped[k] = sorted(swapped[k].filter((p) => p !== keep).concat(q));
-    if (capHolds(swapped, next, state.out)) return swapped;
+    if (capHolds(actualGrid(swapped, state.block, state.replaced), next, state.out)) return swapped;
   }
   const replan = (targets) => {
     try {
@@ -116,37 +135,83 @@ export function wissel(state, { keep = null, bench = null } = {}) {
   const previous = snapshot(state);
   if (state.block >= state.blocks) {
     if (keep != null) throw new MatchError('no change left: this is the last block');
-    return { ...state, ended: true, previous };
+    return { ...state, ended: true, replaced: [], previous };
   }
   const grid = keep == null ? state.grid : keepOn(state, keep, bench);
-  return { ...state, grid, block: state.block + 1, previous };
+  return { ...state, grid, block: state.block + 1, replaced: [], previous };
 }
 
 // Re-spreads the blocks after the current one over the players who are not out (uit and terug, decision #11).
-function respread(state, out) {
+// Targets come from the credited grid (minutes); the search plans from the current block as it is on court, so a
+// replacement already on is not counted as coming on, and the current block keeps its credited line-up afterwards.
+// With `fixedNext`, the next block is set to that line-up first and only the blocks after it are planned.
+function respread(state, out, replaced, fixedNext = null) {
   const avail = state.players.filter((p) => !out.includes(p));
   if (avail.length < ON_COURT) throw new MatchError(`at least ${ON_COURT} players must be available`);
-  const targets = evenTargets({ grid: state.grid, players: state.players, available: avail, fromBlock: state.block });
+  const base = copyGrid(state.grid);
+  if (fixedNext) base[state.block] = sorted(fixedNext);
+  const fromBlock = fixedNext ? state.block + 1 : state.block;
+  const targets = evenTargets({ grid: base, players: state.players, available: avail, fromBlock });
+  const actual = actualGrid(base, state.block, replaced);
+  const credited = blockCounts(base.slice(0, fromBlock), state.players);
+  const onCourtCounts = blockCounts(actual.slice(0, fromBlock), state.players);
+  const searchTargets = Object.fromEntries(state.players.map((p) => [p, targets[p] + onCourtCounts[p] - credited[p]]));
+  let planned;
   try {
-    return replanRemaining({
-      grid: state.grid, players: state.players, available: avail, fromBlock: state.block, targets,
+    planned = replanRemaining({
+      grid: actual, players: state.players, available: avail, fromBlock, targets: searchTargets,
       blockSeconds: state.blockSeconds, seed: state.block,
     });
   } catch (error) {
     if (!(error instanceof PlanError)) throw error;
     // No plan meets the targets under the sub rule: never refuse a player who is out, repair instead.
-    return repairRemaining({ grid: state.grid, players: state.players, available: avail, fromBlock: state.block });
+    planned = repairRemaining({ grid: actual, players: state.players, available: avail, fromBlock });
   }
+  planned[state.block - 1] = state.grid[state.block - 1].slice();
+  return planned;
 }
 
-// "uit": from the next block on, `player` plays no more this match.
+// "uit": `player` plays no more this match (decision on #9, 22 Nov 2026). On court, they leave at once and a
+// replacement comes on: a player due on at the next wissel when there is one, else a bench player; fewest minutes
+// first, ties to the lowest number. The current block still counts for the player who started it. The rest of the
+// plan is recalculated only when `player` was planned in a later block. Possible in the last block too.
 export function uit(state, player) {
   if (state.ended) throw new MatchError('the match has ended');
   if (!state.players.includes(player)) throw new MatchError(`player ${player} is not in this match`);
   if (state.out.includes(player)) throw new MatchError(`player ${player} is already out`);
-  if (state.block >= state.blocks) throw new MatchError('no block left: this is the last block');
   const out = sorted(state.out.concat(player));
-  return { ...state, grid: respread(state, out), out, previous: snapshot(state) };
+  if (state.players.length - out.length < ON_COURT) throw new MatchError(`at least ${ON_COURT} players must be available`);
+  const court = onCourt(state);
+  const minutes = minutesSoFar(state);
+  const fewest = (a, b) => minutes[a] - minutes[b] || a - b;
+  const nextRow = state.block < state.blocks ? state.grid[state.block] : null;
+  let replaced = copyPairs(state.replaced);
+  let fromNext = false;
+  if (court.includes(player)) {
+    const pick = (list) => list.filter((p) => !out.includes(p) && !court.includes(p)).sort(fewest)[0];
+    const early = nextRow ? pick(nextRow) : undefined;
+    const replacement = early ?? pick(state.players);
+    fromNext = early !== undefined;
+    const pair = replaced.find(([, r]) => r === player); // the player was a replacement already
+    if (pair) pair[1] = replacement;
+    else replaced = replaced.concat([[player, replacement]]);
+  }
+  const plannedLater = state.grid.slice(state.block).some((row) => row.includes(player));
+  if (!plannedLater) return { ...state, grid: copyGrid(state.grid), out, replaced, previous: snapshot(state) };
+  // The replacement came from the next wissel, so that wissel stays as planned, without the uit player: a player due
+  // off stays on in their place when one is needed (fewest minutes first). Only the blocks after it are recalculated.
+  let fixedNext = null;
+  if (fromNext) {
+    fixedNext = nextRow.filter((p) => p !== player);
+    if (fixedNext.length < ON_COURT) {
+      const now = actualRow(state.grid[state.block - 1], replaced);
+      const stay = now.filter((p) => !out.includes(p) && !fixedNext.includes(p)).sort(fewest)[0]
+        ?? state.players.filter((p) => !out.includes(p) && !fixedNext.includes(p)).sort(fewest)[0];
+      fixedNext = fixedNext.concat(stay);
+    }
+  }
+  const grid = respread(state, out, replaced, fixedNext);
+  return { ...state, grid, out, replaced, previous: snapshot(state) };
 }
 
 // "terug": `player` is available again from the next block on.
@@ -155,14 +220,14 @@ export function terug(state, player) {
   if (!state.out.includes(player)) throw new MatchError(`player ${player} is not out`);
   if (state.block >= state.blocks) throw new MatchError('no block left: this is the last block');
   const out = state.out.filter((p) => p !== player);
-  return { ...state, grid: respread(state, out), out, previous: snapshot(state) };
+  return { ...state, grid: respread(state, out, state.replaced), out, previous: snapshot(state) };
 }
 
 // "undo": back to the state before the last action, one step only. With nothing to undo it changes nothing.
 export function undo(state) {
   if (!state.previous) return state;
-  const { block, ended, grid, out } = state.previous;
-  return { ...state, block, ended, grid: copyGrid(grid), out: out.slice(), previous: null };
+  const { block, ended, grid, out, replaced } = state.previous;
+  return { ...state, block, ended, grid: copyGrid(grid), out: out.slice(), replaced: copyPairs(replaced), previous: null };
 }
 
 export function canUndo(state) {
@@ -180,15 +245,25 @@ export function applyAction(state, action) {
   throw new MatchError(`unknown action "${a.type}": use wissel, undo, uit or terug`);
 }
 
-// The players on court in the current block, sorted.
+// The players on court in the current block, sorted, with replacements for players who went uit in it.
 export function onCourt(state) {
-  return sorted(state.grid[state.block - 1]);
+  return actualRow(state.grid[state.block - 1], state.replaced);
+}
+
+// The live plan with the current block as it is on court (what the sub rule is checked on).
+export function livePlan(state) {
+  return actualGrid(state.grid, state.block, state.replaced);
+}
+
+// The [starter, replacement] pairs of the current block.
+export function replacements(state) {
+  return copyPairs(state.replaced);
 }
 
 // Who goes off and who comes on at the next wissel; null at the last block or after the end.
 export function nextChange(state) {
   if (state.ended || state.block >= state.blocks) return null;
-  const now = state.grid[state.block - 1];
+  const now = onCourt(state);
   const next = state.grid[state.block];
   return { off: sorted(now.filter((p) => !next.includes(p))), on: sorted(next.filter((p) => !now.includes(p))) };
 }
@@ -227,14 +302,35 @@ function validOut(out, fresh) {
     && fresh.players.length - out.length >= ON_COURT;
 }
 
+// [starter, replacement] pairs for the current block: each starter is in the current block's credited line-up, each
+// replacement is available and not in it, all distinct; none after the end.
+function validReplaced(p, fresh) {
+  const { replaced } = p;
+  if (!Array.isArray(replaced)) return false;
+  if (p.ended && replaced.length > 0) return false;
+  const row = Array.isArray(p.grid) ? p.grid[p.block - 1] : null;
+  if (!Array.isArray(row)) return false;
+  const seen = new Set();
+  for (const pair of replaced) {
+    if (!Array.isArray(pair) || pair.length !== 2) return false;
+    const [starter, replacement] = pair;
+    if (!row.includes(starter) || row.includes(replacement) || !fresh.players.includes(replacement)) return false;
+    if (Array.isArray(p.out) && p.out.includes(replacement)) return false;
+    if (seen.has(starter) || seen.has(replacement)) return false;
+    seen.add(starter);
+    seen.add(replacement);
+  }
+  return true;
+}
+
 const samePrefix = (a, b, blocks) => JSON.stringify(a.slice(0, blocks)) === JSON.stringify(b.slice(0, blocks));
 
 // Version 1 states (before in the zone, uit and terug) followed the plan's grid and had no one out.
 function fromVersion1(raw, fresh) {
   const previous = raw.previous && typeof raw.previous === 'object'
-    ? { block: raw.previous.block, ended: raw.previous.ended, grid: copyGrid(fresh.grid), out: [] }
+    ? { block: raw.previous.block, ended: raw.previous.ended, grid: copyGrid(fresh.grid), out: [], replaced: [] }
     : raw.previous;
-  return { ...raw, version: MATCH_VERSION, base: copyGrid(fresh.grid), grid: raw.grid, out: [], previous };
+  return { ...raw, version: MATCH_VERSION, base: copyGrid(fresh.grid), grid: raw.grid, out: [], replaced: [], previous };
 }
 
 // A match state read from the store, checked against the plan it must belong to. Returns the state, or null when it
@@ -255,13 +351,18 @@ export function normaliseMatchState(stored, plan, setupSavedAt = null) {
   if (JSON.stringify(raw.base) !== JSON.stringify(fresh.base)) return null;
   const point = (p) => p && typeof p === 'object' && Number.isInteger(p.block) && p.block >= 1 && p.block <= fresh.blocks
     && typeof p.ended === 'boolean' && (!p.ended || p.block === fresh.blocks)
-    && validGrid(p.grid, fresh) && validOut(p.out, fresh);
+    && validGrid(p.grid, fresh) && validOut(p.out, fresh) && validReplaced(p, fresh);
   if (!point(raw)) return null;
   // The first block is the coach's starting five and never changes.
   if (JSON.stringify(sorted(raw.grid[0])) !== JSON.stringify(sorted(fresh.grid[0]))) return null;
   // From the current block on: nobody who is out plays, and every change keeps the sub rule.
-  const planHolds = (p) => !p.grid.slice(p.block).some((court) => court.some((q) => p.out.includes(q)))
-    && capHolds(p.grid, p.block - 1, p.out);
+  // From the current block on (as it is on court; after the end, nothing): nobody out plays, and every change keeps
+  // the sub rule.
+  const planHolds = (p) => {
+    const actual = actualGrid(p.grid, p.block, p.replaced);
+    return !actual.slice(p.ended ? p.block : p.block - 1).some((court) => court.some((q) => p.out.includes(q)))
+      && capHolds(actual, p.block - 1, p.out);
+  };
   if (!planHolds(raw)) return null;
   if (raw.previous != null) {
     // The only history an action leaves: a wissel from the active block just before this one (or, after the end,
@@ -274,5 +375,8 @@ export function normaliseMatchState(stored, plan, setupSavedAt = null) {
     if (!samePrefix(prev.grid, raw.grid, prev.block)) return null;
   }
   const previous = raw.previous == null ? null : snapshot(raw.previous);
-  return { ...fresh, grid: copyGrid(raw.grid), out: raw.out.slice(), block: raw.block, ended: raw.ended, previous };
+  return {
+    ...fresh, grid: copyGrid(raw.grid), out: raw.out.slice(), replaced: copyPairs(raw.replaced), block: raw.block,
+    ended: raw.ended, previous,
+  };
 }

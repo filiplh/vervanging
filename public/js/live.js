@@ -6,7 +6,7 @@ import { el, normaliseMatchSetup, formatSeconds, byNumber } from './setup.js';
 import { SCHEDULES } from './planner.js';
 import {
   startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
-  normaliseMatchState, proposedBench, MatchError,
+  normaliseMatchState, proposedBench, replacements, MatchError,
 } from './match.js';
 
 const SAVE_FAILED = 'Opslaan lukte niet: de browser weigert opslag.';
@@ -96,13 +96,14 @@ export function liveScreen(root, { store }) {
             court.includes(id) && el('span', { className: 'visually-hidden' }, ' (op het veld)'),
             isOut(id) && el('span', { className: 'tag' }, ' uit')),
           el('td', { className: 'min' }, formatSeconds(minutes[id])),
-          canChangeAvailability() && el('td', { className: 'act' }, isOut(id)
-            ? el('button', { type: 'button', className: 'chip', onclick: () => act(() => terug(state, id)) }, 'Terug')
+          !state.ended && el('td', { className: 'act' }, isOut(id)
+            ? canTerug() && el('button', { type: 'button', className: 'chip', onclick: () => act(() => terug(state, id)) }, 'Terug')
             : el('button', { type: 'button', className: 'chip', onclick: () => act(() => uit(state, id)) }, 'Uit'))))));
   }
 
-  // Uit and terug take effect from the next block, so they are offered while a next block exists.
-  const canChangeAvailability = () => !state.ended && state.block < state.blocks;
+  // Uit works at any time during the match (on court, a replacement comes on at once). Terug takes effect from the
+  // next block, so it is offered while a next block exists.
+  const canTerug = () => !state.ended && state.block < state.blocks;
 
   const undoButton = () => el('button', { type: 'button', className: 'undo', disabled: !canUndo(state), onclick: () => act(() => undo(state)) },
     'Ongedaan maken');
@@ -117,7 +118,9 @@ export function liveScreen(root, { store }) {
       el('p', { className: 'sub-time' }, subTimeText(state)),
       el('section', { 'aria-labelledby': 'h-court' },
         el('h2', { id: 'h-court' }, 'Op het veld'),
-        nameList(onCourt(state), 'court')),
+        nameList(onCourt(state), 'court'),
+        replacements(state).map(([starter, replacement]) => el('p', { className: 'note replaced' },
+          name(replacement), ' kwam erin voor ', name(starter), ' (uit). Het blok telt voor ', name(starter), '.'))),
       change && el('section', { 'aria-labelledby': 'h-next', className: 'next' },
         el('h2', { id: 'h-next' }, 'Bij de volgende wissel'),
         el('div', { className: 'change' },

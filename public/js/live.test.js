@@ -233,7 +233,7 @@ test('live screen: the button reads Einde match at the last block', () => {
     wisselButton(view).fire('click');
   }
   assert.equal(wisselButton(view).text, 'Einde match');
-  assert.equal(chips(view, 'Uit').length, 0, 'no uit at the last block: there is no next block');
+  assert.equal(chips(view, 'Uit').length, 8, 'uit is possible in the last block too');
   wisselButton(view).fire('click');
   assert.equal(h1(view), 'Einde match');
 });
@@ -246,8 +246,9 @@ test('live screen: no In the zone button for a player who is out', () => {
   // Mark the first player of the starting five out: they become due off at the next change.
   const row = find(view, 'tr', (tr) => find(tr, 'span', (sp) => sp.className === 'number' && sp.text === '#1').length > 0)[0];
   find(row, 'button', (b) => b.text === 'Uit')[0].fire('click');
-  const offNow = numbers(listOf(view, 'off'));
-  assert.ok(offNow.includes(1));
-  assert.equal(chips(view, 'In the zone').length, offNow.length - 1, 'every player due off except the out one');
+  assert.ok(!numbers(listOf(view, 'court')).includes(1), 'the out player left the court at once');
+  assert.ok(!numbers(listOf(view, 'off')).includes(1), 'so has no In the zone button');
+  assert.equal(chips(view, 'In the zone').length, numbers(listOf(view, 'off')).length);
+  assert.ok(find(view, 'p', (p) => p.className === 'note replaced').length === 1, 'a line says who came in for whom');
   assert.ok(before >= off.length - 1);
 });

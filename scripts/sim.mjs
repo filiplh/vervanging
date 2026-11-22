@@ -5,8 +5,9 @@
 //   node scripts/sim.mjs match --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
 //                              [--actions <action,...>] [--json]
 //     Actions are comma-separated: wissel, undo ("wissel*11" repeats one 11 times), wissel:keep=P (in the zone:
-//     P stays on, the proposed incoming player stays off), wissel:keep=P:bench=Q (Q stays off), uit=P and terug=P
-//     (from the next block on). Prints the final match state.
+//     P stays on, the proposed incoming player stays off), wissel:keep=P:bench=Q (Q stays off), uit=P (P leaves at
+//     once; on court, a replacement comes on, the block still counts for P) and terug=P (from the next block on).
+//     Prints the final match state; onCourt shows the current block as it is on court.
 // Prints one JSON object on stdout. Invalid input: exit status 2, one line on stderr, nothing on stdout.
 import { makePlan, swapPlayers, planStats, PlanError } from '../public/js/planner.js';
 import { startMatch, applyAction, onCourt, minutesSoFar, MatchError } from '../public/js/match.js';

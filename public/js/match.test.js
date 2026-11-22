@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { makePlan, planStats, maxSubsFrom, blockCounts } from './planner.js';
 import {
   startMatch, wissel, undo, canUndo, applyAction, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
-  normaliseMatchState, MatchError, MATCH_VERSION, uit, terug, proposedBench, capHolds,
+  normaliseMatchState, MatchError, MATCH_VERSION, uit, terug, proposedBench, capHolds, livePlan, replacements,
 } from './match.js';
 import { seededRandom } from './planner.js';
 
@@ -251,7 +251,6 @@ test('uit and terug are refused where they cannot apply', () => {
   assert.throws(() => uit(uit(state, 1), 2), MatchError, 'fewer than 5 available');
   assert.throws(() => uit(uit(startMatch(planFor('equal')), 1), 1), MatchError, 'already out');
   assert.throws(() => terug(startMatch(planFor('equal')), 1), MatchError, 'not out');
-  assert.throws(() => uit(times(startMatch(planFor('equal')), 11), 1), MatchError, 'last block');
   assert.throws(() => uit(startMatch(planFor('equal')), 13), MatchError, 'not in the match');
 });
 
@@ -305,12 +304,12 @@ test('uit is never refused for planning reasons: one or two players out at any b
     for (let n = 8; n <= 12; n++) {
       for (const seed of [1, 2, 3, 10]) {
         const plan = planFor(schedule, n, seed);
-        for (let at = 1; at < plan.blocks; at++) {
+        for (let at = 1; at <= plan.blocks; at++) {
           let state = times(startMatch(plan), at - 1);
           state = uit(state, 1);
           state = uit(state, 6);
-          assert.ok(maxSubsFrom(state.grid, at - 1) <= 3, `${schedule} ${n} seed ${seed} block ${at}`);
-          assert.ok(state.grid.slice(at).every((court) => !court.includes(1) && !court.includes(6)));
+          assert.ok(maxSubsFrom(livePlan(state), at - 1) <= 3, `${schedule} ${n} seed ${seed} block ${at}`);
+          assert.ok(livePlan(state).slice(at - 1).every((court) => !court.includes(1) && !court.includes(6)));
         }
       }
     }
@@ -337,19 +336,21 @@ test('in the zone at the second-to-last change keeps the cap of 3 (repair when n
 test('F1: a player marked uit cannot be kept on in the zone', () => {
   const plan = planFor('equal');
   const out = uit(startMatch(plan), 1);
-  assert.ok(nextChange(out).off.includes(1), 'the out player is due off');
+  assert.ok(!onCourt(out).includes(1), 'the out player left at once');
+  assert.ok(!nextChange(out).off.includes(1), 'so is not due off either');
   assert.throws(() => wissel(out, { keep: 1 }), MatchError);
 });
 
-test('F2: four players uit at once: the next change takes all four off, the only case above 3 subs', () => {
+test('F2: four players uit at once: each is replaced at once, nobody out plays again, the sub rule holds', () => {
   const plan = planFor('equal');
   let state = startMatch(plan);
   for (const p of [1, 2, 3, 4]) state = uit(state, p);
-  const subs = state.grid[1].filter((p) => !state.grid[0].includes(p)).length;
-  assert.equal(subs, 4, 'four forced departures need four subs');
-  assert.ok(state.grid.slice(1).every((court) => [1, 2, 3, 4].every((p) => !court.includes(p))));
-  assert.ok(capHolds(state.grid, 0, state.out), 'allowed: every sub above 3 is a forced departure');
-  assert.ok(maxSubsFrom(state.grid, 1) <= 3, 'all later changes keep 3');
+  assert.ok(onCourt(state).every((p) => ![1, 2, 3, 4].includes(p)), 'replacements on court at once');
+  assert.equal(replacements(state).length, 4);
+  assert.ok(livePlan(state).every((court) => [1, 2, 3, 4].every((p) => !court.includes(p))));
+  assert.ok(capHolds(livePlan(state), 0, state.out));
+  assert.deepEqual(Object.entries(minutesSoFar(state)).filter(([, m]) => m > 0).map(([p]) => Number(p)), [1, 2, 3, 4, 5],
+    'the block counts for the starters, not the replacements');
 });
 
 test('F3: damaged version 2 plans and undo snapshots are refused', () => {
@@ -385,12 +386,12 @@ test('random mixed sequences: the sub rule, nobody out playing, one-step undo an
             else state = wissel(state);
           } catch (error) {
             if (!(error instanceof MatchError)) throw error;
-            assert.match(error.message, /last block|at least 5|no change left/, error.message);
+            assert.match(error.message, /last block|at least 5|no change left|the match has ended/, error.message);
             state = wissel(state);
           }
           cases += 1;
-          assert.ok(capHolds(state.grid, state.block - 1, state.out), `${schedule} ${n} seed ${seed} block ${state.block}`);
-          assert.ok(state.grid.slice(state.block).every((court) => court.every((p) => !state.out.includes(p))));
+          assert.ok(capHolds(livePlan(state), state.block - 1, state.out), `${schedule} ${n} seed ${seed} block ${state.block}`);
+          if (!state.ended) assert.ok(livePlan(state).slice(state.block - 1).every((court) => court.every((p) => !state.out.includes(p))));
           assert.deepEqual(state.grid.slice(0, Math.min(before.block, state.block) - 1), before.grid.slice(0, Math.min(before.block, state.block) - 1), 'played blocks never change');
           assert.deepEqual(normaliseMatchState(roundTrip(state), plan, 's'), state, 'every state saves and restores');
           if (state.previous) assert.equal(canUndo(undo(state)), false);
@@ -399,4 +400,69 @@ test('random mixed sequences: the sub rule, nobody out playing, one-step undo an
     }
   }
   assert.ok(cases > 500);
+});
+
+// ---------- uit during a block: immediate replacement (owner's decision on #9) ----------
+
+test('uit on court: a player due on at the next wissel comes on at once, the block counts for the starter', () => {
+  const plan = planFor('equal'); // block 1 [1,2,3,4,5], block 2 [1,3,4,6,9]
+  const state = uit(startMatch(plan), 2);
+  assert.equal(state.block, 1);
+  assert.deepEqual(onCourt(state), [1, 3, 4, 5, 6], 'the fewest-minutes player due on (6 before 9 on a tie)');
+  assert.deepEqual(replacements(state), [[2, 6]]);
+  assert.equal(minutesSoFar(state)[2], 200);
+  assert.equal(minutesSoFar(state)[6], 0, 'the replacement gets nothing for this block');
+  assert.ok(!nextChange(state).on.includes(6), '6 is on already, so the next wissel has one change less');
+  const next = wissel(state);
+  assert.deepEqual(replacements(next), [], 'replacements end with the block');
+  assert.ok(onCourt(next).includes(6));
+});
+
+test('uit on court in the last block: the bench player with the fewest minutes comes on', () => {
+  const state = times(startMatch(planFor('equal')), 11); // block 12
+  const player = onCourt(state)[0];
+  const out = uit(state, player);
+  const [[starter, replacement]] = replacements(out);
+  assert.equal(starter, player);
+  const minutes = minutesSoFar(state);
+  const bench = state.players.filter((p) => !onCourt(state).includes(p));
+  const fewest = Math.min(...bench.map((p) => minutes[p]));
+  assert.equal(replacement, Math.min(...bench.filter((p) => minutes[p] === fewest)));
+  assert.deepEqual(out.grid, state.grid, 'nothing left to recalculate');
+  assert.equal(minutesSoFar(wissel(out))[player], minutesSoFar(state)[player]);
+});
+
+test('uit recalculates only when the player was planned later', () => {
+  const plan = planFor('equal');
+  let state = startMatch(plan);
+  // find a block where some on-court player is not planned again
+  for (let b = 1; b < plan.blocks; b++) {
+    const later = state.grid.slice(b);
+    const lone = onCourt(state).find((p) => later.every((row) => !row.includes(p)));
+    if (lone !== undefined) {
+      const out = uit(state, lone);
+      assert.deepEqual(out.grid, state.grid, 'no recalculation');
+      return;
+    }
+    state = wissel(state);
+  }
+});
+
+test('a replacement who goes uit too is replaced in turn; undo puts both back step by step', () => {
+  const s1 = uit(startMatch(planFor('equal')), 2);
+  const s2 = uit(s1, 6);
+  assert.ok(!onCourt(s2).includes(2) && !onCourt(s2).includes(6));
+  assert.equal(replacements(s2).length, 1, 'still one starter replaced');
+  assert.deepEqual(undo(s2).replaced, s1.replaced);
+  assert.deepEqual(normaliseMatchState(roundTrip(s2), planFor('equal'), null), s2);
+});
+
+test('damaged replacement pairs are refused on load', () => {
+  const plan = planFor('equal');
+  const good = roundTrip(uit(startMatch(plan, 's'), 2));
+  for (const replaced of [[[2, 3]], [[7, 6]], [[2, 6], [2, 9]], [[2, 2]], 'x', [[2]]]) {
+    assert.equal(normaliseMatchState({ ...good, replaced }, plan, 's'), null, JSON.stringify(replaced));
+  }
+  const ended = roundTrip(times(startMatch(plan, 's'), 12));
+  assert.equal(normaliseMatchState({ ...ended, replaced: [[2, 6]] }, plan, 's'), null);
 });
