@@ -185,7 +185,7 @@ test('live screen: a damaged saved setup shows a Dutch fallback instead of crash
 
 // ---------- in the zone, uit and terug, Einde match (#9) ----------
 
-const chips = (root, label) => find(root, 'button', (e) => e.className === 'chip' && e.text === label);
+const chips = (root, label) => find(root, 'button', (e) => e.className.split(' ').includes('chip') && e.text === label);
 
 test('live screen: In the zone on a player due off proposes a bench player, which the coach can change', () => {
   const { view, setup } = open();
@@ -519,4 +519,19 @@ test('live screen: keeps the screen awake while the match runs, not after the en
   const missing = [];
   liveScreen(new FakeElement('main'), { store: memoryStore().store, keepAwake: (on) => missing.push(on) });
   assert.deepEqual(missing, [false], 'no match: not kept awake');
+});
+
+test('live screen: Extra minuten next to In the zone; the note says the block is not given back', () => {
+  const { view, setup, data } = open();
+  const { grid } = setup.plan;
+  const off = grid[0].filter((p) => !grid[1].includes(p));
+  assert.equal(chips(view, 'Extra minuten').length, off.length);
+  chips(view, 'Extra minuten')[0].fire('click');
+  assert.equal(chips(view, 'Extra minuten')[0].attrs['aria-pressed'], 'true');
+  assert.match(find(view, 'p', (p) => p.className === 'zone-note')[0].text, /extra minuten, niet teruggegeven/);
+  wisselButton(view).fire('click');
+  const saved = JSON.parse(data.get('vervanging.match.v1'));
+  assert.deepEqual(saved.extra, [off[0]]);
+  button(view, 'Ongedaan maken').fire('click');
+  assert.deepEqual(JSON.parse(data.get('vervanging.match.v1')).extra, []);
 });

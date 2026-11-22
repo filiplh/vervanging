@@ -4,6 +4,7 @@ import { makePlan, planStats, maxSubsFrom, blockCounts } from './planner.js';
 import {
   startMatch, wissel, undo, canUndo, applyAction, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
   normaliseMatchState, MatchError, MATCH_VERSION, uit, terug, proposedBench, capHolds, livePlan, replacements,
+  extraSeconds,
 } from './match.js';
 import { seededRandom } from './planner.js';
 
@@ -489,4 +490,72 @@ test('uit in the last block: the replacement is still on court after Einde match
   assert.deepEqual(onCourt(ended), onCourt(out), 'the line-up that finished the match');
   assert.deepEqual(normaliseMatchState(roundTrip(ended), plan, null), ended);
   assert.deepEqual(minutesSoFar(ended), minutesSoFar(wissel(last)), 'minutes unchanged: the block counts for the starter');
+});
+
+// ---------- Extra minuten (#31, decision #25) ----------
+
+test('extra minuten: the kept player ends one block above the planned total, the others share the rest, the cap holds', () => {
+  for (const schedule of ['equal', 'five']) {
+    for (let n = 8; n <= 12; n++) {
+      for (const seed of [1, 2, 3]) {
+        const plan = planFor(schedule, n, seed);
+        const atTwo = wissel(startMatch(plan));
+        const planned = blockCounts(plan.grid, plan.players);
+        for (const keep of nextChange(atTwo).off) {
+          const next = wissel(atTwo, { keep, extra: true });
+          assert.ok(onCourt(next).includes(keep));
+          assert.ok(capHolds(livePlan(next), next.block - 1, next.out), `${schedule} ${n} seed ${seed} keep ${keep}`);
+          const end = times(next, plan.blocks);
+          const blocks = Object.fromEntries(Object.entries(minutesSoFar(end)).map(([p, m]) => [p, m / plan.blockSeconds]));
+          assert.equal(blocks[keep], planned[keep] + 1, 'the reward is kept, not given back');
+          const others = Object.entries(blocks).filter(([p]) => Number(p) !== keep).map(([, b]) => b);
+          assert.ok(Math.max(...others) - Math.min(...others) <= 1, others.join(' '));
+          assert.equal(extraSeconds(end)[keep], plan.blockSeconds);
+        }
+      }
+    }
+  }
+});
+
+test('in the zone without extra still gives the block back', () => {
+  const plan = planFor('equal');
+  const atTwo = wissel(startMatch(plan));
+  const keep = nextChange(atTwo).off[0];
+  assert.deepEqual(new Set(Object.values(minutesSoFar(times(wissel(atTwo, { keep }), 12)))), new Set([1000]));
+  assert.deepEqual(Object.values(extraSeconds(wissel(atTwo, { keep }))).filter((s) => s > 0), []);
+});
+
+test('extra minuten at the last change, and with a chosen bench player', () => {
+  const plan = planFor('equal');
+  const last = times(startMatch(plan), 10);
+  const keep = nextChange(last).off[0];
+  const end = wissel(wissel(last, { keep, extra: true }));
+  assert.equal(minutesSoFar(end)[keep], 1200);
+  assert.equal(extraSeconds(end)[keep], 200);
+  const atTwo = wissel(startMatch(plan));
+  const { off, on } = nextChange(atTwo);
+  const bench = on.find((p) => p !== proposedBench(atTwo));
+  const next = wissel(atTwo, { keep: off[0], bench, extra: true });
+  assert.ok(!onCourt(next).includes(bench));
+  assert.throws(() => wissel(atTwo, { extra: true }), MatchError, 'extra minuten needs a player to keep on');
+});
+
+test('extra minuten: undo takes it back; the state saves and restores; a 1.1.0 state without the field loads', () => {
+  const plan = planFor('equal');
+  const atTwo = wissel(startMatch(plan, 's'));
+  const keep = nextChange(atTwo).off[0];
+  const next = wissel(atTwo, { keep, extra: true });
+  assert.deepEqual(undo(next).extra, []);
+  assert.deepEqual(normaliseMatchState(roundTrip(next), plan, 's'), next);
+  const old = roundTrip(atTwo);
+  delete old.extra;
+  if (old.previous) delete old.previous.extra;
+  const restored = normaliseMatchState(old, plan, 's');
+  assert.deepEqual(restored.extra, []);
+  for (const extra of ['x', [99], [keep, keep, keep, keep, keep, keep, keep, keep, keep, keep, keep, keep]]) {
+    assert.equal(normaliseMatchState({ ...roundTrip(next), extra }, plan, 's'), null, JSON.stringify(extra));
+  }
+  const bad = roundTrip(next);
+  bad.extra = [keep, keep];
+  assert.equal(normaliseMatchState(bad, plan, 's'), null, 'one wissel adds at most one entry');
 });
