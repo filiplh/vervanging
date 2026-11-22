@@ -278,7 +278,7 @@ export function setupScreen(root, { store, onStart }) {
   function wipeHistory() {
     if (!window.confirm('De geschiedenis van alle vorige matchen wissen?')) return;
     message = '';
-    if (saveHistory(clearHistory(history))) message = 'Geschiedenis gewist.';
+    if (saveHistory(clearHistory(history, new Date().toISOString()))) message = 'Geschiedenis gewist.';
     replan();
     render();
   }

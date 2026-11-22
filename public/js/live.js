@@ -8,7 +8,7 @@ import {
   startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
   normaliseMatchState, proposedBench, replacements, MatchError,
 } from './match.js';
-import { normaliseHistory, recordMatch, forgetMatch, hasMatch } from './history.js';
+import { normaliseHistory, recordMatch, forgetMatch, hasMatch, startedAfterClear } from './history.js';
 
 const SAVE_FAILED = 'Opslaan lukte niet: de browser weigert opslag.';
 
@@ -49,6 +49,21 @@ export function syncHistory(store, setup, state) {
   return store.save('history', forgetMatch(history, setup.savedAt));
 }
 
+// Run when the live screen opens: catches up a history write that the browser refused earlier, while the match state
+// itself was saved. An ended match missing from the history is recorded, unless "Wis geschiedenis" ran after its
+// Start (an old end screen must not refill a cleared history); a match that is no longer ended but still in the
+// history (a refused removal after an undo) is removed. True when nothing was needed or the write worked.
+export function repairHistory(store, setup, state) {
+  if (!setup.savedAt) return true;
+  const history = normaliseHistory(store.load('history'));
+  const recorded = hasMatch(history, setup.savedAt);
+  if (state.ended && !recorded && startedAfterClear(history, setup.savedAt)) {
+    return store.save('history', recordMatch(history, setup.savedAt, minutesSoFar(state)));
+  }
+  if (!state.ended && recorded) return store.save('history', forgetMatch(history, setup.savedAt));
+  return true;
+}
+
 export function liveScreen(root, { store }) {
   const setup = normaliseMatchSetup(store.load('matchSetup'));
   if (!setup) {
@@ -60,7 +75,7 @@ export function liveScreen(root, { store }) {
   }
   const byId = new Map(setup.players.map((p) => [p.id, p]));
   let state = restoreMatch(store, setup);
-  let message = '';
+  let message = repairHistory(store, setup, state) ? '' : SAVE_FAILED;
   let zone = null; // in the zone, chosen but not yet applied: { keep, bench }
 
   // Applies one engine action, saves the new state and redraws; an action the engine refuses shows its reason.

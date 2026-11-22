@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { makePlan, planStats } from './planner.js';
 import {
   emptyHistory, normaliseHistory, recordMatch, forgetMatch, hasMatch, clearHistory, totalSeconds, extraPriority,
+  startedAfterClear,
 } from './history.js';
 
 const ids = (n) => Array.from({ length: n }, (_, i) => i + 1);
@@ -22,7 +23,7 @@ test('normaliseHistory: damaged values give an empty history, bad entries and se
       { id: 'd', seconds: { 1: 1 } }, { id: 'd', seconds: { 1: 2 } },
     ],
   });
-  assert.deepEqual(cleaned, { useHistory: true, matches: [{ id: 'c', seconds: { 1: 600, 6: 0 } }, { id: 'd', seconds: { 1: 2 } }] });
+  assert.deepEqual(cleaned, { useHistory: true, clearedAt: null, matches: [{ id: 'c', seconds: { 1: 600, 6: 0 } }, { id: 'd', seconds: { 1: 2 } }] });
 });
 
 test('the sample fixture has the stored shape: players 1 to 4 at 0 seconds, 5 to 12 at 3000', () => {
@@ -43,7 +44,19 @@ test('recordMatch adds once per id, forgetMatch removes, clearHistory keeps the 
   history = forgetMatch(history, 'm1');
   assert.deepEqual(totalSeconds(history), { 1: 100, 3: 900 });
   assert.equal(hasMatch(history, 'm1'), false);
-  assert.deepEqual(clearHistory({ ...history, useHistory: true }), { useHistory: true, matches: [] });
+  assert.deepEqual(clearHistory({ ...history, useHistory: true }, '2026-11-22T10:00:00.000Z'),
+    { useHistory: true, clearedAt: '2026-11-22T10:00:00.000Z', matches: [] });
+});
+
+test('clearedAt: kept when it is a time, dropped otherwise; startedAfterClear compares with the setup time', () => {
+  assert.equal(normaliseHistory({ clearedAt: '2026-11-22T10:00:00.000Z' }).clearedAt, '2026-11-22T10:00:00.000Z');
+  for (const clearedAt of [42, 'gisteren', '', null, {}]) assert.equal(normaliseHistory({ clearedAt }).clearedAt, null);
+  const cleared = clearHistory(emptyHistory(), '2026-11-22T10:00:00.000Z');
+  assert.equal(startedAfterClear(emptyHistory(), '2026-01-01T00:00:00.000Z'), true, 'never cleared');
+  assert.equal(startedAfterClear(cleared, '2026-11-22T09:59:59.999Z'), false);
+  assert.equal(startedAfterClear(cleared, '2026-11-22T10:00:00.000Z'), false);
+  assert.equal(startedAfterClear(cleared, '2026-11-22T10:00:00.001Z'), true);
+  assert.equal(startedAfterClear(cleared, 'kapot'), false);
 });
 
 test('extraPriority: fewest total seconds first; absent players ignored; unknown players count as 0', () => {

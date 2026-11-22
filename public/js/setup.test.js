@@ -445,7 +445,9 @@ test('setup screen: Wis geschiedenis asks first, and empties the history only wh
   assert.equal(raw('history').matches.length, 1, 'cancelled: nothing wiped');
   globalThis.window = { confirm: () => true };
   button(view, 'Wis geschiedenis').fire('click');
-  assert.deepEqual(raw('history'), { useHistory: true, matches: [] });
+  const wiped = raw('history');
+  assert.deepEqual({ ...wiped, clearedAt: null }, { useHistory: true, clearedAt: null, matches: [] });
+  assert.ok(!Number.isNaN(Date.parse(wiped.clearedAt)), 'the moment of clearing is remembered');
   assert.match(pageText(view), /Geschiedenis gewist/);
   assert.match(pageText(view), /Nog geen matchen bewaard/);
 });

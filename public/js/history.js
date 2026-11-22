@@ -4,15 +4,17 @@
 // History changes nothing else.
 //
 // Stored shape (version 1):
-//   { useHistory: boolean, matches: [{ id: string, seconds: { "<player id>": number } }] }
+//   { useHistory: boolean, clearedAt: string | null, matches: [{ id: string, seconds: { "<player id>": number } }] }
 // `id` is the match setup's savedAt (one per "Start"). A match is in the history exactly while its live state is
 // ended: ending records it (replacing an entry with the same id, so it is never counted twice), and undoing the end
-// removes it again. Player ids are the roster's stable ids.
+// removes it again. `clearedAt` is when "Wis geschiedenis" last emptied it: an ended match whose setup is not newer
+// is not recorded again when its end screen is reopened (live.js, repairHistory). Player ids are the roster's stable
+// ids.
 
 import { seededRandom } from './planner.js';
 
 export function emptyHistory() {
-  return { useHistory: false, matches: [] };
+  return { useHistory: false, clearedAt: null, matches: [] };
 }
 
 // The history read from the store, cleaned so a damaged value never breaks a screen or the planner: entries without
@@ -22,6 +24,7 @@ export function normaliseHistory(raw) {
   const history = emptyHistory();
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return history;
   history.useHistory = raw.useHistory === true;
+  history.clearedAt = typeof raw.clearedAt === 'string' && !Number.isNaN(Date.parse(raw.clearedAt)) ? raw.clearedAt : null;
   const byId = new Map();
   for (const match of Array.isArray(raw.matches) ? raw.matches : []) {
     if (!match || typeof match.id !== 'string' || !match.id) continue;
@@ -56,9 +59,18 @@ export function hasMatch(history, id) {
   return history.matches.some((m) => m.id === id);
 }
 
-// "Wis geschiedenis": no matches left; the switch keeps its setting.
-export function clearHistory(history) {
-  return { ...history, matches: [] };
+// "Wis geschiedenis": no matches left, and `now` (an ISO time) remembered as the moment of clearing; the switch keeps
+// its setting.
+export function clearHistory(history, now) {
+  return { ...history, clearedAt: now, matches: [] };
+}
+
+// True when a match started at `savedAt` (its setup's ISO time) began after the last "Wis geschiedenis", so its
+// minutes may (still) be recorded when its end screen is reopened.
+export function startedAfterClear(history, savedAt) {
+  if (history.clearedAt == null) return true;
+  const started = Date.parse(savedAt);
+  return !Number.isNaN(started) && started > Date.parse(history.clearedAt);
 }
 
 // Total seconds per player id over all matches in the history.
