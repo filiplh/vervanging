@@ -1,0 +1,1138 @@
+#!/bin/sh
+# factory-update: the mechanical half of the factory-update skill. It moves a project from the core version in its
+# .factory/core.lock to the version of a factory source, with factory-install's own copy and lock logic, and writes
+# the summary the update PR shows. It never touches git history or GitHub, never creates or changes a project-owned
+# file (factory.yaml gets only its `factory:` pin), and a run with nothing new changes nothing.
+#
+#   factory-update check    --source DIR --target DIR [--keep PATH]... [--discard PATH]...
+#   factory-update run      --source DIR --target DIR --values DIR --state DIR [--keep PATH]... [--discard PATH]...
+#   factory-update rollback --target DIR --state DIR
+#
+# check     Compares .factory/core.lock (version, upstream, the sha256 of every core file) with the source's version
+#           and lists every core file that was edited in the project (hash mismatch, missing, or a symlink). Writes
+#           nothing.
+# run       Does what check does, then, when an update is ready, in four phases:
+#           1. stage: copies the target's tracked files into <state>/stage, sets the factory.yaml pin there to the
+#              new version, and runs the source's `factory-install apply --update-from <old>` with the decisions
+#              against that copy, never against the target: the installer replaces the old core's copies, removes
+#              the files the new core no longer ships, keeps or replaces each edited file as decided, and writes the
+#              new lock;
+#           2. sort: the files the staged lock lists are the core: they go into the target. Every other file the
+#              installer created or changed in the copy (an overlay file, the rules file, the PR template, settings,
+#              a link) goes only to <state>/proposals/ (the file and its .diff) and the summary;
+#           3. commit: writes the core changes, the pin and the new lock into the target. Every create, replace,
+#              remove, new folder and removed folder is written to <state>/journal (with the old content and mode)
+#              before it happens; on any failure the journal is played back, so the target is byte-identical to
+#              before and nothing the update created is left. Every write, in the commit and in a rollback, is made
+#              by the new source's `factory-install fs-tool` (a copy is kept in <state>/factory-install, so a
+#              rollback needs only the state folder);
+#           4. summary: <state>/summary.md, with the version change, the changed, added and removed core files and
+#              their line counts, new and removed factory.yaml keys with their defaults (read through the doctor's YAML reader,
+#              so a default is a value, never its comment; machine settings in a table of their own), the
+#              human-gate list's diff,
+#              the proposals, and the installer's notes.
+# rollback  Plays back the journal of a run that was killed during its commit phase.
+#
+# A locally edited core file stops check and run until a person decides, per file:
+#   --keep PATH     the project keeps its edit; the new core's version goes to <state>/proposals/ and the PR, and
+#                   factory-install check keeps reporting the file as edited (it should go upstream);
+#   --discard PATH  the edit is dropped and the new core's version is installed.
+# A missing core file or a symlink can only be discarded (the core's file is written there).
+#
+# --source  the factory source of the new version: the folder holding core/ and .claude-plugin/plugin.json (its
+#           "version" is the new core version), as factory-install takes it.
+# --target  the project: a git work tree with nothing uncommitted (use a fresh worktree on the update branch).
+# --values  the answers folder of factory-install apply (factory-init's references/values.md), derived from the
+#           project's files. run copies it to <state>/values and overrides two answers: RULES_MERGE is always
+#           propose, and CI_WORKFLOWS is install when the lock records a factory workflow.
+# --state   a new or empty folder outside the target and the source (no TAB or line break in its path).
+#
+# factory.yaml's pin is read as a strict subset of YAML, never by searching lines: the top-level key `factory` must
+# appear exactly once, unquoted, at column 0, as `factory: X.Y.Z` (spaces, then an optional comment, after it). A
+# file is refused before anything is written when it has a quoted or explicit (`?`) top-level key, a top-level
+# anchor, alias or tag, a top-level flow collection, more than one document, `factory :` or a pin value in any other
+# form, a duplicate `factory` key, unbalanced quotes or brackets, a CR or a BOM, or a multi-line quoted scalar, flow
+# collection or block scalar with a `factory:` line in its text. Only the version's characters are replaced.
+#
+# Every output line starts with what it is: update, current, edited, keep, discard, staged, proposed, written,
+# summary, rolled back.
+# Exit codes: 0 an update is ready (check), done (run) or rolled back; 1 error, the target is as it was; 2 bad usage;
+# 3 edited core files need a decision (listed as "edited"); 4 the project already has this version: nothing to do,
+# nothing written.
+#
+# FACTORY_UPDATE_TEST_HOOK=staged|commit runs FACTORY_UPDATE_TEST_HOOK_CMD after the staging copy is ready (staged)
+# or before each step of the commit phase (commit, with the step number, the number of steps and the path as $1 $2
+# $3); a non-zero exit fails the run there. For the tests only.
+#
+# Needs: a POSIX shell, git, python3 (standard library only), and what factory-install apply needs.
+set -eu
+unset CDPATH
+
+prog=factory-update
+die() { echo "$prog: $*" >&2; exit 1; }
+usage() { sed -n '7,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+[ $# -gt 0 ] || usage
+cmd=$1; shift
+SOURCE='' TARGET='' VALUES='' STATE='' DECISIONS=''
+newline='
+'
+case $cmd in
+  check | run | rollback)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --source) [ $# -ge 2 ] || usage; SOURCE=$2; shift ;;
+        --target) [ $# -ge 2 ] || usage; TARGET=$2; shift ;;
+        --values) [ $# -ge 2 ] || usage; VALUES=$2; shift ;;
+        --state) [ $# -ge 2 ] || usage; STATE=$2; shift ;;
+        --keep | --discard)
+          [ $# -ge 2 ] || usage
+          case $2 in *"$newline"* | *"	"*) die "unsupported path: $2" ;; esac
+          DECISIONS="$DECISIONS${1#--}	$2$newline"; shift ;;
+        *) echo "$prog: unknown option $1" >&2; usage ;;
+      esac
+      shift
+    done ;;
+  -h | --help) sed -n '2,65p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "$prog: unknown command $cmd" >&2; usage ;;
+esac
+
+case $cmd in
+  check) [ -n "$SOURCE" ] && [ -n "$TARGET" ] || usage ;;
+  run) [ -n "$SOURCE" ] && [ -n "$TARGET" ] && [ -n "$VALUES" ] && [ -n "$STATE" ] || usage ;;
+  rollback) [ -n "$TARGET" ] && [ -n "$STATE" ] || usage ;;
+esac
+command -v python3 > /dev/null 2>&1 || die "python3 (standard library only) is needed"
+abs_dir() { (cd -P "$1" 2> /dev/null && pwd -P) || die "not a folder: $1"; }
+TARGET=$(abs_dir "$TARGET")
+if [ -n "$SOURCE" ]; then
+  SOURCE=$(abs_dir "$SOURCE")
+  [ -f "$SOURCE/core/bin/factory-install" ] || die "no core/bin/factory-install in the source $SOURCE"
+fi
+
+# The engine: one Python program. It reads every path in the target from the target's folder one component at a time,
+# never through a symlink, and leaves every write to factory-install's fs-tool, which writes the same way (a temporary
+# file and rename(2) in the folder that was checked).
+engine() {
+  python3 - "$@" <<'PY'
+import difflib, hashlib, json, os, re, secrets, shutil, stat, subprocess, sys
+
+PROG = "factory-update"
+DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+SEMVER = r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?"
+REPO = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+LOCK_LINE = re.compile(r"^(#.*|version: (%s)|upstream: (%s)|([0-9a-f]{64})  ([^/\s]\S*))$" % (SEMVER, REPO))
+LOCK = ".factory/core.lock"
+PIN_FILE = "factory.yaml"
+
+
+class Stop(Exception):
+    def __init__(self, msg, code=1):
+        super().__init__(msg)
+        self.code = code
+
+
+def out(line):
+    print(line, flush=True)
+
+
+def hook(name, *args):
+    if os.environ.get("FACTORY_UPDATE_TEST_HOOK") == name:
+        r = subprocess.run(["sh", "-c", os.environ.get("FACTORY_UPDATE_TEST_HOOK_CMD", ""), "hook"] + [str(a) for a in args])
+        if r.returncode:
+            raise Stop("test hook %s failed" % name)
+
+
+# --- files, reached without symlinks -----------------------------------------------------------------------------------
+def parts_of(rel):
+    parts = rel.split("/")
+    for p in parts:
+        if p in ("", ".", "..") or "\0" in p:
+            raise Stop("bad path: %r" % rel)
+    return parts
+
+
+def open_dir(root, parts):
+    """The folder root/parts, reached one component at a time without following a symlink; None when missing."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    for p in parts:
+        try:
+            nfd = os.open(p, DIR, dir_fd=fd)
+        except FileNotFoundError:
+            os.close(fd)
+            return None
+        except OSError:
+            os.close(fd)
+            raise Stop("%s: a symlink or not a folder on the way; not going through it" % "/".join(parts))
+        os.close(fd)
+        fd = nfd
+    return fd
+
+
+def kind(root, rel):
+    """'file', 'missing', 'symlink', 'dir', 'linked folder' (a folder on the way is a symlink or a file) or 'other'."""
+    parts = parts_of(rel)
+    try:
+        fd = open_dir(root, parts[:-1])
+    except Stop:
+        return "linked folder"
+    if fd is None:
+        return "missing"
+    try:
+        st = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return "missing"
+    except NotADirectoryError:
+        return "linked folder"
+    finally:
+        os.close(fd)
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    return "file" if stat.S_ISREG(st.st_mode) else "other"
+
+
+def read(root, rel):
+    parts = parts_of(rel)
+    fd = open_dir(root, parts[:-1])
+    if fd is None:
+        raise Stop("%s is missing" % rel)
+    try:
+        ffd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+    finally:
+        os.close(fd)
+    with os.fdopen(ffd, "rb") as f:
+        return f.read(), stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+
+
+def readlink(root, rel):
+    parts = parts_of(rel)
+    fd = open_dir(root, parts[:-1])
+    try:
+        return os.readlink(parts[-1], dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+# --- factory.yaml's pin: a strict subset of YAML ------------------------------------------------------------------------
+FACTORY_LINE = re.compile(r"""^\s*(?:-\s+)?["']?factory["']?\s*:""")
+PIN = re.compile(r"^factory:( +)(%s)( +#.*)?$" % SEMVER)
+BLOCK_END = re.compile(r"(?:^|[\s:-])[|>][-+0-9]*$")
+
+
+def scan(line, quote, flow):
+    """The quote and flow-bracket state after line, given the state before it. Returns (quote, flow, content), where
+    content is the line without a comment (None when the line ends inside a quoted scalar)."""
+    i, n, cut = 0, len(line), len(line)
+    while i < n:
+        c = line[i]
+        if quote == '"':
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+        elif quote == "'":
+            if c == "'":
+                if i + 1 < n and line[i + 1] == "'":
+                    i += 2
+                    continue
+                quote = None
+        else:
+            start = i == 0 or line[i - 1] in " \t[{,"
+            if c == "#" and (i == 0 or line[i - 1] in " \t"):
+                cut = i
+                break
+            if c in "\"'" and start:
+                quote = c
+            elif c in "[{" and (start or line[i - 1] == ":"):
+                flow += 1
+            elif c in "]}" and flow > 0:
+                flow -= 1
+        i += 1
+    return quote, flow, (None if quote else line[:cut].rstrip())
+
+
+def read_pin(text):
+    """(version, start, end) of the one top-level `factory:` value in text, or Stop; the header gives the subset."""
+    if text.startswith("\ufeff") or "\r" in text:
+        raise Stop("factory.yaml has a BOM or a CR; outside the subset this helper reads, a person fixes it")
+    quote, flow, block, docs, content_seen, pins, pos = None, 0, None, 0, False, [], 0
+    for n, line in enumerate(text.split("\n"), 1):
+        start, pos = pos, pos + len(line) + 1
+        ind = len(line) - len(line.lstrip(" "))
+        if block is not None:
+            if not line.strip() or ind > block:
+                if FACTORY_LINE.match(line):
+                    raise Stop("factory.yaml line %d: a block scalar's text holds a `factory:` line; a person fixes it" % n)
+                continue
+            block = None
+        if quote or flow:
+            if FACTORY_LINE.match(line):
+                raise Stop("factory.yaml line %d: a multi-line quoted scalar or flow collection holds a `factory:` "
+                           "line; a person fixes it" % n)
+        elif line.strip() and not line.lstrip().startswith("#") and ind == 0:
+            if line == "---" or line.startswith("--- ") or line == "...":
+                docs += 1
+                if docs > 1 or content_seen or line == "...":
+                    raise Stop("factory.yaml line %d: more than one YAML document; outside the subset" % n)
+                continue
+            content_seen = True
+            if line[0] in "\"'?&*!{[|>%@`\t":
+                raise Stop("factory.yaml line %d: a quoted, explicit, anchored, aliased or tagged top-level key, or a "
+                           "top-level flow collection; outside the subset this helper reads, a person fixes it" % n)
+            if re.match(r"factory\s*:", line):
+                m = PIN.match(line)
+                if not m:
+                    raise Stop("factory.yaml line %d: the pin is not in the form `factory: X.Y.Z` (an optional "
+                               "comment after it); a person fixes it" % n)
+                s = start + len("factory:") + len(m.group(1))
+                pins.append((m.group(2), s, s + len(m.group(2))))
+        quote, flow, content = scan(line, quote, flow)
+        if content is not None and not flow and BLOCK_END.search(content):
+            block = ind
+    if quote or flow:
+        raise Stop("factory.yaml ends inside a quoted scalar or a flow collection; a person fixes it")
+    if len(pins) != 1:
+        raise Stop("factory.yaml must have exactly one top-level `factory:` key (found %d)" % len(pins))
+    return pins[0]
+
+
+def pinned(root, new):
+    """factory.yaml's bytes with the pin set to new, its mode, and its current version."""
+    if kind(root, PIN_FILE) != "file":
+        raise Stop("no factory.yaml (a regular file) in the target")
+    data, mode = read(root, PIN_FILE)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Stop("factory.yaml is not UTF-8")
+    version, s, e = read_pin(text)
+    return (text[:s] + new + text[e:]).encode("utf-8"), mode, version
+
+
+# --- versions and the lock ---------------------------------------------------------------------------------------------
+def semver_key(v):
+    core, _, pre = v.split("+", 1)[0].partition("-")
+    nums = tuple(int(x) for x in core.split("."))
+    if not pre:
+        return nums, (1,)
+    ids = tuple((0, int(x), "") if x.isdigit() else (1, 0, x) for x in pre.split("."))
+    return nums, (0,) + ids
+
+
+def source_version(source):
+    path = os.path.join(source, ".claude-plugin", "plugin.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            v = json.load(f).get("version")
+    except (OSError, ValueError, AttributeError) as e:
+        raise Stop("cannot read the version from %s: %s" % (path, e))
+    if not isinstance(v, str) or not re.fullmatch(SEMVER, v):
+        raise Stop('no semver "version" in %s' % path)
+    return v
+
+
+def read_lock(root):
+    if kind(root, LOCK) != "file":
+        raise Stop("no .factory/core.lock (a regular file) in the target: install the factory first (factory-init)")
+    data, _ = read(root, LOCK)
+    version, upstream, entries = [], [], {}
+    for n, line in enumerate(data.decode("utf-8").split("\n"), 1):
+        if line == "":
+            continue
+        m = LOCK_LINE.match(line)
+        if not m:
+            raise Stop(".factory/core.lock line %d is not a comment, version:, upstream: or a file entry" % n)
+        if m.group(2):
+            version.append(m.group(2))
+        elif m.group(3):
+            upstream.append(m.group(3))
+        elif m.group(4):
+            rel = m.group(5)
+            parts_of(rel)
+            if rel in entries:
+                raise Stop(".factory/core.lock lists %s twice" % rel)
+            entries[rel] = m.group(4)
+    if len(version) != 1 or len(upstream) != 1:
+        raise Stop(".factory/core.lock must hold exactly one version: and one upstream: line")
+    return version[0], upstream[0], entries, data
+
+
+# --- check ------------------------------------------------------------------------------------------------------------
+def decisions(path):
+    keep, discard = set(), set()
+    with open(path, encoding="utf-8") as f:
+        for line in f.read().splitlines():
+            if line:
+                what, rel = line.split("\t", 1)
+                (keep if what == "keep" else discard).add(rel)
+    both = keep & discard
+    if both:
+        raise Stop("both --keep and --discard for: " + ", ".join(sorted(both)), 2)
+    return keep, discard
+
+
+def assess(source, target, dec_path):
+    """Prints the plan; returns (code, plan). code: 0 ready, 3 edits need a decision, 4 current."""
+    old, upstream, entries, lock_data = read_lock(target)
+    new = source_version(source)
+    pin = pinned(target, new)[2]
+    if pin != old:
+        raise Stop("factory.yaml pins %s but .factory/core.lock records %s; a person makes them agree first" % (pin, old))
+    keep, discard = decisions(dec_path)
+    edited = {}
+    for rel, h in sorted(entries.items()):
+        k = kind(target, rel)
+        if k == "file":
+            if sha(read(target, rel)[0]) != h:
+                edited[rel] = "edited"
+        elif k == "missing":
+            edited[rel] = "missing"
+        elif k == "symlink":
+            edited[rel] = "a symlink"
+        elif k == "linked folder":
+            raise Stop("%s: a folder on the way is a symlink or not a folder; the installer refuses to write through "
+                       "it, so a person replaces it with the real folder first" % rel)
+        else:
+            raise Stop("%s is not a file; a person fixes it first" % rel)
+    if new == old:
+        for rel, why in edited.items():
+            out("edited  %s  (%s; factory-doctor reports it, nothing to update)" % (rel, why))
+        out("current  core %s from %s; the source has the same version, nothing to update" % (old, upstream))
+        return 4, None
+    if semver_key(new) < semver_key(old):
+        raise Stop("the source is core %s, older than the installed %s; factory-update never goes back (revert the "
+                   "update PR instead)" % (new, old))
+    if semver_key(new) == semver_key(old):
+        raise Stop("the source %s and the installed %s differ only in build metadata; a person decides" % (new, old))
+    unknown = sorted((keep | discard) - set(edited))
+    if unknown:
+        raise Stop("--keep/--discard name files that are not edited core files: " + ", ".join(unknown), 2)
+    bad_keep = sorted(r for r in keep if edited[r] != "edited")
+    if bad_keep:
+        raise Stop("only an edited file can be kept; these can only be discarded (the core's file is written there): "
+                   + ", ".join(bad_keep), 2)
+    undecided = [r for r in edited if r not in keep and r not in discard]
+    for rel in sorted(edited):
+        if rel in keep:
+            out("keep  %s  (%s; the new core's version is proposed, not installed)" % (rel, edited[rel]))
+        elif rel in discard:
+            out("discard  %s  (%s; the new core's version replaces it)" % (rel, edited[rel]))
+        else:
+            out("edited  %s  (%s; a person decides: --keep, --discard, or upstream it first)" % (rel, edited[rel]))
+    out("update  core %s -> %s from %s, %d core files in the lock, %d edited"
+        % (old, new, upstream, len(entries), len(edited)))
+    if undecided:
+        return 3, None
+    return 0, dict(old=old, new=new, upstream=upstream, entries=entries, keep=sorted(keep))
+
+
+# --- 1. stage -----------------------------------------------------------------------------------------------------------
+def inside(path, root):
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return os.path.commonpath([path, root]) == root
+
+
+def plain_write(path, data, mode=0o644):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+    os.chmod(path, mode)
+
+
+def fsync_dir(path):
+    """Makes a folder's entries durable (a new or renamed file in it survives a crash)."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def durable_write(path, data, mode=0o600):
+    """A backup that must survive a crash before the journal points at it: contents, mode and the folder entry are
+    all on disk when this returns."""
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), mode)
+    try:
+        view = memoryview(data)
+        while view:   # os.write may write less than asked
+            view = view[os.write(fd, view):]
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    fsync_dir(folder)
+
+
+def stage(source, target, state, values, dec_path, tracked):
+    code, plan = assess(source, target, dec_path)
+    if code:
+        return code
+    if "\t" in state or "\n" in state:
+        raise Stop("the state folder's path has a TAB or a line break: %r" % state)
+    parent = os.path.dirname(os.path.abspath(state)) or "/"
+    if not os.path.isdir(parent):
+        raise Stop("the state folder's parent does not exist: %s" % parent)
+    if os.path.islink(state):
+        raise Stop("the state folder is a symlink: %s" % state)
+    if os.path.exists(state) and (not os.path.isdir(state) or os.listdir(state)):
+        raise Stop("the state folder must be new or empty: %s" % state)
+    if inside(state, target) or inside(state, source) or inside(target, state):
+        raise Stop("the state folder must be outside the target and the source: %s" % state)
+    os.makedirs(state, exist_ok=True)
+    fsync_dir(parent)   # the state folder's own entry must survive a crash, or its journal and backups go with it
+    st = os.path.join(state, "stage")
+    os.makedirs(st)
+    # The writer for the commit and a rollback: the new source's installer, kept with the journal it plays back.
+    with open(os.path.join(source, "core", "bin", "factory-install"), "rb") as f:
+        durable_write(os.path.join(state, "factory-install"), f.read(), 0o644)
+    # The answers, with the two overrides an update needs.
+    vdir = os.path.join(state, "values")
+    shutil.copytree(values, vdir, symlinks=False)
+    plain_write(os.path.join(vdir, "RULES_MERGE"), b"propose\n")
+    if any(r in plan["entries"] for r in (".github/workflows/factory-ci.yml", ".github/workflows/factory-nightly.yml")):
+        plain_write(os.path.join(vdir, "CI_WORKFLOWS"), b"install\n")
+    # The copy: every tracked file and link, as it is.
+    with open(tracked, "rb") as f:
+        paths = [p.decode("utf-8") for p in f.read().split(b"\0") if p]
+    if LOCK not in paths:
+        paths.append(LOCK)
+    for rel in paths:
+        k = kind(target, rel)
+        dst = os.path.join(st, *parts_of(rel))
+        if k == "file":
+            data, mode = read(target, rel)
+            plain_write(dst, data, mode)
+        elif k == "symlink":
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.symlink(readlink(target, rel), dst)
+    # The old core's files, for the summary.
+    backup = os.path.join(state, "old-core")
+    for rel in plan["entries"]:
+        if kind(target, rel) == "file":
+            plain_write(os.path.join(backup, *parts_of(rel)), read(target, rel)[0])
+    # In the copy: the pin names the new version; the installer's update mode does the rest.
+    ydata, ymode, _ = pinned(st, plan["new"])
+    plain_write(os.path.join(st, PIN_FILE), ydata, ymode)
+    with open(os.path.join(state, "plan.json"), "w", encoding="utf-8") as f:
+        json.dump(plan, f)
+    with open(os.path.join(state, "old-version"), "w", encoding="utf-8") as f:
+        f.write(plan["old"] + "\n")
+    out("staged  %s  (%d tracked files; the new version pinned there)" % (st, len(paths)))
+    return 0
+
+
+# --- 2. sort ------------------------------------------------------------------------------------------------------------
+def walk(root):
+    """Every file and symlink under root, as relative paths."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        for name in filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]:
+            found.append(name if rel_dir == "." else rel_dir + "/" + name)
+    return sorted(set(found))
+
+
+def same(target, st, rel):
+    """rel in the target is what the staging copy has (content and mode, or link text)."""
+    sk, tk = kind(st, rel), kind(target, rel)
+    if sk != tk:
+        return False
+    if sk == "symlink":
+        return readlink(st, rel) == readlink(target, rel)
+    if sk == "file":
+        return read(st, rel) == read(target, rel)
+    return True
+
+
+def diff_text(old, new, rel):
+    a = old.decode("utf-8", "replace").splitlines(True) if old is not None else []
+    b = new.decode("utf-8", "replace").splitlines(True)
+    return "".join(difflib.unified_diff(a, b, "a/" + rel if old is not None else "/dev/null", "b/" + rel))
+
+
+def sort(target, state):
+    """The commit plan (core writes and removals, the pin, the lock) and the proposals for everything else."""
+    with open(os.path.join(state, "plan.json"), encoding="utf-8") as f:
+        plan = json.load(f)
+    st = os.path.join(state, "stage")
+    new_entries = read_lock(st)[2]
+    keep = set(plan["keep"])
+    writes, removes = [], []
+    for rel in sorted(new_entries):
+        if rel in keep:
+            continue
+        if kind(st, rel) != "file":
+            raise Stop("the staged core has no regular file %s" % rel)
+        if not same(target, st, rel):
+            writes.append(rel)
+    for rel in sorted(plan["entries"]):
+        if rel not in new_entries and rel not in keep and kind(target, rel) in ("file", "symlink"):
+            removes.append(rel)
+    ydata, _, _ = pinned(target, plan["new"])
+    # Everything else the installer created or changed in the copy is the project's: proposed, never written.
+    props = os.path.join(state, "proposals")
+    proposed = []
+    for rel in walk(st):
+        if rel in new_entries or rel == LOCK:
+            continue
+        if rel == PIN_FILE:
+            if kind(st, rel) == "file" and read(st, rel)[0] == ydata:
+                continue
+        elif same(target, st, rel):
+            continue
+        if os.path.lexists(os.path.join(props, *parts_of(rel))):
+            proposed.append((rel, "proposed by the installer"))
+            continue
+        if kind(st, rel) == "symlink":
+            plain_write(os.path.join(props, *parts_of(rel + ".link")), (readlink(st, rel) + "\n").encode("utf-8"))
+            note = "a link the installer would make (its target is in %s.link)" % rel
+        else:
+            data = read(st, rel)[0]
+            old = read(target, rel)[0] if kind(target, rel) == "file" else None
+            plain_write(os.path.join(props, *parts_of(rel)), data)
+            plain_write(os.path.join(props, *parts_of(rel + ".diff")), diff_text(old, data, rel).encode("utf-8"))
+            note = "the installer would change it" if old is not None else "missing here; the installer would add it"
+        proposed.append((rel, note + "; an update never writes a project file"))
+        out("proposed  %s  (%s)" % (rel, note))
+    # The installer's own proposals (for example the rules section for an AGENTS.md that is unchanged in the copy)
+    # are listed too, whether or not the staged copy differs: the owner decides every one of them.
+    listed = {rel for rel, _ in proposed}
+    if os.path.isdir(props):
+        for rel in walk(props):
+            if rel.endswith(".diff") or rel.endswith(".link") or rel in listed:
+                continue
+            proposed.append((rel, "proposed by the installer; an update never writes a project file"))
+            listed.add(rel)
+    with open(os.path.join(state, "proposed.json"), "w", encoding="utf-8") as f:
+        json.dump(proposed, f)
+    return writes, removes, ydata
+
+
+# --- 3. commit, with a journal ------------------------------------------------------------------------------------------
+class Journal:
+    def __init__(self, state):
+        self.dir = os.path.join(state, "journal.d")
+        os.makedirs(self.dir, exist_ok=True)
+        fsync_dir(state)   # journal.d itself must exist after a crash
+        self.path = os.path.join(state, "journal")
+        self.f = open(self.path, "a", encoding="utf-8")
+        fsync_dir(state)   # and so must the journal file's entry
+        self.n = 0
+
+    def before(self, root, rel):
+        """What rel is now, saved so it can be put back: none, a file (content and mode) or a link (its text)."""
+        k = kind(root, rel)
+        if k == "missing":
+            return {"kind": "none"}
+        if k == "symlink":
+            text = readlink(root, rel)
+            if "\t" in text or "\n" in text:
+                raise Stop("%s: a link whose text has a TAB or a line break; a person replaces it first" % rel)
+            return {"kind": "link", "text": text}
+        if k == "file":
+            data, mode = read(root, rel)
+            self.n += 1
+            path = os.path.join(self.dir, "%d" % self.n)
+            durable_write(path, data, 0o600)   # on disk before the journal line that points at it
+            return {"kind": "file", "mode": mode, "backup": path}
+        raise Stop("%s is not a file or a link; not touching it" % rel)
+
+    def log(self, entry):
+        self.f.write(json.dumps(entry) + "\n")
+        self.f.flush()
+        os.fsync(self.f.fileno())
+
+    def close(self):
+        self.f.close()
+
+
+class Fs:
+    """Every write in the target, made by factory-install's fs-tool (the copy in the state folder): it reaches each
+    path from the target's folder one descriptor at a time, never through a symlink, and writes by a temporary file
+    and rename(2) in the folder it checked. One call per step, so each step's journal lines come before its writes."""
+
+    def __init__(self, target, state):
+        self.target, self.tool = target, os.path.join(state, "factory-install")
+        self.queue = os.path.join(state, "fs.queue")
+        if not os.path.isfile(self.tool):
+            raise Stop("no factory-install in the state folder %s; cannot write in the target" % state)
+        r = subprocess.run(["sh", self.tool, "fs-tool", "id", target], stdout=subprocess.PIPE, universal_newlines=True)
+        if r.returncode:
+            raise Stop("factory-install fs-tool cannot reach the target %s" % target)
+        self.id = r.stdout.strip()
+
+    def run(self, ops):
+        """ops: (op, mode, rel, arg[, tmp]) tuples, done in order (see factory-install's fs_tool)."""
+        with open(self.queue, "w", encoding="utf-8") as f:
+            for op in ops:
+                f.write("\t".join(op) + "\n")
+        r = subprocess.run(["sh", self.tool, "fs-tool", "flush", self.target, self.id, "-", "target", self.queue])
+        if r.returncode:
+            raise Stop("factory-install fs-tool failed in the target (exit %d)" % r.returncode)
+
+
+def missing_dirs(root, rel):
+    """The folders above rel that do not exist yet, outermost first."""
+    parts, made = parts_of(rel)[:-1], []
+    for i in range(len(parts)):
+        k = kind(root, "/".join(parts[: i + 1]))
+        if k == "dir" and not made:
+            continue
+        if k != "missing":
+            raise Stop("%s is not a folder; not writing through it" % "/".join(parts[: i + 1]))
+        made.append("/".join(parts[: i + 1]))
+    return made
+
+
+def emptied(root, rel):
+    """The folders above rel that removing it leaves empty, innermost first, each with its mode."""
+    parts, gone = parts_of(rel), []
+    for i in range(len(parts) - 1, 0, -1):
+        fd = open_dir(root, parts[:i])
+        if fd is None:
+            break
+        try:
+            names, mode = os.listdir(fd), stat.S_IMODE(os.fstat(fd).st_mode)
+        finally:
+            os.close(fd)
+        if names != [parts[i]]:
+            break
+        gone.append(("/".join(parts[:i]), mode))
+    return gone
+
+
+def commit(target, state, writes, removes, ydata):
+    st = os.path.join(state, "stage")
+    pin_src = os.path.join(state, "factory.yaml.pinned")
+    plain_write(pin_src, ydata, 0o600)
+    steps = [("write", r) for r in writes] + [("remove", r) for r in removes] + [("pin", PIN_FILE), ("write", LOCK)]
+    fs = Fs(target, state)
+    j = Journal(state)
+    try:
+        for n, (op, rel) in enumerate(steps, 1):
+            hook("commit", n, len(steps), rel)
+            if op == "remove":
+                j.log({"op": "change", "rel": rel, "before": j.before(target, rel)})
+                gone = emptied(target, rel)
+                for d, mode in gone:
+                    j.log({"op": "rmdir", "rel": d, "mode": mode})
+                fs.run([("remove", "-", rel, "-")] + [("rmdir", "-", d, "-") for d, _ in gone])
+                continue
+            if op == "pin":
+                src, mode = pin_src, read(target, rel)[1]
+            else:
+                src, mode = os.path.join(st, *parts_of(rel)), read(st, rel)[1]
+            made = missing_dirs(target, rel)
+            for d in made:
+                j.log({"op": "mkdir", "rel": d})
+            before = j.before(target, rel)
+            tmp = ".factory-update." + secrets.token_hex(8)
+            j.log({"op": "change", "rel": rel, "before": before, "tmp": tmp})
+            ops = [("mkdir", "755", d, "-") for d in made]
+            if before["kind"] == "link":
+                ops.append(("remove", "-", rel, "-"))
+            ops.append(("put", "%o" % mode, rel, src, tmp))
+            fs.run(ops)
+        j.close()
+        os.rename(j.path, j.path + ".done")
+    except BaseException:
+        j.close()
+        rollback(target, state)
+        raise
+    out("written  %d core files, %d removed, factory.yaml's pin and .factory/core.lock" % (len(writes), len(removes)))
+
+
+def rollback(target, state):
+    path = os.path.join(state, "journal")
+    if not os.path.exists(path):
+        raise Stop("no journal to play back in %s (a run that finished or never began its commit phase)" % state)
+    with open(path, encoding="utf-8") as f:
+        entries = []
+        for line in f.read().split("\n"):
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                pass  # an empty line, or the last line of a run killed while writing it: its step never began
+    # The journal backwards, as one queue: every operation is a no-op when its step never happened.
+    ops = []
+    for e in reversed(entries):
+        rel = e["rel"]
+        parts = parts_of(rel)
+        if e["op"] == "mkdir":
+            ops.append(("rmdir", "-", rel, "-"))
+        elif e["op"] == "rmdir":
+            ops.append(("mkdir", "%o" % e["mode"], rel, "-"))
+        else:
+            if e.get("tmp"):
+                ops.append(("remove", "-", "/".join(parts[:-1] + [e["tmp"]]), "-"))
+            b = e["before"]
+            if b["kind"] == "file":
+                ops.append(("put", "%o" % b["mode"], rel, b["backup"]))
+            else:
+                ops.append(("remove", "-", rel, "-"))
+                if b["kind"] == "link":
+                    ops.append(("link", "-", rel, b["text"]))
+    if ops:
+        Fs(target, state).run(ops)
+    os.rename(path, path + ".rolled-back")
+    out("rolled back  every write of the commit phase; the target is as it was before this run")
+
+
+# --- 4. summary ---------------------------------------------------------------------------------------------------------
+def lines_of(data):
+    try:
+        return data.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return None
+
+
+def counts(a, b):
+    la, lb = lines_of(a), lines_of(b)
+    if la is None or lb is None:
+        return "binary"
+    plus = minus = 0
+    for line in difflib.unified_diff(la, lb, lineterm="", n=0):
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            plus += 1
+        elif line.startswith("-"):
+            minus += 1
+    return "+%d −%d" % (plus, minus)
+
+
+def load_reader(source):
+    """The doctor's YAML reader (core/bin/factory-doctor.py of the source), the one reader of the factory: a strict
+    subset of YAML that refuses what it cannot read. (reader, None), or (None, why) when it cannot be loaded."""
+    path = os.path.join(source, "core", "bin", "factory-doctor.py")
+    if not os.path.isfile(path):
+        return None, "the source has no core/bin/factory-doctor.py (the YAML reader)"
+    try:
+        import importlib.util
+        sys.dont_write_bytecode = True  # reading the source must leave nothing in it
+        spec = importlib.util.spec_from_file_location("factory_doctor", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod, None
+    except BaseException:  # noqa: B036 (any failure of the reader file is one fixed note)
+        return None, "the source's factory-doctor.py could not be loaded"
+
+
+def yaml_keys(reader, data):
+    """Key paths of a defaults file and the default of each, from the doctor's reader (never from line text, so a
+    trailing comment can never be part of a value). A map gives its own row, "(a section)", and a row per entry; a
+    list or a scalar is one value. Returns (keys, why): why is None, or the reader's refusal when it cannot read the
+    file, so the summary says so instead of guessing. It only informs the PR; it decides nothing."""
+    try:
+        doc = reader.Reader(data.decode("utf-8")).parse()
+    except reader.Refused as e:
+        return None, str(e)
+    except UnicodeDecodeError:
+        return None, "not UTF-8 text"
+    keys = {}
+
+    def walk(node, path):
+        key = ".".join(path)
+        if isinstance(node, dict) and node:
+            keys[key] = "(a section)"
+            for k, v in node.items():
+                walk(v, path + [str(k)])
+        elif isinstance(node, dict):
+            keys[key] = "{}"
+        elif node is None:
+            keys[key] = "(empty)"
+        elif isinstance(node, str):
+            keys[key] = "(a block of text)" if "\n" in node else node
+        else:
+            keys[key] = json.dumps(node, ensure_ascii=False)
+
+    if isinstance(doc, dict):
+        for k, v in doc.items():
+            if k == "entry_defaults" and isinstance(v, dict):
+                # Defaults inside one entry of a map: shown under the factory.yaml key they belong to, such as
+                # commands.checks.<name>.heavy.
+                for entry, own in v.items():
+                    for ek, ev in (own.items() if isinstance(own, dict) else ()):
+                        walk(ev, str(entry).split(".") + [str(ek)])
+            else:
+                walk(v, [str(k)])
+    return keys, None
+
+
+def code(text):
+    text = text.replace("|", "\\|").replace("\n", " ")
+    tick = "``" if "`" in text else "`"
+    return "%s%s%s" % (tick, text, tick)
+
+
+REQUIRED_MARK = "<required>"   # defaults.yaml's mark for a key with no default (factory.yaml must set it)
+
+
+def default_text(value):
+    """A default as the summary shows it: the mark of a required key is never shown as if it were a value."""
+    return "required; no default" if value == REQUIRED_MARK else code(value)
+
+
+PROCESS = (".claude/skills/", ".claude/agents/", ".factory/hooks/", ".factory/reference/", ".factory/bin/")
+
+
+def summary(source, target, state, report, check_out, commit_sha):
+    with open(os.path.join(state, "plan.json"), encoding="utf-8") as f:
+        plan = json.load(f)
+    with open(os.path.join(state, "proposed.json"), encoding="utf-8") as f:
+        proposed = json.load(f)
+    old_entries = plan["entries"]
+    new_version, upstream, new_entries, _ = read_lock(target)
+    keep = set(plan["keep"])
+
+    def old_data(rel):
+        p = os.path.join(state, "old-core", *rel.split("/"))
+        if not os.path.isfile(p):
+            return None
+        with open(p, "rb") as f:
+            return f.read()
+
+    def new_data(rel):
+        return read(target, rel)[0] if kind(target, rel) == "file" else None
+
+    rows, changed, added, removed, unchanged, process = [], 0, 0, 0, 0, []
+    for rel in sorted(set(old_entries) | set(new_entries)):
+        o, n = old_entries.get(rel), new_entries.get(rel)
+        if rel in keep:
+            if n is None:
+                rows.append((rel, "kept local edit; no longer in the core, so it is now the project's file", ""))
+            elif o != n:
+                rows.append((rel, "kept local edit; the core changed it (the core's version is in the proposals)", ""))
+            else:
+                rows.append((rel, "kept local edit; the core did not change it", ""))
+            continue
+        if o == n:
+            unchanged += 1
+            continue
+        if o is None:
+            added += 1
+            rows.append((rel, "added", counts(b"", new_data(rel) or b"")))
+        elif n is None:
+            removed += 1
+            rows.append((rel, "removed", counts(old_data(rel) or b"", b"")))
+        else:
+            changed += 1
+            rows.append((rel, "changed", counts(old_data(rel) or b"", new_data(rel) or b"")))
+        if rel.startswith(PROCESS):
+            process.append(rel)
+
+    md = []
+    sha_note = " Source commit `%s`." % commit_sha if re.fullmatch(r"[0-9a-f]{40,64}", commit_sha) else ""
+    md += ["## Core version", "",
+           "`%s` → `%s`, from `%s`.%s `factory.yaml` › `factory:` is pinned to `%s`; no other character of it "
+           "changed." % (plan["old"], new_version, upstream, sha_note, new_version), ""]
+    md += ["## Core files", "", "%d changed, %d added, %d removed, %d unchanged." % (changed, added, removed, unchanged)]
+    if rows:
+        md += ["", "| File | Change | Lines |", "| --- | --- | --- |"]
+        md += ["| %s | %s | %s |" % (code(rel), what, c) for rel, what, c in rows]
+    md.append("")
+
+    md += ["## New factory.yaml keys", ""]
+    od = old_data(".factory/defaults.yaml")
+    nd_path = os.path.join(source, "core", "defaults.yaml")
+    machine_md = []
+    if od is None or not os.path.isfile(nd_path):
+        md.append("Not compared: the old or the new core has no defaults file.")
+    else:
+        with open(nd_path, "rb") as f:
+            nd = f.read()
+        reader, why = load_reader(source)
+        ok_ = nk_ = None
+        if reader is None:
+            md.append("Not compared: %s." % why)
+        else:
+            ok_, oun = yaml_keys(reader, od)
+            nk_, nun = yaml_keys(reader, nd)
+            for name, refusal in (("old", oun), ("new", nun)):
+                if refusal:
+                    md.append("Not compared: the %s core's defaults.yaml is outside the strict YAML subset the "
+                              "factory's reader accepts (%s); see the diff of `.factory/defaults.yaml`." % (name, refusal))
+        if ok_ is not None and nk_ is not None:
+            def table(prefix, strip):
+                """(new, moved, gone) rows of the keys under `prefix` (None: every key outside the machine section),
+                with the key shown without `strip`."""
+                def mine(k):
+                    return (k == "machine" or k.startswith("machine.")) == (prefix == "machine")
+                shown = lambda k: k[len(strip):] if strip and k.startswith(strip) else k
+                return ([(shown(k), nk_[k]) for k in nk_ if k not in ok_ and mine(k)],
+                        [(shown(k), ok_[k], nk_[k]) for k in nk_ if k in ok_ and ok_[k] != nk_[k] and mine(k)],
+                        [(shown(k), ok_[k]) for k in ok_ if k not in nk_ and mine(k)])
+            new_keys, moved, gone = table(None, "")
+            if not (new_keys or gone or moved):
+                md.append("None: no factory.yaml key is new or removed, and no default changed.")
+            else:
+                md += ["A project that leaves out a key with a default gets that default; nothing in `factory.yaml` "
+                       "changes. A key marked \"required; no default\" has none: `factory.yaml` must set it.", "",
+                       "| Key | Change | Default |", "| --- | --- | --- |"]
+                md += ["| %s | new | %s |" % (code(k), default_text(v)) for k, v in new_keys]
+                md += ["| %s | default changed | %s → %s |" % (code(k), default_text(a_), default_text(b_))
+                       for k, a_, b_ in moved]
+                md += ["| %s | removed from the core | was %s |" % (code(k), default_text(v)) for k, v in gone]
+            m_new, m_moved, m_gone = table("machine", "machine.")
+            if m_new or m_moved or m_gone:
+                machine_md = ["## New machine settings", "",
+                              "Keys of `~/.factory/machine.yaml`, not of `factory.yaml`: a project cannot set them. A "
+                              "machine that leaves one out gets the default; nothing in the project changes.", "",
+                              "| Key | Change | Default |", "| --- | --- | --- |"]
+                machine_md += ["| %s | new | %s |" % (code(k), default_text(v)) for k, v in m_new if k != "machine"]
+                machine_md += ["| %s | default changed | %s → %s |" % (code(k), default_text(a_), default_text(b_))
+                               for k, a_, b_ in m_moved]
+                machine_md += ["| %s | removed from the core | was %s |" % (code(k), default_text(v))
+                               for k, v in m_gone if k != "machine"]
+    md.append("")
+    if machine_md:
+        md += machine_md + [""]
+
+    md += ["## Human gates", ""]
+    og = old_data(".factory/reference/human-gates.md")
+    ng_path = os.path.join(source, "core", "reference", "human-gates.md")
+    ng = None
+    if os.path.isfile(ng_path):
+        with open(ng_path, "rb") as f:
+            ng = f.read()
+    if og == ng:
+        md.append("No change to the human-gate list.")
+    else:
+        md += ["**The human-gate list changes.** That changes what waits for a person, so the project's owner "
+               "approves this PR (H4) before it merges.", "", "```diff"]
+        md.extend(difflib.unified_diff(lines_of(og or b"") or [], lines_of(ng or b"") or [],
+                                       ".factory/reference/human-gates.md (%s)" % plan["old"],
+                                       ".factory/reference/human-gates.md (%s)" % new_version, lineterm="", n=1))
+        md.append("```")
+    if process:
+        md += ["", "This update changes how agents work (%d skill, agent, hook, gate or shared-rule files above): a "
+               "process change, so the project's owner approves it (H4)." % len(process)]
+    md.append("")
+
+    md += ["## Proposed, not written", ""]
+    if proposed:
+        md += ["An update writes only the core's files, the lock and the pin. These project files are what "
+               "`factory-install apply` would add or change; each is in the proposals folder with its diff, for a "
+               "person to take or leave in this PR:", "", "| File | Why |", "| --- | --- |"]
+        md += ["| %s | %s |" % (code(rel), note) for rel, note in proposed]
+    else:
+        md.append("None: the installer would change no project file.")
+    md.append("")
+
+    notes = []
+    if os.path.isfile(report):
+        with open(report, encoding="utf-8") as f:
+            for line in f.read().splitlines():
+                m = re.match(r"^(\S+)  (\S+)(?:  \((.*)\))?$", line)
+                if not m or m.group(1) == "unchanged" or m.group(2) == LOCK:
+                    continue
+                if (m.group(2) in old_entries or m.group(2) in new_entries) and m.group(1) != "differs":
+                    continue
+                notes.append(line)
+    md += ["## Installer notes", ""]
+    if notes:
+        md += ["What `factory-install apply` reported for the staging copy outside the core's own files (none of it "
+               "was written here; see the proposals above):", "", "```"] + notes + ["```"]
+    else:
+        md.append("None.")
+    md += ["", "`factory-install check` after the update:", "", "```"] + check_out.splitlines() + ["```"]
+
+    path = os.path.join(state, "summary.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(md) + "\n")
+    out("summary  %s  (core %s -> %s: %d changed, %d added, %d removed, %d kept edits, %d proposed)"
+        % (path, plan["old"], new_version, changed, added, removed, len(keep), len(proposed)))
+    return 0
+
+
+def main(argv):
+    cmd = argv[0]
+    if cmd == "check":
+        return assess(argv[1], argv[2], argv[3])[0]
+    if cmd == "stage":
+        r = stage(*argv[1:7])
+        if r == 0:
+            hook("staged")
+        return r
+    if cmd == "commit":
+        target, state = argv[1], argv[2]
+        writes, removes, ydata = sort(target, state)
+        commit(target, state, writes, removes, ydata)
+        return 0
+    if cmd == "rollback":
+        rollback(argv[1], argv[2])
+        return 0
+    if cmd == "summary":
+        return summary(*argv[1:7])
+    raise Stop("unknown engine command", 2)
+
+
+try:
+    sys.exit(main(sys.argv[1:]))
+except Stop as e:
+    print("%s: %s" % (PROG, e), file=sys.stderr)
+    sys.exit(e.code)
+PY
+}
+
+if [ "$cmd" = rollback ]; then
+  STATE=$(abs_dir "$STATE")
+  engine rollback "$TARGET" "$STATE"
+  exit
+fi
+
+W=$(mktemp -d "${TMPDIR:-/tmp}/factory-update.XXXXXX")
+trap 'rm -rf "$W"' EXIT
+printf '%s' "$DECISIONS" > "$W/decisions"
+
+if [ "$cmd" = check ]; then
+  rc=0; engine check "$SOURCE" "$TARGET" "$W/decisions" || rc=$?
+  exit "$rc"
+fi
+
+# --- run ----------------------------------------------------------------------------------------------------------------
+VALUES=$(abs_dir "$VALUES")
+git -C "$TARGET" rev-parse --is-inside-work-tree > /dev/null 2>&1 || die "the target is not a git work tree: run it in a fresh worktree of the project"
+[ -z "$(git -C "$TARGET" status --porcelain --untracked-files=all)" ] || die "the target has uncommitted changes: run it in a fresh worktree of the project"
+git -C "$TARGET" ls-files -z > "$W/tracked" || die "cannot list the target's tracked files"
+
+# 1. Stage. Nothing in the target is written before the commit phase.
+rc=0; engine stage "$SOURCE" "$TARGET" "$STATE" "$VALUES" "$W/decisions" "$W/tracked" || rc=$?
+if [ "$rc" != 0 ]; then
+  [ "$rc" = 3 ] || [ "$rc" = 4 ] || echo "$prog: nothing was written in the target" >&2
+  exit "$rc"
+fi
+STATE=$(abs_dir "$STATE")
+# The installer's update mode, with the old version and the same decisions.
+set -- --update-from "$(cat "$STATE/old-version")"
+while IFS='	' read -r what path; do set -- "$@" "--$what" "$path"; done < "$W/decisions"
+rc=0
+sh "$SOURCE/core/bin/factory-install" apply --source "$SOURCE" --target "$STATE/stage" --values "$STATE/values" \
+  --report "$STATE/install.txt" --proposals "$STATE/proposals" "$@" > "$STATE/install.out" 2>&1 || rc=$?
+case $rc in
+  0 | 3) ;;
+  *) cat "$STATE/install.out" >&2; die "factory-install apply failed on the staging copy (exit $rc); nothing was written in the target" ;;
+esac
+
+# 2 and 3. Sort and commit (played back from the journal on any failure).
+if ! engine commit "$TARGET" "$STATE"; then
+  # The engine plays its journal back itself; a journal still here means it was killed before it could.
+  if [ -f "$STATE/journal" ]; then
+    engine rollback "$TARGET" "$STATE" || die "the update failed and the rollback did not finish: run '$prog rollback --target $TARGET --state $STATE'"
+  fi
+  die "the update failed; the target is as it was"
+fi
+
+# 4. Summary.
+crc=0; check_out=$(sh "$SOURCE/core/bin/factory-install" check --target "$TARGET" 2>&1) || crc=$?
+commit=$(git -C "$SOURCE" rev-parse HEAD 2> /dev/null || true)
+engine summary "$SOURCE" "$TARGET" "$STATE" "$STATE/install.txt" "$check_out$newline(exit $crc)" "$commit"

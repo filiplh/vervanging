@@ -1,0 +1,22 @@
+#!/bin/sh
+# factory-metrics: what merged work cost, per tier, from GitHub and the machine's usage ledger; one short table.
+#
+#   factory-metrics [--days N] [--repo OWNER/NAME] [--project NAME] [--post]
+#   factory-metrics --help                                   what each number is and where it comes from
+#
+# Read-only on GitHub except one comment on the status issue, with --post only; it reads the usage ledger through
+# factory-usage's own reader and never writes it. Everything else is in factory-metrics.py next to this file (python3,
+# standard library only), which uses factory.py's GitHub access (both agent-token modes) and factory-usage.py's ledger
+# reader. Exit codes: 0 printed (and posted); 1 a read could not finish (the table says cannot tell) or the post
+# failed; 3 refused (paused, no single status issue); 64 bad usage.
+set -u
+unset CDPATH
+here=$(cd -P "$(dirname "$0")" 2> /dev/null && pwd -P) ||
+  { echo "factory-metrics: cannot find its own folder" >&2; exit 1; }
+command -v python3 > /dev/null 2>&1 ||
+  { echo "factory-metrics: needs python3 (standard library only); install Python 3" >&2; exit 1; }
+for f in factory-metrics.py factory.py factory-usage.py factory-doctor.py factory-safe-paths.py; do
+  [ -f "$here/$f" ] ||
+    { echo "factory-metrics: $f is missing next to it; restore the core files with factory update" >&2; exit 1; }
+done
+exec python3 -I -B "$here/factory-metrics.py" "$@"

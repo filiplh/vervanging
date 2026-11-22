@@ -1,0 +1,127 @@
+#!/bin/sh
+# factory-settings: show every setting a project runs with and where each value comes from. It changes nothing.
+#
+#   factory-settings [--target DIR] [--changed] [--json] [KEY-PREFIX]
+#
+# Options:
+#   --target DIR   the project's checkout (default: the git top level of the current folder, else the folder)
+#   --changed      only the settings whose value differs from the default (set in factory.yaml or the machine file);
+#                  the state lines are left out, since they have no default
+#   --json         machine-readable output: {"target", "changed_only", "settings": [{key, value, source, default}],
+#                  "state": [{key, value, source}]}; "default" is left out where the key has none
+#   KEY-PREFIX     only the keys equal to it or under it, such as commands.checks, models.tiers or machine.limits
+#   -h, --help     this text
+#
+# What it shows, one line per key (key, source, value):
+#   every factory.yaml key of the schema (docs/factory-yaml.md), merged with the core defaults as that document says:
+#     maps merge per key, lists and scalars replace. Source: factory.yaml, or core default <version>;
+#   every machine setting, as machine.<key>, from ~/.factory/machine.yaml over the machine section of the core's
+#     defaults.yaml. Source: machine.yaml, or machine default;
+#   state that is not a key: the core version and upstream (.factory/core.lock), the emergency stop (factory-pause
+#     status) and the agent-token mode (factory-github mode). Each reads unknown when it cannot be read, never a guess.
+# A factory.yaml that is missing or that factory-doctor would fail gives one line pointing at factory-doctor, and no
+# value. A machine file the doctor would fail shows its keys as unknown.
+#
+# Exit codes: 0 shown; 1 factory.yaml missing or not valid, no key matches the prefix, or python3 missing; 64 bad usage.
+#
+# Needs: a POSIX shell and python3 (standard library only). It reads files, runs `factory-github mode` when a broker
+# is installed and `factory-pause status`, which reads the status issue (`gh issue list`, or the broker's issue-list).
+# Nothing else: no write, no other gh call, no network. It never reads, asks for or prints a credential.
+#
+# What reaches the terminal: as in factory-doctor, the whole run happens in a subshell whose stdout and stderr go to
+# /dev/null. It can write in two places only, which this script prints at the end: the report, built by
+# factory-settings.py (every value, key and path through factory-doctor.py's redaction, in text and JSON alike), and
+# fixed one-line messages that hold no value from any input. Every line that writes to either place carries the
+# comment "# out:", and the tests check that no other line can.
+set -u
+unset CDPATH
+prog=factory-settings
+
+# Outside the subshell only these steps run, and each keeps its own error messages to itself.
+W=$(mktemp -d "${TMPDIR:-/tmp}/factory-settings.XXXXXX" 2> /dev/null) || {
+  printf '%s\n' "factory-settings: cannot make a temporary folder (check TMPDIR)" >&2   # out: a fixed message
+  exit 1
+}
+trap 'rm -rf "$W" 2> /dev/null' EXIT
+OUT=$W/out ERR=$W/err
+
+main() {
+
+  here=$(cd -P "$(dirname "$0")" && pwd -P)
+  usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
+  # A fixed message for the person: its text is a literal at every call, never a value from an input.
+  fixed() { printf '%s: %s\n' "$prog" "$1" >> "$ERR"; }   # out: fixed messages only
+  bad_usage() { fixed "$1"; fixed "see --help"; exit 64; }
+
+  TARGET='' JSON='' CHANGED='' PREFIX='' HAVE_PREFIX=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --target) [ $# -ge 2 ] || bad_usage "--target needs a folder"; TARGET=$2; shift ;;
+      --json) JSON=1 ;;
+      --changed) CHANGED=1 ;;
+      -h | --help) usage > "$OUT"; exit 0 ;;   # out: the authored help text
+      -*) bad_usage "unknown option (not shown)" ;;
+      *)
+        [ -z "$HAVE_PREFIX" ] || bad_usage "give at most one key prefix"
+        printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]*$' \
+          || bad_usage "a key prefix is letters, digits, _ . - (the prefix is not shown)"
+        PREFIX=$1 HAVE_PREFIX=1 ;;
+    esac
+    shift
+  done
+  if [ -z "$TARGET" ]; then TARGET=$(git rev-parse --show-toplevel 2> /dev/null) || TARGET=$(pwd -P); fi
+  TARGET=$(cd -P "$TARGET" 2> /dev/null && pwd -P) || bad_usage "--target is not a folder"
+
+  if ! command -v python3 > /dev/null 2>&1 || [ ! -f "$here/factory-settings.py" ] || [ ! -f "$here/factory-doctor.py" ]; then
+    fixed "needs python3 (standard library only) and factory-settings.py and factory-doctor.py next to it"
+    fixed "install Python 3, or restore the core files with factory-update"
+    exit 1
+  fi
+  DEFAULTS=$TARGET/.factory/defaults.yaml
+  [ -f "$DEFAULTS" ] || DEFAULTS=$here/../defaults.yaml
+
+  # --- agent-token mode: the broker, found as factory-pause finds it (on PATH, else in ~/.factory/bin) ------------------
+  BROKER=$(command -v factory-github 2> /dev/null) || BROKER=''
+  [ -n "$BROKER" ] || [ ! -x "$HOME/.factory/bin/factory-github" ] || BROKER=$HOME/.factory/bin/factory-github
+  MODE=none
+  if [ -n "$BROKER" ]; then
+    _rc=0
+    (cd "$TARGET" && "$BROKER" mode) > "$W/mode" 2> /dev/null < /dev/null || _rc=$?
+    _m=$(cat "$W/mode")
+    case "$_rc $_m" in "0 off" | "0 staged" | "0 on") MODE=$_m ;; *) MODE=unknown ;; esac
+  fi
+
+  # --- the emergency stop: factory-pause status, run as factory-doctor runs it -----------------------------------------
+  python3 -I -B "$here/factory-settings.py" repo --target "$TARGET" --defaults "$DEFAULTS" > "$W/repo" 2> /dev/null < /dev/null || true
+  REPO=$(sed -n '1p' "$W/repo")
+  STOP=unknown
+  if [ -f "$here/factory-pause" ]; then
+    _rc=-1
+    case $MODE in
+      none | off) [ -z "$REPO" ] || { _rc=0; sh "$here/factory-pause" status -q -R "$REPO" > /dev/null 2>&1 < /dev/null || _rc=$?; } ;;
+      on) _rc=0; (cd "$TARGET" && sh "$here/factory-pause" status -q) > /dev/null 2>&1 < /dev/null || _rc=$? ;;
+    esac
+    case $_rc in 0) STOP=off ;; 3) STOP=on ;; esac
+  fi
+
+  # --- the report -------------------------------------------------------------------------------------------------------
+  _rc=0
+  python3 -I -B "$here/factory-settings.py" show --target "$TARGET" --defaults "$DEFAULTS" \
+    --machine "$HOME/.factory/machine.yaml" --mode "$MODE" --stop "$STOP" ${HAVE_PREFIX:+--prefix "$PREFIX"} \
+    ${CHANGED:+--changed} ${JSON:+--json} > "$W/report" 2> /dev/null < /dev/null || _rc=$?
+  case $_rc in
+    0) cat "$W/report" > "$OUT" ;;   # out: the redacted report
+    3) fixed "factory.yaml is missing or not valid, so no setting is shown; run factory-doctor (sh .factory/bin/factory-doctor) for what to fix"
+       exit 1 ;;
+    4) fixed "no setting matches the key prefix (not shown); run without it to list every key"; exit 1 ;;
+    *) fixed "the report could not be made (an internal error); report this to the factory repo"; exit 1 ;;
+  esac
+  exit 0
+}
+
+# Run with every inherited output going to /dev/null, then print the two places it may write.
+rc=0
+(main "$@") < /dev/null > /dev/null 2>&1 || rc=$?
+cat "$OUT" 2> /dev/null        # out: the report or the help text
+cat "$ERR" >&2 2> /dev/null    # out: fixed messages
+exit "$rc"

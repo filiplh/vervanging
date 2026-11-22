@@ -1,0 +1,9 @@
+{
+  "name": "factory-deploy-tool",
+  "private": true,
+  "description": "The pinned deploy tool of the cloudflare-workers recipe. Installed only with npm ci --ignore-scripts, in an empty folder.",
+  "license": "MIT",
+  "dependencies": {
+    "wrangler": "4.160.1"
+  }
+}

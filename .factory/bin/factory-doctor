@@ -1,0 +1,379 @@
+#!/bin/sh
+# factory-doctor: check a project's factory setup and say how to fix what is wrong. It changes nothing.
+#
+#   factory-doctor [--target DIR] [--source DIR] [--repo OWNER/NAME] [--min-free-gb N] [--json]
+#
+# Options:
+#   --target DIR        the project's checkout (default: the git top level of the current folder, else the folder)
+#   --source DIR        the factory source (the folder holding core/), for the label template when this checkout has
+#                       none; a project's copy of the core does not carry it
+#   --repo OWNER/NAME   the repository for the GitHub checks (default: factory.yaml › project.repo)
+#   --min-free-gb N     the free-disk threshold (default: ~/.factory/machine.yaml › doctor.min_free_gb, else the
+#                       machine default in the core's defaults.yaml; a built-in 20 only when that cannot be read,
+#                       and the report says so)
+#   --json              machine-readable output: {"target", "exit", "summary", "checks": [{check, status, message,
+#                       fix, details}]}
+#   -h, --help          this text
+#
+# Checks, each reported as ok, warn, fail or n/a (not applicable, or not checkable here; the message says which),
+# with a one-line message and, for warn and fail, a one-line fix:
+#   factory.yaml   present, inside the reader's YAML subset, valid against docs/factory-yaml.md; no credential-shaped
+#                  value; no top model or effort as a default, and an escalation ladder that only steps up
+#   core.lock      present and well-formed, upstream recorded, its version equal to factory.yaml › factory, and every
+#                  core file's sha256 as the lock records it; an edited or missing core file is named
+#   labels         every label of the core's template exists on the repo (read-only gh label list)
+#   status-issue   exactly one open factory:status issue, and whether the factory is paused (factory-pause status;
+#                  with agent-token mode on it reads through the broker, and is n/a from an agent shell or staged)
+#   hooks          the hooks the core installs exist and are wired in .claude/settings.json, each by an entry whose
+#                  command is exactly an accepted form (the factory-doctor skill lists them); n/a while the core
+#                  installs none. The settings files that exist must parse either way
+#   verify         commands.verify is set and the program it starts exists; it is never run
+#   auth           gh is logged in, or in agent-token mode the broker's mode and check; no token is ever read
+#   disk           free space on the checkout's volume against the threshold
+#   machine        ~/.factory/machine.yaml keys and ranges, when the file exists
+#
+# Exit codes: 0 every check ok or n/a; 1 at least one fail; 2 warnings but no fail; 64 bad usage.
+#
+# Needs: a POSIX shell, awk, sed, df, sha256sum or shasum; python3 (standard library only) for the factory.yaml,
+# verify, hooks, machine and label-list parts and for the output; gh for the GitHub checks. It calls only
+# `gh auth status` (output discarded), `gh label list` and, through factory-pause, `gh issue list` (or the broker's
+# issue-list). It never reads, asks for or prints a credential.
+#
+# What reaches the terminal. The whole check runs in a subshell whose stdout and stderr go to /dev/null, so no
+# command's own output or error message (mktemp, cd, git, gh, df, python3, factory-pause, the broker, anything) ever
+# reaches the person: a command's output is captured into a file and used as data, or thrown away. The subshell can
+# write in only two places, which this script prints at the end: the report, built by factory-doctor.py render (one
+# redaction for text and JSON, blanking every credential shape in factory-doctor.py's list), and fixed one-line
+# messages that hold no value from any input. Without a working python3 the report holds only check names and
+# statuses. Every line that writes to either place carries the comment "# out:", and the tests check that no other
+# line can.
+set -u
+unset CDPATH
+prog=factory-doctor
+
+# Outside the subshell only these steps run, and each keeps its own error messages to itself.
+W=$(mktemp -d "${TMPDIR:-/tmp}/factory-doctor.XXXXXX" 2> /dev/null) || {
+  printf '%s\n' "factory-doctor: cannot make a temporary folder (check TMPDIR)" >&2   # out: a fixed message
+  exit 1
+}
+trap 'rm -rf "$W" 2> /dev/null' EXIT
+OUT=$W/out ERR=$W/err
+
+main() {
+
+  here=$(cd -P "$(dirname "$0")" && pwd -P)
+  usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
+  # A fixed message for the person: its text is a literal at every call, never a value from an input.
+  fixed() { printf '%s: %s\n' "$prog" "$1" >> "$ERR"; }   # out: fixed messages only
+  bad_usage() { fixed "$1"; fixed "see --help"; exit 64; }
+
+  TARGET='' SOURCE='' REPO='' MINGB='' JSON=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --target) [ $# -ge 2 ] || bad_usage "--target needs a folder"; TARGET=$2; shift ;;
+      --source) [ $# -ge 2 ] || bad_usage "--source needs a folder"; SOURCE=$2; shift ;;
+      --repo) [ $# -ge 2 ] || bad_usage "--repo needs OWNER/NAME"; REPO=$2; shift ;;
+      --min-free-gb) [ $# -ge 2 ] || bad_usage "--min-free-gb needs a number"; MINGB=$2; shift ;;
+      --json) JSON=1 ;;
+      -h | --help) usage > "$OUT"; exit 0 ;;   # out: the authored help text
+      *) bad_usage "unknown argument (not shown)" ;;
+    esac
+    shift
+  done
+
+  valid_repo() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; }
+  [ -z "$REPO" ] || valid_repo "$REPO" || bad_usage "--repo is not OWNER/NAME"
+  case $MINGB in '' | *[!0-9]* | 0*) [ -z "$MINGB" ] || bad_usage "--min-free-gb takes a whole number of at least 1" ;; esac
+  if [ -z "$TARGET" ]; then TARGET=$(git rev-parse --show-toplevel 2> /dev/null) || TARGET=$(pwd -P); fi
+  TARGET=$(cd -P "$TARGET" 2> /dev/null && pwd -P) || bad_usage "--target is not a folder"
+  if [ -n "$SOURCE" ]; then SOURCE=$(cd -P "$SOURCE" 2> /dev/null && pwd -P) || bad_usage "--source is not a folder"; fi
+
+  REC=$W/records
+  : > "$REC"
+
+  # Records: "R<TAB>check<TAB>status<TAB>message<TAB>fix" and "D<TAB>check<TAB>detail", one per line.
+  clean() { printf '%s' "$1" | tr '\t\n\r' '   ' | tr -d '\000-\037\177'; }
+  result() { printf 'R\t%s\t%s\t%s\t%s\n' "$1" "$2" "$(clean "$3")" "$(clean "${4:-}")" >> "$REC"; }
+  detail() { printf 'D\t%s\t%s\n' "$1" "$(clean "$2")" >> "$REC"; }
+  first_line() { sed -n '/[^[:space:]]/{p;q;}' "$1"; }   # shortened only after redaction, in the output step
+
+  # How to name this folder of scripts in a hint: relative to the checkout when it is inside it.
+  case $here in "$TARGET"/*) BIN=${here#"$TARGET"/} ;; *) BIN=$here ;; esac
+  if [ -n "$SOURCE" ]; then INSTALL="sh $SOURCE/core/bin/factory-install"; SRC=$SOURCE
+  else INSTALL="sh <factory source>/core/bin/factory-install"; SRC='<factory source>'; fi
+
+  hash_file() {
+    if command -v sha256sum > /dev/null 2>&1; then sha256sum < "$1" | cut -d' ' -f1
+    else shasum -a 256 < "$1" | cut -d' ' -f1; fi
+  }
+
+  # --- factory.yaml, verify, hooks, machine (python3) -------------------------------------------------------------------
+  DEFAULTS=$TARGET/.factory/defaults.yaml
+  [ -f "$DEFAULTS" ] || DEFAULTS=$here/../defaults.yaml
+  LABELS=''
+  for _l in ${SOURCE:+"$SOURCE/core/templates/labels.yaml"} "$here/../templates/labels.yaml" "$TARGET/.factory/templates/labels.yaml"; do
+    if [ -f "$_l" ]; then LABELS=$_l; break; fi
+  done
+  : > "$W/py"
+  if command -v python3 > /dev/null 2>&1 && [ -f "$here/factory-doctor.py" ]; then
+    _rc=0
+    python3 -I "$here/factory-doctor.py" checks --target "$TARGET" --defaults "$DEFAULTS" \
+      --machine "$HOME/.factory/machine.yaml" --labels "$LABELS" > "$W/py" 2> "$W/py.err" || _rc=$?
+    grep '^[RD]	' "$W/py" >> "$REC" || true
+    [ "$_rc" -eq 0 ] || detail factory.yaml "the doctor's parser stopped: $(first_line "$W/py.err")"
+  else
+    _why="python3 is not on PATH"; [ -f "$here/factory-doctor.py" ] || _why="factory-doctor.py is missing next to factory-doctor"
+    for _c in factory.yaml verify hooks machine; do
+      result "$_c" fail "not checked: $_why" "install Python 3 (standard library only), or restore the core files with factory-update"
+    done
+  fi
+  fact() { awk -F '\t' -v k="$1" '$1 == "F" && $2 == k { print $3; exit }' "$W/py"; }
+  VERSION=$(fact version)
+  [ -n "$REPO" ] || REPO=$(fact repo)
+  # The minimum: --min-free-gb, else machine.yaml, else the core defaults (factory-doctor.py reads both). Only when
+  # none can be read does this script's own 20 apply, and the disk check says so.
+  [ -n "$MINGB" ] || MINGB=$(fact min_free_gb)
+  MINGB_NOTE=''
+  if [ -z "$MINGB" ]; then
+    MINGB=20
+    MINGB_NOTE=$(fact min_free_gb_why); [ -n "$MINGB_NOTE" ] || MINGB_NOTE="the core defaults could not be read here (see the factory.yaml check)"
+    MINGB_NOTE="free-space minimum: $MINGB_NOTE; using the built-in 20 GB (restore the core files with factory-update)"
+  fi
+
+  # --- core.lock --------------------------------------------------------------------------------------------------------
+  check_lock() {
+    _lock=$TARGET/.factory/core.lock
+    if [ -L "$_lock" ] || [ ! -f "$_lock" ]; then
+      result core.lock fail "no .factory/core.lock (or it is not a plain file)" \
+        "install the core with /factory-init; it writes the lock with the hash of every core file"
+      return
+    fi
+    _bad=0 _edited=0 _missing=0 _ok=0
+    # The lock's format, as factory-install writes it: comments, one version:, one upstream:, "<sha256>  <path>" lines.
+    # A malformed line is named by its number only: its text could be anything, a credential included.
+    if grep -nEv '^(#.*|version: [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?|upstream: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[0-9a-f]{64}  [^/[:space:]][^[:space:]]*)$' "$_lock" > "$W/lockbad"; then
+      _bad=$((_bad + $(grep -c '' "$W/lockbad")))
+      while IFS=: read -r _ln _rest; do detail core.lock "malformed line $_ln"; done < "$W/lockbad"
+    fi
+    _ver=$(sed -n 's/^version: //p' "$_lock")
+    _up=$(sed -n 's/^upstream: //p' "$_lock")
+    if [ "$(printf '%s' "$_ver" | grep -c '')" != 1 ]; then _bad=$((_bad + 1)); detail core.lock "needs exactly one version: line"; _ver=''; fi
+    if [ "$(printf '%s' "$_up" | grep -c '')" != 1 ]; then _bad=$((_bad + 1)); detail core.lock "needs exactly one upstream: line (the factory repo, owner/name)"; _up=''; fi
+    grep -E '^[0-9a-f]{64}  [^/[:space:]][^[:space:]]*$' "$_lock" > "$W/entries" || true
+    _n=$(grep -c '' "$W/entries")
+    [ "$_n" -gt 0 ] || { _bad=$((_bad + 1)); detail core.lock "lists no core files"; }
+    while read -r _h _p; do
+      case /$_p/ in */../* | */./* | *//*) _bad=$((_bad + 1)); detail core.lock "unsafe path: $_p"; continue ;; esac
+      if [ -L "$TARGET/$_p" ]; then _edited=$((_edited + 1)); detail core.lock "edited (now a symlink): $_p"
+      elif [ ! -f "$TARGET/$_p" ]; then _missing=$((_missing + 1)); detail core.lock "missing: $_p"
+      elif [ "$(hash_file "$TARGET/$_p")" != "$_h" ]; then _edited=$((_edited + 1)); detail core.lock "edited: $_p"
+      else _ok=$((_ok + 1)); fi
+    done < "$W/entries"
+    _vdiff=''
+    if [ -n "$VERSION" ] && [ -n "$_ver" ] && [ "$VERSION" != "$_ver" ]; then
+      _vdiff="factory.yaml pins core $VERSION but core.lock records $_ver"; detail core.lock "$_vdiff"
+    fi
+    if [ $((_edited + _missing)) -gt 0 ]; then
+      result core.lock fail "$_edited edited and $_missing missing of $_n core files (listed below)" \
+        "never edit a core file in place: restore it with factory-update (or /factory-init at core ${_ver:-its version}); a change the core needs goes upstream to ${_up:-the factory repo} as a PR"
+    elif [ "$_bad" -gt 0 ]; then
+      result core.lock fail "the lock is not well-formed (listed below)" \
+        "never edit .factory/core.lock by hand: re-run factory-update or /factory-init, which write it"
+    elif [ -n "$_vdiff" ]; then
+      result core.lock fail "$_vdiff" "factory-update moves factory.yaml and the core files to one version in one PR"
+    else
+      result core.lock ok "$_ok core files match (core $_ver from $_up)"
+    fi
+  }
+  check_lock
+
+  # --- disk -------------------------------------------------------------------------------------------------------------
+  df -Pk "$TARGET" > "$W/df" 2> /dev/null || true
+  _kb=$(awk 'NR == 2 { print $4 }' "$W/df")
+  _mnt=$(awk 'NR == 2 { print $6 }' "$W/df")
+  [ -z "$MINGB_NOTE" ] || detail disk "$MINGB_NOTE"
+  case $_kb in
+    '' | *[!0-9]*) result disk warn "could not read the free space (df gave no number)" "check the volume by hand: df -h $TARGET" ;;
+    *)
+      _gb=$((_kb / 1048576))
+      if [ "$_gb" -lt "$MINGB" ]; then
+        result disk warn "$_gb GB free on $_mnt, below the $MINGB GB threshold" \
+          "free space with sh $BIN/factory-gc (a dry run first, then --apply); the threshold is doctor.min_free_gb in ~/.factory/machine.yaml"
+      else
+        result disk ok "$_gb GB free on $_mnt (threshold $MINGB GB)"
+      fi ;;
+  esac
+
+  # --- auth (and agent-token mode) --------------------------------------------------------------------------------------
+  # The broker, found as factory-pause finds it: on PATH, else in ~/.factory/bin. None means mode off.
+  BROKER=$(command -v factory-github 2> /dev/null) || BROKER=''
+  [ -n "$BROKER" ] || [ ! -x "$HOME/.factory/bin/factory-github" ] || BROKER=$HOME/.factory/bin/factory-github
+  MODE=off
+  if [ -n "$BROKER" ]; then
+    _rc=0
+    (cd "$TARGET" && "$BROKER" mode) > "$W/mode" 2> "$W/mode.err" < /dev/null || _rc=$?
+    _m=$(cat "$W/mode")
+    case "$_rc $_m" in "0 off" | "0 staged" | "0 on") MODE=$_m ;; *) MODE=blocked ;; esac
+  fi
+  # The placeholder the project's settings give agent shells in agent-token mode; compared, never printed.
+  AGENT_SHELL=''
+  [ "${GH_TOKEN:-}" != factory-no-agent-token ] || AGENT_SHELL=1
+  GH_LOGIN=no
+  if ! command -v gh > /dev/null 2>&1; then GH_LOGIN=absent
+  elif [ -z "$AGENT_SHELL" ] && gh auth status > /dev/null 2>&1 < /dev/null; then GH_LOGIN=yes; fi
+  LOGIN_FIX="run gh auth login in your own terminal; never paste a token into an agent session"
+  gh_word() { case $GH_LOGIN in yes) echo "logged in" ;; absent) echo "not installed" ;; *) echo "not logged in" ;; esac; }
+
+  case $MODE in
+    off)
+      case $GH_LOGIN in
+        yes) result auth ok "gh: logged in" ;;
+        absent) result auth fail "gh: not installed" "install the GitHub CLI (gh), then $LOGIN_FIX" ;;
+        *) result auth fail "gh: not logged in" "$LOGIN_FIX" ;;
+      esac ;;
+    staged)
+      result auth warn "agent-token mode is staged: agents start nothing but the isolation probe$([ -n "$AGENT_SHELL" ] || echo "; your gh: $(gh_word)")" \
+        "run the isolation probe, record it, then set the mode to on (the factory repo's docs/agent-tokens.md, steps 8 and 9)" ;;
+    on)
+      if [ -n "$AGENT_SHELL" ]; then
+        _rc=0
+        (cd "$TARGET" && "$BROKER" check) > "$W/check" 2> "$W/check.err" < /dev/null || _rc=$?
+        if [ "$_rc" -eq 0 ] && grep -q '^ok:' "$W/check"; then
+          result auth ok "agent-token mode on: factory-github check passed"
+        else
+          _why=$(first_line "$W/check.err"); [ -n "$_why" ] || _why=$(first_line "$W/check")
+          result auth fail "agent-token mode on, but factory-github check refused: ${_why:-no answer}" \
+            "fix what the refusal names (the factory repo's docs/agent-tokens.md); start no agent until check passes"
+        fi
+      elif [ "$GH_LOGIN" = yes ]; then
+        result auth ok "agent-token mode on; your own gh: logged in (the broker's check runs from agent shells)"
+      else
+        result auth fail "agent-token mode on; your own gh: $(gh_word)" "$LOGIN_FIX"
+      fi ;;
+    *)
+      _why=$(first_line "$W/mode.err"); [ -n "$_why" ] || _why=$(first_line "$W/mode")
+      result auth fail "agent-token mode: the broker gives no clear mode: ${_why:-no answer}" \
+        "fix what the broker names (the factory repo's docs/agent-tokens.md); until then start nothing in this project" ;;
+  esac
+
+  # Can the GitHub checks run here? Not from an agent shell in agent-token mode: gh holds no login there.
+  gh_ready() { # gh_ready <check>: true when gh can be used, else reports why
+    if [ -z "$REPO" ]; then
+      result "$1" warn "not checked: no repository (factory.yaml › project.repo is missing or invalid)" "fix factory.yaml first, or pass --repo OWNER/NAME"
+    elif [ -n "$AGENT_SHELL" ]; then
+      result "$1" n/a "not checked from an agent shell in agent-token mode (gh has no login here); run factory-doctor in your own terminal"
+    elif [ "$GH_LOGIN" != yes ]; then
+      result "$1" warn "not checked: gh is $(gh_word)" "$LOGIN_FIX"
+    else return 0; fi
+    return 1
+  }
+
+  # --- labels -----------------------------------------------------------------------------------------------------------
+  LABEL_FIX="add them: $INSTALL labels --source $SRC --repo ${REPO:-OWNER/NAME} --values <values folder> (or re-run /factory-init); it never deletes a label"
+  if ! grep -q '^L	' "$W/py"; then
+    _why=$(fact labels_unknown)
+    result labels warn "not checked: ${_why:-the wanted label list could not be made}" \
+      "run factory-doctor with --source <factory source> (the folder that holds core/templates/labels.yaml)"
+  elif gh_ready labels; then
+    sed -n 's/^L	//p' "$W/py" > "$W/want"
+    if gh label list --repo "$REPO" --limit 1000 --json name --jq '.[].name' > "$W/have" 2> "$W/have.err" < /dev/null; then
+      awk 'NR == FNR { have[tolower($0)] = 1; next } !(tolower($0) in have)' "$W/have" "$W/want" > "$W/missing"
+      _n=$(grep -c '' "$W/want") _m=$(grep -c '' "$W/missing")
+      if [ "$_m" -eq 0 ]; then
+        result labels ok "all $_n labels of the core's set exist on $REPO"
+      else
+        result labels fail "$_m of $_n labels are missing on $REPO: $(awk 'NR <= 5 { printf "%s%s", s, $0; s = ", " } END { if (NR > 5) printf ", ..." }' "$W/missing")" "$LABEL_FIX"
+        while IFS= read -r _l; do detail labels "missing: $_l"; done < "$W/missing"
+      fi
+    else
+      result labels fail "could not list the labels of $REPO: $(first_line "$W/have.err")" \
+        "check that gh can read $REPO (gh auth status; the repo name in factory.yaml)"
+    fi
+  fi
+
+  # --- status issue -----------------------------------------------------------------------------------------------------
+  # factory-pause asks the broker for the mode itself: with the mode off it uses plain gh and this repo; with the mode
+  # on it reads through the broker, for this checkout only (it refuses --repo), and the broker refuses calls from
+  # inside the sandbox, so an agent shell cannot run it from here.
+  pause_ready() {
+    case $MODE in
+      off) gh_ready status-issue ;;
+      on)
+        if [ -n "$AGENT_SHELL" ]; then
+          result status-issue n/a "not checked from an agent shell in agent-token mode (the broker refuses calls from scripts there); run factory-doctor in your own terminal, or the two steps in factory-pause --help"
+          return 1
+        fi ;;
+      staged) result status-issue n/a "not checkable while agent-token mode is staged: the broker serves nothing until the mode is on"; return 1 ;;
+      *) result status-issue warn "not checked: the agent-token mode is unclear (see auth)" "fix what the auth line names first"; return 1 ;;
+    esac
+  }
+  if [ ! -f "$here/factory-pause" ]; then
+    result status-issue fail "factory-pause is missing next to factory-doctor" "restore the core files with factory-update"
+  elif pause_ready; then
+    _rc=0
+    if [ "$MODE" = off ]; then
+      sh "$here/factory-pause" status -R "$REPO" > "$W/pause" 2> "$W/pause.err" < /dev/null || _rc=$?
+    else
+      (cd "$TARGET" && sh "$here/factory-pause" status) > "$W/pause" 2> "$W/pause.err" < /dev/null || _rc=$?
+    fi
+    _msg=$(first_line "$W/pause.err" | sed 's/^factory-pause: //')
+    case $_rc in
+      0) result status-issue ok "one open factory:status issue; $(first_line "$W/pause")" ;;
+      3) result status-issue warn "$(first_line "$W/pause")" \
+           "the emergency stop is on; only a person lifts it, with sh $BIN/factory-pause off" ;;
+      *)
+        case $_msg in
+          *"no open issue"*) _fix="create it: $INSTALL status-issue --repo $REPO (or re-run /factory-init); if a closed one exists, a person reopens it" ;;
+          *several*) _fix="a person closes all but one open issue labelled factory:status" ;;
+          *) if [ "$MODE" = off ]; then _fix="check that gh can read the issues of $REPO (gh auth status, network)"
+             else _fix="check that factory-github check passes and jq is installed; the message names what failed"; fi ;;
+        esac
+        result status-issue fail "${_msg:-factory-pause could not tell}" "$_fix" ;;
+    esac
+  fi
+
+  # --- output -----------------------------------------------------------------------------------------------------------
+  ORDER="factory.yaml core.lock labels status-issue hooks verify auth disk machine"
+  for _c in $ORDER; do
+    awk -F '\t' -v c="$_c" '$1 == "R" && $2 == c { f = 1 } END { exit !f }' "$REC" \
+      || result "$_c" fail "the check did not run (an internal error)" "report this to the factory repo, with the output above"
+  done
+  EXIT=$(awk -F '\t' '$1 == "R" { if ($3 == "fail") f = 1; else if ($3 == "warn") w = 1 } END { print f ? 1 : (w ? 2 : 0) }' "$REC")
+
+  # The report: factory-doctor.py render, which redacts every field. If it is missing or fails, a report of check
+  # names and statuses only, which holds no value from any input.
+  if command -v python3 > /dev/null 2>&1 && [ -f "$here/factory-doctor.py" ] \
+    && python3 -I "$here/factory-doctor.py" render "$REC" "$ORDER" "$TARGET" "$EXIT" ${JSON:+--json} > "$W/report" \
+    && [ -s "$W/report" ]; then
+    cat "$W/report" > "$OUT"   # out: the redacted report
+  else
+    fixed "the report needs python3 (missing or failed here), so it shows check names and statuses only"
+    awk -F '\t' -v order="$ORDER" -v rc="$EXIT" -v json="$JSON" '
+      $1 == "R" && !($2 in st) { st[$2] = $3 }
+      END {
+        n = split(order, o, " ")
+        for (i = 1; i <= n; i++) {
+          s = st[o[i]]
+          if (s != "ok" && s != "warn" && s != "fail" && s != "n/a") s = "fail"
+          st[o[i]] = s; cnt[s]++
+        }
+        if (json != "") {
+          printf "{\"target\": null, \"exit\": %d, \"summary\": {\"ok\": %d, \"warn\": %d, \"fail\": %d, \"n/a\": %d}, \"checks\": [", rc, cnt["ok"], cnt["warn"], cnt["fail"], cnt["n/a"]
+          for (i = 1; i <= n; i++)
+            printf "%s\n {\"check\": \"%s\", \"status\": \"%s\", \"message\": \"\", \"fix\": \"install Python 3 to see the report\", \"details\": []}", (i > 1 ? "," : ""), o[i], st[o[i]]
+          print "\n]}"
+        } else {
+          for (i = 1; i <= n; i++) printf "%-5s %s\n", st[o[i]], o[i]
+          printf "summary: %d ok, %d n/a, %d warn, %d fail\n", cnt["ok"], cnt["n/a"], cnt["warn"], cnt["fail"]
+        }
+      }' "$REC" > "$OUT"   # out: check names and statuses only
+  fi
+  exit "$EXIT"
+}
+
+# Run the check with every inherited output going to /dev/null, then print the two places it may write.
+rc=0
+(main "$@") < /dev/null > /dev/null 2>&1 || rc=$?
+cat "$OUT" 2> /dev/null        # out: the report or the help text
+cat "$ERR" >&2 2> /dev/null    # out: fixed messages
+exit "$rc"

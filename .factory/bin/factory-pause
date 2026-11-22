@@ -1,0 +1,242 @@
+#!/bin/sh
+# factory-pause: show, set or clear the emergency stop, the factory:paused label on the status issue.
+#
+#   factory-pause [status]     show it. Exit 0: not paused. Exit 3: paused. Exit 1: could not tell.
+#   factory-pause on           set the label (the person stops the factory)
+#   factory-pause off          clear the label (the person resumes it)
+#
+# Options:
+#   -R, --repo OWNER/NAME      the repository (default: the one gh finds from the current directory)
+#   --from FILE                status, agent-token mode only: judge this broker export instead of calling the broker
+#   -q, --quiet                status: print nothing, only the exit code
+#   -h, --help                 this text
+#
+# The status issue is the open issue labelled factory:status, and there must be exactly one. Anything else fails
+# closed with exit 1 and changes nothing: no status issue, several (a person decides which one stays), or an answer
+# that is not one "<number> <true|false>" record. After on or off, the same check runs again on the read-back.
+#
+# Agents run only `status`; `on` and `off` are for the person. Callers treat exit 1 like a pause: start and merge
+# nothing until a check succeeds.
+#
+# Agent-token mode. First this asks `factory-github mode` (found on PATH, else in ~/.factory/bin). No broker installed
+# means mode off. Any answer other than off, staged or on, or a failure, is exit 1.
+#   - off: as above, through plain gh.
+#   - on or staged: plain gh is never called. `status` reads the status issue with the broker's fixed read verb,
+#     `factory-github issue-list`, and judges its JSON by the same rules (needs jq). The broker refuses a call made
+#     from inside the sandbox, which includes this script's own call, so a sandboxed agent runs the read itself,
+#     as a plain command, and passes the file it printed:
+#         <bin>/factory-github issue-list --label factory:status --state open --limit 2 --out pause.json
+#         factory-pause status --from <the path it printed>
+#     The file must sit directly in this checkout's own broker export folder, which this script works out as the
+#     broker does (no broker verb prints it): the machine list github.json next to the broker's bin/ folder, its
+#     export_root or the default <real /tmp>/claude-<uid>/factory-export, then <checkout folder name>-<first 12 hex
+#     of the SHA-256 of the checkout's path>. No part of that path may be a symlink, the folder must be this user's
+#     and not writable by others, and the file must be a regular file written in the last 5 minutes. A checkout
+#     whose folder name is not plain ASCII is refused. --repo is refused: the broker reads only this checkout's
+#     repository.
+#     These checks stop a stray or stale file, not a forged one: the agent can write into its own export folder, so
+#     a file there is not proof that the broker wrote it. The pause check relies on the agent cooperating, as it
+#     always has (an agent that ignored it could skip the check altogether).
+#   - `on` and `off` refuse in that mode, changing nothing. The person either runs them from their own terminal,
+#     outside every checkout of the project, as `factory-pause on --repo OWNER/NAME` (mode then reads off and plain gh
+#     uses their login), or, from the project's root checkout, through the broker:
+#         <bin>/factory-github issue-labels <N> --add factory:paused        (off: --remove factory:paused)
+#     and then checks the result with `status`.
+#
+# Needs only gh, already signed in, or in agent-token mode the broker and jq. It calls `gh issue list` and
+# `gh issue edit`, or the broker's `mode` and `issue-list`, nothing else; it never reads, asks for or prints a
+# credential.
+set -u
+
+PAUSED=factory:paused
+STATUS=factory:status
+FRESH_MINUTES=5
+
+usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
+die() { echo "factory-pause: $*" >&2; exit 1; }
+
+cmd=status repo='' quiet='' from=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    status|on|off) cmd=$1 ;;
+    -R|--repo) [ $# -ge 2 ] || { echo "factory-pause: $1 needs OWNER/NAME" >&2; exit 2; }; repo=$2; shift ;;
+    --repo=*) repo=${1#--repo=} ;;
+    --from) [ $# -ge 2 ] || { echo "factory-pause: $1 needs FILE" >&2; exit 2; }; from=$2; shift ;;
+    --from=*) from=${1#--from=} ;;
+    -q|--quiet) quiet=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "factory-pause: unknown argument: $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+if [ -n "$from" ] && [ "$cmd" != status ]; then
+  echo "factory-pause: --from goes only with status" >&2; exit 2
+fi
+
+# --- the mode ------------------------------------------------------------------------------------------------------
+# fg: the broker's path, or empty when none is installed (mode off).
+fg=$(command -v factory-github 2> /dev/null) || fg=''
+if [ -z "$fg" ] && [ -n "${HOME:-}" ] && [ -x "$HOME/.factory/bin/factory-github" ]; then
+  fg=$HOME/.factory/bin/factory-github
+fi
+if [ -z "$fg" ]; then
+  mode=off
+else
+  mode=$("$fg" mode) || die "factory-github mode failed: cannot tell whether agent-token mode is on, so cannot tell"
+  case $mode in
+    off|staged|on) ;;
+    *) die "factory-github mode gave an answer that is not off, staged or on: cannot tell" ;;
+  esac
+fi
+
+# --- judging an answer ---------------------------------------------------------------------------------------------
+# judge OUT SOURCE: sets n (the status issue's number) and p (true when it carries the label), or exits 1. It succeeds
+# only when OUT is exactly one record of the form "<number> <true|false>". Asking for two is enough to see a duplicate.
+judge() {
+  [ -n "$1" ] || die "no open issue labelled $STATUS: cannot tell whether the factory is paused"
+  printf '%s\n' "$1" | grep -qvE '^[1-9][0-9]* (true|false)$' && die "unexpected answer from $2; cannot tell"
+  [ "$(printf '%s\n' "$1" | grep -c .)" -eq 1 ] \
+    || die "several open issues labelled $STATUS; there must be one. Nothing changed; a person keeps one"
+  n=${1%% *} p=${1#* }
+}
+
+# report: the status line and exit code for n and p.
+report() {
+  if [ "$p" = true ]; then
+    [ -n "$quiet" ] || echo "paused ($PAUSED on #$n)"
+    exit 3
+  fi
+  [ -n "$quiet" ] || echo "not paused (status issue #$n)"
+  exit 0
+}
+
+# export_dir: sets xdir, this checkout's broker export folder, derived as the broker derives it, or exits 1.
+export_dir() {
+  # The broker's real path: its machine list is github.json one folder above its bin/ folder.
+  b=$fg
+  while [ -L "$b" ]; do
+    l=$(readlink "$b") || die "cannot resolve $b; cannot tell"
+    case $l in /*) b=$l ;; *) b=${b%/*}/$l ;; esac
+  done
+  case $b in */*) ;; *) b=./$b ;; esac
+  cfgdir=$(cd -P "${b%/*}/.." && pwd) || die "cannot find the broker's folder; cannot tell"
+  root=$(jq -r 'if type != "object" then error("not an object")
+                elif (.export_root | type) == "string" then .export_root
+                elif .export_root == null then ""
+                else error("bad export_root") end' "$cfgdir/github.json") \
+    || die "cannot read export_root from $cfgdir/github.json; cannot tell"
+  if [ -z "$root" ]; then
+    root=$(cd -P /tmp && pwd)/claude-$(id -u)/factory-export || die "cannot work out the export folder; cannot tell"
+  fi
+  case $root in /*) ;; *) die "export_root in $cfgdir/github.json is not absolute; cannot tell" ;; esac
+  while :; do case $root in */) root=${root%/} ;; *) break ;; esac; done
+  # The checkout: the nearest folder upwards from the real working folder that holds .git, as the broker finds it.
+  wt=$(pwd -P) || die "cannot read the working folder; cannot tell"
+  while [ ! -e "$wt/.git" ] && [ ! -L "$wt/.git" ]; do
+    [ "$wt" != / ] && [ -n "$wt" ] || die "the working folder is not inside a git checkout; cannot tell"
+    wt=${wt%/*}; [ -n "$wt" ] || wt=/
+  done
+  base=${wt##*/}
+  ! printf '%s' "$base" | LC_ALL=C grep -q '[^ -~]' \
+    || die "the checkout folder name is not plain ASCII; --from cannot match the broker's folder"
+  base=$(printf '%s' "$base" | LC_ALL=C sed 's/[^A-Za-z0-9_-]/-/g' | cut -c1-40 | sed 's/^-*//; s/-*$//')
+  [ -n "$base" ] || base=checkout
+  if command -v shasum > /dev/null 2>&1; then
+    tag=$(printf '%s' "$wt" | shasum -a 256)
+  elif command -v sha256sum > /dev/null 2>&1; then
+    tag=$(printf '%s' "$wt" | sha256sum)
+  else
+    die "neither shasum nor sha256sum is here to work out the export folder; cannot tell"
+  fi
+  tag=$(printf '%s' "$tag" | cut -c1-12)
+  printf '%s' "$tag" | grep -qE '^[0-9a-f]{12}$' || die "cannot work out the export folder; cannot tell"
+  xdir=$root/$base-$tag
+  # No symlink anywhere on the way, and a private folder of this user.
+  q='' rest=${xdir#/}
+  while [ -n "$rest" ]; do
+    part=${rest%%/*}
+    case $rest in */*) rest=${rest#*/} ;; *) rest='' ;; esac
+    case $part in ''|.|..) die "the export folder $xdir is not a plain path; cannot tell" ;; esac
+    q=$q/$part
+    [ ! -L "$q" ] || die "$q is a symlink: the broker's export folder is never reached through one; cannot tell"
+  done
+  [ -d "$xdir" ] || die "this checkout's broker export folder $xdir does not exist; cannot tell"
+  [ -n "$(find "$xdir" -prune -user "$(id -u)" ! -perm -020 ! -perm -002 2> /dev/null)" ] \
+    || die "$xdir is not a private folder of this user; cannot tell"
+}
+
+# --- mode on or staged ---------------------------------------------------------------------------------------------
+if [ "$mode" != off ]; then
+  bin=${fg%/*}
+  if [ "$cmd" != status ]; then
+    die "refused: agent-token mode is $mode here, so plain gh carries no login and nothing was changed. A person runs
+  factory-pause $cmd --repo OWNER/NAME
+from their own terminal, outside every checkout of this project (there plain gh uses their login), or, from the
+project's root checkout,
+  $bin/factory-github issue-labels <N> $([ "$cmd" = on ] && echo --add || echo --remove) $PAUSED
+with <N> the status issue, and then checks with factory-pause status"
+  fi
+  [ -z "$repo" ] || die "--repo does not work in agent-token mode: the broker reads only this checkout's repository"
+  command -v jq > /dev/null 2>&1 || die "jq is needed to read the broker's answer; cannot tell"
+  if [ -n "$from" ]; then
+    export_dir
+    case $from in
+      "$xdir"/*) name=${from#"$xdir"/} ;;
+      *) die "--from $from is not in this checkout's broker export folder $xdir; cannot tell" ;;
+    esac
+    case $name in
+      ''|.|..|*/*) die "--from $from is not a file directly in this checkout's broker export folder; cannot tell" ;;
+    esac
+    [ -f "$from" ] && [ ! -L "$from" ] || die "--from $from is not a regular file; cannot tell"
+    [ -n "$(find "$from" -prune -mmin -"$FRESH_MINUTES" 2> /dev/null)" ] \
+      || die "--from $from is older than $FRESH_MINUTES minutes; read the status issue again"
+    json=$(cat "$from") || die "cannot read $from; cannot tell"
+  else
+    json=$("$fg" issue-list --label "$STATUS" --state open --limit 2) || die "could not read the status issue \
+(factory-github failed). Inside the sandbox it refuses calls from scripts; run it yourself as a plain command:
+  $bin/factory-github issue-list --label $STATUS --state open --limit 2 --out pause.json
+then: factory-pause status --from <the path it printed>"
+  fi
+  # A list of issues, each with a number and a list of labels; anything else is an error, not an empty answer.
+  out=$(printf '%s\n' "$json" | jq -r --arg p "$PAUSED" '
+    if type != "array" then error("not a list") else .[] end
+    | if (.number | type) != "number" or (.labels | type) != "array"
+         or any(.labels[]; type != "object" or (.name | type) != "string")
+      then error("not an issue") else . end
+    | "\(.number) \(any(.labels[]; .name == $p))"') \
+    || die "unexpected answer from the broker; cannot tell"
+  judge "$out" "the broker"
+  report
+fi
+
+# --- mode off: plain gh --------------------------------------------------------------------------------------------
+[ -z "$from" ] || die "--from is for agent-token mode, which is off here; run factory-pause status without it"
+
+# gh with the repository, when one was given.
+ghr() { if [ -n "$repo" ]; then gh "$@" -R "$repo"; else gh "$@"; fi; }
+
+lookup() {
+  out=$(ghr issue list --label "$STATUS" --state open --limit 2 --json number,labels \
+    --jq ".[] | \"\\(.number) \\(any(.labels[]; .name == \"$PAUSED\"))\"") || die "could not read the status issue (gh failed)"
+  judge "$out" gh
+}
+
+lookup
+
+[ "$cmd" != status ] || report
+
+if [ "$cmd" = on ]; then
+  ghr issue edit "$n" --add-label "$PAUSED" > /dev/null || die "could not add $PAUSED to #$n (does the label exist?)"
+else
+  ghr issue edit "$n" --remove-label "$PAUSED" > /dev/null || die "could not remove $PAUSED from #$n"
+fi
+
+# Read it back: say what is true now, not what was asked. The read-back must again be exactly one issue, the same one.
+was=$n
+lookup
+[ "$n" = "$was" ] || die "the status issue changed from #$was to #$n during the change; check it on GitHub"
+case "$cmd $p" in
+  "on true") echo "paused ($PAUSED on #$n)" ;;
+  "off false") echo "not paused (status issue #$n)" ;;
+  *) die "#$n does not show the expected state after the change; check it on GitHub" ;;
+esac

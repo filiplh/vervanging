@@ -1,0 +1,160 @@
+# Manifest of the cloudflare-workers recipe, read by factory doctor, factory-init, factory deploy and the merge gate.
+# The fields are defined in core/reference/deploy-contract.md ("How a recipe declares itself").
+recipe: cloudflare-workers
+contract: 2
+summary: >-
+  A Cloudflare Worker (a script, static assets or both), deployed from GitHub Actions with wrangler: previews on a
+  pull-request label, production releases on the environment's trigger, smoke check, wrangler rollback, release notes
+  and versions.
+runs_on: ci
+
+environments:
+  preview: [pr-label]
+  production: [manual, merge, nightly]
+needs_url: [production]
+
+with:
+  worker:
+    type: string
+    required: true
+    pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+    description: >-
+      The production Worker's name. Every wrangler call passes it as --name, so a pull request that edits the Wrangler
+      config cannot point a deploy at another Worker. Previews upload versions of this same Worker.
+  build:
+    type: string
+    default: ''
+    description: >-
+      Command that builds what wrangler uploads (for example the static assets folder), run after commands.setup in
+      the build job, which holds no secret. Empty when wrangler bundles the Worker on its own. The Wrangler config
+      must not have a custom build (`build.command`): wrangler would run it inside the deploy step, next to the
+      secrets, so the deploy refuses such a config.
+  config:
+    type: string
+    default: ''
+    description: >-
+      Path of the Wrangler config file, relative to the repo root. Empty finds it as wrangler does, in the repo root
+      (wrangler.json, wrangler.jsonc, wrangler.toml).
+  smoke:
+    type: array
+    items: { type: string, pattern: '^/' }
+    default: ['/']
+    description: URL paths that must answer with a 2xx status after every deploy and rollback, redirects followed.
+  migrations:
+    type: array
+    items: { type: string }
+    default: []
+    description: >-
+      Glob list (the factory's glob-list rule) of the paths whose change means a data migration, such as the D1
+      migrations folder. A release or rollback with any commit in its range touching them (even one a later commit
+      reverts) waits for your OK, and a failed release is not rolled back automatically. Paths are read raw from git
+      and compared in one Unicode form and case, so no spelling of a name escapes. This recipe never applies a
+      migration itself.
+  changelog:
+    type: string
+    default: ''
+    description: Path of a changelog file. When set and changed in the range, its added lines are the release notes.
+  node_version_file:
+    type: string
+    default: ''
+    description: >-
+      File that pins the Node version of the build job (as read by actions/setup-node), for setup, build and the
+      pinned wrangler's bundling, which needs Node 22.12 or later. Empty uses the runner's Node. The jobs that hold
+      the secrets run no project code and use Node 24.
+  rollback_on_failure:
+    type: boolean
+    default: true
+    description: >-
+      Roll back automatically when the production smoke check fails and the release carried nothing that needed
+      your OK (no migration, H7 hold or breaking change). Turn it off only when the Worker writes stored
+      data in a shape the previous version cannot read.
+
+secrets:
+  - name: CLOUDFLARE_API_TOKEN
+    where: github-actions
+    why: >-
+      Deploys, uploads versions, reads deployments and rolls back. Create it from Cloudflare's "Edit Cloudflare Workers"
+      token template, limited to the one account (and to no zone unless the Worker uses routes on one).
+  - name: CLOUDFLARE_ACCOUNT_ID
+    where: github-actions
+    why: Which account wrangler talks to. Not secret in itself, kept with the token so no file names the account.
+
+migrations_key: migrations
+
+actions:
+  deploy: gh workflow run factory-deploy-__FACTORY_TARGET__-production.yml --ref __FACTORY_DEFAULT_BRANCH__
+  approve: gh workflow run factory-deploy-__FACTORY_TARGET__-production.yml --ref __FACTORY_DEFAULT_BRANCH__ -f approve=<full 40-character sha>
+  rollback: gh workflow run factory-rollback-__FACTORY_TARGET__.yml --ref __FACTORY_DEFAULT_BRANCH__ -f reason=<why> [-f version=<id>]
+  status: gh run list --workflow factory-deploy-__FACTORY_TARGET__-production.yml --limit 1; gh run list --workflow factory-rollback-__FACTORY_TARGET__.yml --limit 1
+  preview: gh pr edit <pr> --add-label __FACTORY_PREVIEW_LABEL__
+
+templates:
+  - { from: templates/preview.yml, to: .github/workflows/factory-preview-__FACTORY_TARGET__.yml, for: preview }
+  - { from: templates/production.yml, to: .github/workflows/factory-deploy-__FACTORY_TARGET__-production.yml, for: production }
+  - { from: templates/rollback.yml, to: .github/workflows/factory-rollback-__FACTORY_TARGET__.yml, for: production }
+  # bin/ and deploy-tool/ are installed once per project at .factory/recipes/cloudflare-workers/, not per target.
+  # tests/ is never installed. Every action in the templates is pinned to a full commit SHA with its version in a
+  # comment. The deploy tool (wrangler) is not a setting: deploy-tool/lockfile.json pins its version and every
+  # package's sha512, and the templates pin that lockfile's sha256, so a new wrangler is a recipe change.
+
+# The production release passes both preview jobs to the gate-chain check as deploy jobs to ignore among a pull
+# request's check runs.
+ci_jobs:
+  - Preview build (__FACTORY_TARGET__)
+  - Preview (__FACTORY_TARGET__)
+  - Release (__FACTORY_TARGET__)
+  - Release build (__FACTORY_TARGET__)
+  - Release deploy (__FACTORY_TARGET__)
+  - Release version (__FACTORY_TARGET__)
+  - Rollback (__FACTORY_TARGET__)
+
+render:
+  # Value placeholders sit inside single-quoted strings (YAML or GitHub expression); the renderer doubles any `'`.
+  values:
+    TARGET: { from: 'the target key under deploy' }
+    WORKER: { from: with.worker }
+    BUILD: { from: with.build }
+    CONFIG: { from: with.config }
+    SMOKE: { from: with.smoke, as: json }
+    MIGRATIONS: { from: with.migrations, as: json }
+    CHANGELOG: { from: with.changelog }
+    NODE_VERSION_FILE: { from: with.node_version_file }
+    ROLLBACK_ON_FAILURE: { from: with.rollback_on_failure, as: 'true or false' }
+    SETUP: { from: commands.setup, default: '' }
+    URL: { from: environments.production.url }
+    APPROVE: { from: environments.production.approve, default: first }
+    PREVIEW_LABEL: { from: 'environments.preview.when, the part after pr-label:' }
+    DEFAULT_BRANCH: { from: "the repo's default branch, read from GitHub" }
+    CI_WORKFLOW: { from: "the name of the core CI workflow that runs ci.nightly" }
+    RECIPE_DIR: { from: 'fixed', default: .factory/recipes/cloudflare-workers }
+  blocks:
+    # Replaces the line `# __FACTORY_TRIGGER__` in templates/production.yml, chosen by environments.production.when.
+    TRIGGER:
+      manual: ''
+      merge: |
+        push:
+          branches: ['__FACTORY_DEFAULT_BRANCH__']
+      nightly: |
+        workflow_run:
+          workflows: ['__FACTORY_CI_WORKFLOW__']
+          types: [completed]
+          branches: ['__FACTORY_DEFAULT_BRANCH__']
+    # Replaces the line `# __FACTORY_PR_PATHS__` in templates/preview.yml: the same filter the core CI template builds
+    # from ci.skip_paths (`**` first, then every entry negated), or nothing when ci.skip_paths is empty.
+    PR_PATHS:
+      from: ci.skip_paths
+      as: |
+        paths:
+          - '**'
+          - '!<each entry; a `!` entry loses its `!`>'
+
+human_steps:
+  - >-
+    Create the Cloudflare API token (see secrets) and add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as GitHub
+    Actions repository secrets. Agents never do this.
+  - >-
+    Turn on the Worker's own subdomain and preview URLs in the Wrangler config (`workers_dev: true`,
+    `preview_urls: true`) if the target uses previews.
+  - >-
+    Approve the first production release, which creates the Worker (the run holds and opens an issue that says how).
+    A Worker that already runs, deployed outside the factory, also holds once: its live version names no commit.

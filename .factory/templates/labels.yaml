@@ -1,0 +1,79 @@
+# The factory's label set, as data. factory-init creates these in the project's repo, factory-doctor reports missing
+# ones, and factory-update adds new ones. Existing labels are never deleted; a label with the right name but another
+# colour or description is updated.
+#
+# `labels` are created in every project. The other lists are templates expanded from the overlay:
+#   per_role            __FACTORY_ROLE__           each key of factory.yaml › `roles` (none in solo mode without roles)
+#   per_hunter_area     __FACTORY_HUNTER_AREA__    each area slug in `.factory/hunters.md`; without that file, each key
+#                                                  of `roles`. `process` is a core area, always present (below), and
+#                                                  never generated again
+#   per_preview_label   __FACTORY_PREVIEW_LABEL__  each label named by a `pr-label:<label>` deploy trigger, when it is not
+#                                                  `preview`
+#
+# The core's queries, hooks and gates depend on these names, so they are fixed: a project adds labels of its own, but
+# never renames these. Colours are hex without `#`. Descriptions stay under GitHub's 100-character limit.
+
+labels:
+  # Where an issue stands. The lead (or the person in solo mode) moves them; `factory claim` sets in-progress.
+  - { name: "status:ready", color: "0E8A16", description: "All blockers merged; may be started" }
+  - { name: "status:blocked", color: "BFBFBF", description: "Waits for the issues in its 'Blocked by' line" }
+  - { name: "status:in-progress", color: "FBCA04", description: "An agent is working on it" }
+  - { name: "status:in-review", color: "8250DF", description: "PR open; review and checks running" }
+  - { name: "status:needs-human", color: "D93F0B", description: "Waits for a person: a gate, a question, the owner's OK for the top model, the end of the ladder" }
+  - { name: "status:backlog", color: "C5DEF5", description: "Parked (P3 and lower); not picked up until moved" }
+
+  # Who does the work. agent:human is a core gate (H1); agent:<role> labels come from `per_role` below.
+  - { name: "agent:human", color: "B60205", description: "Only a person can do this" }
+
+  # What kind of change.
+  - { name: "type:feature", color: "A2EEEF", description: "New capability" }
+  - { name: "type:bug", color: "D73A4A", description: "Something is broken" }
+  - { name: "type:chore", color: "EDEDED", description: "Tooling, CI, setup, upkeep" }
+  - { name: "type:docs", color: "0075CA", description: "Documentation or a project skill" }
+  - { name: "type:test", color: "C2E0C6", description: "Tests and quality gates" }
+  - { name: "type:spike", color: "C5DEF5", description: "Time-boxed investigation with a written result" }
+  - { name: "type:epic", color: "5319E7", description: "Large item; break into issues before work starts" }
+  - { name: "type:process", color: "C5DEF5", description: "A flaw in the workflow; a person reviews it before any fix" }
+
+  # How big.
+  - { name: "size:S", color: "F9D0C4", description: "Hours" }
+  - { name: "size:M", color: "F9D0C4", description: "About a day" }
+  - { name: "size:L", color: "F9D0C4", description: "Several days; consider splitting" }
+
+  # Which model tier builds and reviews it. Exactly one per issue; the models per tier are in the core defaults
+  # (models.tiers), so the descriptions name no model.
+  - { name: "tier:deep", color: "5319E7", description: "Hard or correctness-critical work; models from models.tiers.deep" }
+  - { name: "tier:standard", color: "1D76DB", description: "Normal feature work; models from models.tiers.standard" }
+  - { name: "tier:light", color: "0E8A16", description: "Well-specified or mechanical work; models from models.tiers.light" }
+
+  # How urgent. P0–P2 block a merge when found in review and are fixed first; P3 goes to the backlog. Failed deploys
+  # open type:bug issues: P1 when production fails its smoke check, P2 when the run failed before the smoke check.
+  - { name: "priority:P0", color: "000000", description: "Blocker: unusable for everyone, a security hole or silent data loss" }
+  - { name: "priority:P1", color: "B60205", description: "Severe: data loss, a core flow blocked, a privacy leak, production broken" }
+  - { name: "priority:P2", color: "E99695", description: "Normal: a core flow broken in one case, a failed deploy run" }
+  - { name: "priority:P3", color: "FBCA04", description: "Minor: polish or a rare edge with an easy workaround" }
+
+  # Bug hunters. Every issue a hunter files carries `bug-hunt` and the `hunter:<area>` of its area. The process area is
+  # fixed; the other areas come from `per_hunter_area`.
+  - { name: "bug-hunt", color: "5319E7", description: "Found by a bug hunter" }
+  - { name: "hunter:process", color: "C5DEF5", description: "Found by the process hunter; a person reviews it before any fix" }
+
+  # The factory itself.
+  - { name: "factory:status", color: "000000", description: "The pinned status issue the lead keeps up to date" }
+  - { name: "factory:paused", color: "B60205", description: "Emergency stop, on the status issue: all agents stop" }
+
+  # Deploy previews. A recipe's preview environment uses `pr-label:preview` by default.
+  - { name: "preview", color: "1D76DB", description: "Deploy a preview of this PR (opt-in, costs CI minutes)" }
+
+  # The fix for a red default branch or nightly: the lead sets it when it files that fix, and `factory ready` lists
+  # such an issue before everything else (factory-lead › Picking work, rule 1).
+  - { name: "incident:red-branch", color: "B60205", description: "Fixes a red default branch or nightly; jumps the queue, first of all" }
+
+per_role:
+  - { name: "agent:__FACTORY_ROLE__", color: "1D76DB", description: "The __FACTORY_ROLE__ role: paths in factory.yaml roles.__FACTORY_ROLE__.owns" }
+
+per_hunter_area:
+  - { name: "hunter:__FACTORY_HUNTER_AREA__", color: "5319E7", description: "Found by the bug hunter for the __FACTORY_HUNTER_AREA__ area" }
+
+per_preview_label:
+  - { name: "__FACTORY_PREVIEW_LABEL__", color: "1D76DB", description: "Deploy a preview of this PR (opt-in, costs CI minutes)" }

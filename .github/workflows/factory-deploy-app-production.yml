@@ -1,0 +1,694 @@
+# Production release of deploy target 'app' on Cloudflare Workers (the factory's deploy contract).
+# Rendered by factory-init from the cloudflare-workers recipe (.factory/recipes/cloudflare-workers/). Do not edit by
+# hand: change factory.yaml and re-render, so factory doctor finds no drift.
+#
+# When it runs: the environment's `when` trigger (rendered below), and by hand on the default branch
+# (`factory deploy app production`, or Actions → this workflow → Run workflow).
+# What it does, in order:
+# 1. Picks the commit: the one a green nightly tested, or the default branch's commit for a merge or manual release.
+# 2. Asks Cloudflare what is live. The live commit counts only when the version's own message names it in full and
+#    its tag agrees (split traffic: unknown). Nothing to do when this commit, or a newer one, is already live.
+# 3. Proves the gate for every commit from the live one to this one (the core's release checker, with --prove), in
+#    time order: each is the exact merge commit of a pull request whose gate record in force at the merge is for its
+#    final head and passed, with the same content and base, checks that backed it when it was written (local
+#    evidence never overrides a job that ran and failed) and a merge review of that exact head already in force
+#    then. Nothing since may contradict them. When that chain cannot be shown, the run refuses (red) and changes
+#    nothing. The checker is the copy in the live commit (with none known, in this commit's first parent), never the
+#    one in this checkout: a change to the checker is judged by the old one, and judges from the next release on.
+# 4. Holds for your OK, without changing anything and without failing, when: the Worker does not exist yet (first
+#    deploy), the live version names no commit the factory knows, the environment has `approve: always`, a pull
+#    request in the range recorded an H7 release hold, or any commit in the range has a breaking change or touches
+#    the migration paths. The OK names one commit in full, and the run links it on the held pull requests.
+# 5. Builds that exact commit in its own job, which holds no secret: setup, build, and wrangler's bundle of the Worker,
+#    handed on as an artefact of this run. A separate deploy job, which runs no project install, build or lifecycle
+#    script, checks the artefact (its digest, this run, this commit, plain files only), deploys it as it is with the
+#    pinned wrangler (`wrangler deploy --no-bundle`), tagged with the commit, and runs the smoke check against the
+#    production URL.
+# 6. A failed smoke check rolls back to the version that was live before (unless the release needed your OK for
+#    what it carries: a migration, an H7 hold, a breaking change or a range that could not be shown),
+#    checks again, opens a `priority:P1` bug naming the version it returned to, and fails the run. A passing one
+#    writes the release notes, headed with the release's version.
+# 7. After a passing smoke check, a last job records that version on the released commit as the tag
+#    `factory/<target>/v<X.Y.Z>`. The core's release checker computes it in step 3, from the same range and in the
+#    same run as the findings (deploy contract, rule 5). That job holds no secret and runs no project code: its token
+#    may write the repository's contents, and it only creates the tag, through GitHub's API.
+# Deploy runs are not checks: the merge gate ignores them, and a held or failed release never turns main red.
+# Secrets (deploy contract, rule 6): only the jobs that never run project code hold them (`release` and `deploy`), and
+# only in the steps that call Cloudflare. wrangler runs only as the recipe's pinned tool, installed by
+# bin/deploy-tool.sh from deploy-tool/lockfile.json, whose sha256 is pinned below and whose sha512 integrity
+# hashes npm checks for every package before any of it runs.
+name: 'Deploy app (production)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      approve:
+        description: 'Only for a held release: the full 40-character commit SHA you approve'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  # One deploy or rollback of this environment at a time; the rollback workflow uses the same group. Never cancel a
+  # deploy halfway.
+  group: 'factory-deploy-app-production'
+  cancel-in-progress: false
+
+env:
+  TARGET: 'app'
+  WORKER: 'vervanging'
+  WRANGLER_CONFIG: ''
+  URL: 'https://vervanging.filip-lhommelet.workers.dev'
+  SMOKE: '["/"]'
+  MIGRATIONS: '[]'
+  CHANGELOG: ''
+  APPROVE_MODE: 'first'
+  ROLLBACK_ON_FAILURE: 'true'
+  RECIPE: '.factory/recipes/cloudflare-workers'
+  RELEASE_CHECK: '.factory/bin/factory-release-check' # the core's one release checker, shared by every recipe
+  # The deploy tool, pinned by version and by the sha256 of the files that pin every package (bin/deploy-tool.sh).
+  DEPLOY_TOOL: 'wrangler@4.160.1'
+  DEPLOY_TOOL_PACKAGE_SHA256: 'bd4a242dd4f008da2fd3e3698e3b3e752108325c4b8f4b33255b8da451099b89'
+  DEPLOY_TOOL_LOCK_SHA256: 'ecb1f9b0f2ca7615848e018e4e04ef11e39ca2793d4e3d93896ac183026c3afc'
+  WRANGLER_SEND_METRICS: 'false'
+  # The API host wrangler sends the token to, set explicitly rather than left to its defaults and .env files.
+  CLOUDFLARE_API_BASE_URL: 'https://api.cloudflare.com/client/v4'
+
+jobs:
+  release:
+    name: 'Release (app)'
+    # Only the default branch, and a nightly only when it was the scheduled run and it passed.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch) ||
+      (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'schedule' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    # Decides, and holds a secret only to read what is live: no project install, build or lifecycle script runs here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      proof: ${{ steps.commit.outputs.proof }}
+      go: ${{ steps.check.outputs.go }}
+      data_risk: ${{ steps.check.outputs.data_risk }}
+      live_sha: ${{ steps.live.outputs.sha }}
+      live_version_id: ${{ steps.live.outputs.version_id }}
+      version: ${{ steps.check.outputs.version }}
+      version_tag: ${{ steps.check.outputs.version_tag }}
+      live_version: ${{ steps.check.outputs.live_version }}
+    permissions:
+      contents: read
+      issues: write # the held-release issue and the approval links on held pull requests
+      pull-requests: read # the pull requests merged in the range, their gate records, reviews and holds
+      checks: read # the check runs on each gated head
+      actions: read # whether a failed job really ran, or Actions never started it (local evidence counts only then)
+      statuses: read # the commit statuses on each gated head
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      EVENT: ${{ github.event_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      WORKFLOW_FILE: 'factory-deploy-app-production.yml'
+    steps:
+      - name: Which commit?
+        id: commit
+        env:
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
+          NIGHTLY_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          # The gate itself is proven below, for every commit in the range, once the history is checked out.
+          if [ "$EVENT" = workflow_run ]; then
+            sha=$NIGHTLY_SHA
+            proof="the gate chain, and the green nightly run $NIGHTLY_URL on this exact commit"
+          else
+            sha=$GITHUB_SHA
+            proof="the gate chain of the merged pull requests"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "proof=$proof" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.commit.outputs.sha }}
+          fetch-depth: 0 # the history from the live commit, for the release check and the notes
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24' # what the pinned wrangler needs, whatever the project uses
+          package-manager-cache: false # no cache restored into a job that holds a secret
+
+      - name: Install the pinned deploy tool
+        run: bash "$RECIPE/bin/deploy-tool.sh" install "$RUNNER_TEMP/deploy-tool"
+
+      - name: What is live now?
+        id: live
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          out=$(bash "$RECIPE/bin/versions.sh" live "$WORKER")
+          echo "$out"
+          echo "$out" >> "$GITHUB_OUTPUT"
+          # The live commit only as versions.sh proves it (full SHA from the factory's own version message, matching
+          # the tag), and only when that commit is in this history. Anything less is unknown, and unknown holds.
+          commit=$(sed -n 's/^commit=//p' <<<"$out")
+          live_sha=""
+          if [[ $commit =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$commit^{commit}" 2>/dev/null; then
+            live_sha=$commit
+          fi
+          echo "sha=$live_sha" >> "$GITHUB_OUTPUT"
+          if [ -n "$live_sha" ] && git merge-base --is-ancestor "$SHA" "$live_sha"; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Nothing to release::${SHA:0:7} or a newer commit (${live_sha:0:7}) is already live."
+            echo "Nothing to release: \`${live_sha:0:7}\` is live, which includes \`${SHA:0:7}\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Did every commit pass the gate, and does this release need your OK?
+        id: check
+        if: steps.live.outputs.already != 'true'
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          EXISTS: ${{ steps.live.outputs.exists }}
+          SPLIT: ${{ steps.live.outputs.split }}
+          LIVE_SHA: ${{ steps.live.outputs.sha }}
+          LIVE_TAG: ${{ steps.live.outputs.tag }}
+          APPROVE: ${{ inputs.approve }}
+        run: |
+          reasons=()
+          if [ "$EXISTS" != true ]; then
+            reasons+=("first deploy: Worker \`$WORKER\` does not exist yet")
+          elif [ "$SPLIT" = true ]; then
+            reasons+=("traffic is split between versions (a gradual rollout), so the live commit is unknown")
+          elif [ -z "$LIVE_SHA" ]; then
+            reasons+=("the live version (tag \`${LIVE_TAG:-none}\`) names no commit the factory knows: the first release through the factory")
+          fi
+          # The release checker that judges this run (deploy contract, rule 2) is never the copy in this checkout,
+          # which is the code under proof: a commit that weakened it would grade itself. It is the copy in a commit an
+          # earlier release already proved, read from git into a new folder; nothing when that commit holds none as a
+          # regular file.
+          trusted_checker() {
+            local entry mode type object path dir
+            entry=$(git ls-tree "$1" -- "$RELEASE_CHECK" 2>/dev/null) || return 1
+            read -r mode type object path <<<"$entry"
+            case $mode in 100644 | 100755) ;; *) return 1 ;; esac
+            [ "$type" = blob ] && [ "$path" = "$RELEASE_CHECK" ] || return 1
+            dir=$(mktemp -d "$RUNNER_TEMP/release-check.XXXXXX")
+            git cat-file blob "$object" > "$dir/factory-release-check" || return 1
+            echo "$dir/factory-release-check"
+          }
+          # The one way this step starts it: Python's isolated mode (-I), so no module of this checkout can load into
+          # it, whether through PYTHONPATH, the user's site folder or the current directory.
+          release_check() { python3 -I "$checker" "$@"; }
+          # Whose checker: the live commit's, which its own release proved, when it is on this commit's first-parent
+          # line (the default branch's own history, never a pull request's commit); with no live commit known (a
+          # first release), this commit's first parent: the default branch just before it. So a change to the
+          # checker is judged by the old one, and judges from the next release on.
+          refused=()
+          why=""
+          if [ -n "$LIVE_SHA" ]; then
+            checker_commit=$LIVE_SHA
+            if ! grep -qxF "$LIVE_SHA" <<<"$(git rev-list --first-parent "$SHA")"; then
+              why="the live commit ${LIVE_SHA:0:7} is not on the default branch's first-parent line up to ${SHA:0:7}, so no release proved its release checker"
+            fi
+          else
+            checker_commit=$(git rev-parse --verify --quiet "$SHA^1" || true)
+            if [ -z "$checker_commit" ]; then
+              why="${SHA:0:7} has no parent, so no earlier commit holds a release checker to prove it"
+            fi
+          fi
+          checker=""
+          if [ -z "$why" ] && ! checker=$(trusted_checker "$checker_commit"); then
+            why="${checker_commit:0:7} holds no release checker at $RELEASE_CHECK (a regular file), so nothing proves this release"
+          fi
+          found=""
+          if [ -n "$why" ]; then
+            refused+=("not-gated: ${SHA:0:7} $why")
+          else
+            echo "Release checker: $RELEASE_CHECK as of $checker_commit"
+            # With an unknown live commit, only this commit is proven and read for holds. The last line is this
+            # release's version, computed by the same run from the same range as the findings.
+            found=$(release_check check --from "$LIVE_SHA" --to "$SHA" --migrations "$MIGRATIONS" \
+              --repo "$REPO" --branch "$DEFAULT_BRANCH" --prove --holds --target "$TARGET" \
+              --ignore-check "Preview build ($TARGET)" --ignore-check "Preview ($TARGET)")
+          fi
+          version_line=""
+          while IFS= read -r line; do
+            case $line in
+              '') ;;
+              not-gated:*) refused+=("$line") ;;
+              version:*) version_line=$line ;;
+              *) reasons+=("$line") ;;
+            esac
+          done <<<"$found"
+          if [ ${#refused[@]} -gt 0 ]; then
+            {
+              echo "## Refused: \`$TARGET\` production at \`${SHA:0:7}\`"
+              echo
+              echo "These commits cannot be shown to have passed the gate, so nothing is released:"
+              printf -- '- %s\n' "${refused[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            for line in "${refused[@]}"; do echo "::error title=Not gated::$line"; done
+            exit 1
+          fi
+          version_re='^version: ([0-9]+\.[0-9]+\.[0-9]+) bump=[a-z]+ previous=[0-9a-z.]+ tag=(factory/[a-z0-9_-]+/v[0-9]+\.[0-9]+\.[0-9]+)$'
+          if ! [[ $version_line =~ $version_re ]] || [ "${BASH_REMATCH[2]}" != "factory/$TARGET/v${BASH_REMATCH[1]}" ]; then
+            echo "::error title=No version::The release checker gave no version for this release, so nothing is released."
+            exit 1
+          fi
+          version=${BASH_REMATCH[1]}
+          version_tag=${BASH_REMATCH[2]}
+          # The version recorded on the live commit: what an automatic rollback returns to.
+          live_version=""
+          if [ -n "$LIVE_SHA" ]; then
+            live_version=$(release_check version --target "$TARGET" --at "$LIVE_SHA")
+          fi
+          if [ "$APPROVE_MODE" = always ]; then
+            reasons+=("this environment has \`approve: always\`")
+          fi
+          # Would putting the old code back be safe? Only when nothing this release carries needed your OK. A
+          # migration, an H7 hold, a breaking change or a range that cannot be shown all mean old code may meet data
+          # or callers it cannot handle: no automatic rollback, and a checklist. The approval to release is not an
+          # approval to roll back. Any reason not listed here as harmless counts as a risk.
+          data_risk=false
+          for reason in "${reasons[@]}"; do
+            case $reason in
+              'this environment has '*) ;;          # approve: always, on its own, says nothing about the content
+              'first deploy: '*) ;;                # nothing is live yet, so there is nothing to put back
+              *) data_risk=true ;;
+            esac
+          done
+          # The approval names the released commit in full: a prefix could match another commit.
+          approve=$(tr -d '[:space:]' <<<"$APPROVE" | tr 'A-F' 'a-f')
+          approved=false
+          if [ ${#approve} -eq 40 ] && [ "$approve" = "$SHA" ]; then
+            approved=true
+          elif [ -n "$approve" ]; then
+            # Never echo the input itself: it could carry workflow commands.
+            echo "::warning title=Approval ignored::The approval (${#approve} characters) is not the full commit $SHA. An approval covers one commit only, named in full."
+          fi
+          go=true
+          if [ ${#reasons[@]} -gt 0 ] && [ "$approved" != true ]; then
+            go=false
+          fi
+          printf '%s\n' "${reasons[@]}" | sed '/^$/d' > "$RUNNER_TEMP/reasons.txt"
+          release_check notes --from "$LIVE_SHA" --to "$SHA" --changelog "$CHANGELOG" --version "$version" \
+            > "$RUNNER_TEMP/notes.md"
+          held_prs=$(printf '%s\n' "${reasons[@]}" | sed -n 's/^hold: #\([0-9][0-9]*\) .*/\1/p' | sort -un | tr '\n' ' ')
+          {
+            echo "go=$go"
+            echo "approved=$approved"
+            echo "data_risk=$data_risk"
+            echo "held_prs=$held_prs"
+            echo "reasons=${#reasons[@]}"
+            echo "version=$version"
+            echo "version_tag=$version_tag"
+            echo "live_version=$live_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Hold for your OK
+        if: steps.check.outputs.go == 'false'
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          PROOF: ${{ steps.commit.outputs.proof }}
+          DATA_RISK: ${{ steps.check.outputs.data_risk }}
+        run: |
+          {
+            echo "The release of \`$TARGET\` to production waits for your OK. Production stays on what is live now."
+            echo
+            echo "- Commit: \`$SHA\` (gate: $PROOF)"
+            echo "- Held by: $RUN_URL"
+            echo
+            echo "Why:"
+            sed 's/^/- /' "$RUNNER_TEMP/reasons.txt"
+            echo
+            if [ "$DATA_RISK" != false ]; then
+              echo "This release may change stored data, its shape, or an interface that the code live now or its callers rely on. Before you approve:"
+              echo "- [ ] any migration has run on real-shaped data first (staging, or a copy of production data);"
+              echo "- [ ] a backup of the production data is taken right before a migration runs;"
+              echo "- [ ] you know how a migration is applied: this recipe never applies one itself;"
+              echo "- [ ] data written by the new version, and callers moved to it, are what you expect the old version never to meet again;"
+              echo "- [ ] the version live now keeps working, or you accept the gap, until the release is out."
+              echo "Once approved, this release **will not be rolled back automatically** if its smoke check fails: a rollback restores code, not data, and old code may not work with what the new version changed. Rolling it back is a separate decision, with its own approval."
+              echo
+            fi
+            echo "To release this commit, do one of these yourself (agents never approve):"
+            echo "- GitHub: Actions → \"$GITHUB_WORKFLOW\" → Run workflow on \`$DEFAULT_BRANCH\`, with \`$SHA\` in **approve**;"
+            echo "- terminal: \`factory deploy $TARGET production --approve $SHA\`;"
+            echo "- or: \`gh workflow run $WORKFLOW_FILE --ref $DEFAULT_BRANCH -f approve=$SHA\`."
+            echo
+            echo "A later commit replaces this request: the next run updates this issue."
+            echo
+            echo "## Release notes"
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } > "$RUNNER_TEMP/hold.md"
+          url=$(bash "$RECIPE/bin/issue.sh" open "factory-deploy-hold:$TARGET/production" \
+            "Release of $TARGET to production waits for your OK (${SHA:0:7})" "$RUNNER_TEMP/hold.md" "status:needs-human")
+          {
+            echo "## Held: \`$TARGET\` production at \`${SHA:0:7}\`"
+            echo
+            echo "Waiting for your OK: $url"
+            echo
+            sed 's/^/- /' "$RUNNER_TEMP/reasons.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Held::The release of ${SHA:0:7} waits for your OK: $url"
+
+      - name: Link the approval on the held pull requests
+        if: steps.check.outputs.go == 'true' && steps.check.outputs.approved == 'true' && steps.check.outputs.reasons != '0'
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          HELD_PRS: ${{ steps.check.outputs.held_prs }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          # The approval came with this run, bound to this commit. Record it where human-gates.md expects it linked.
+          {
+            echo "<!-- factory:release-approved target=$TARGET env=production sha=$SHA -->"
+            echo "Release approval for \`$TARGET\` production at \`$SHA\`, given by @$ACTOR in $RUN_URL. It covered:"
+            sed 's/^/- /' "$RUNNER_TEMP/reasons.txt"
+          } > "$RUNNER_TEMP/approval.md"
+          for pr in $HELD_PRS; do
+            gh api "repos/$REPO/issues/$pr/comments" -F "body=@$RUNNER_TEMP/approval.md" > /dev/null
+            echo "linked on #$pr"
+          done
+          bash "$RECIPE/bin/issue.sh" note "factory-deploy-hold:$TARGET/production" "$RUNNER_TEMP/approval.md" || true
+
+  build:
+    name: 'Release build (app)'
+    needs: release
+    if: needs.release.outputs.go == 'true'
+    # Runs the project's setup and build, so third-party code: it holds no secret, its token can only read the repo,
+    # and all it hands on is the artefact, which the deploy job checks as untrusted data.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      artefact: ${{ steps.pack.outputs.file }}
+      digest: ${{ steps.pack.outputs.digest }}
+    env:
+      SETUP: ''
+      BUILD: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Empty: the runner's own Node.
+          node-version-file: '.node-version'
+
+      - name: Setup
+        if: env.SETUP != ''
+        run: sh -c "$SETUP"
+
+      - name: Build
+        if: env.BUILD != ''
+        run: sh -c "$BUILD"
+
+      - name: Install the pinned deploy tool
+        run: bash "$RECIPE/bin/deploy-tool.sh" install "$RUNNER_TEMP/deploy-tool"
+
+      - name: Bundle the Worker and pack the artefact
+        id: pack
+        env:
+          SHA: ${{ needs.release.outputs.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # A refusal is in the output: print it before stopping.
+          if ! config=$(python3 "$RECIPE/bin/wrangler-config.py" show ${WRANGLER_CONFIG:+--config "$WRANGLER_CONFIG"}); then
+            echo "$config"; exit 1
+          fi
+          echo "$config"
+          value() { sed -n "s/^$1=//p" <<<"$config"; }
+          if [ -n "$(value main_stem)" ]; then
+            # shellcheck disable=SC2086 # WRANGLER is a command line on purpose
+            $WRANGLER deploy --dry-run --outdir "$RUNNER_TEMP/bundle" --name "$WORKER" --config "$(value config)"
+          fi
+          python3 "$RECIPE/bin/artefact.py" pack --bundle "$RUNNER_TEMP/bundle" --assets "$(value assets)" \
+            --target "$TARGET" --sha "$SHA" --run-id "$RUN_ID" --out "$RUNNER_TEMP/out/factory-$TARGET-$RUN_ID.tar.gz" \
+            >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ runner.temp }}/out/${{ steps.pack.outputs.file }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: 'Release deploy (app)'
+    needs: [release, build]
+    # Also after a failed build, to open the bug. Holds the secrets, and runs no project install, build or lifecycle
+    # script: only the recipe's own scripts, the core's release checker and the pinned wrangler, on files it checked.
+    if: >-
+      !cancelled() && needs.release.result == 'success' && needs.release.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write # the P1 or P2 bug, and closing the held-release issue
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SHA: ${{ needs.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          fetch-depth: 0 # the history from the live commit, for the notes
+          persist-credentials: false
+
+      - name: Notes of the range
+        env:
+          LIVE_SHA: ${{ needs.release.outputs.live_sha }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          # The release checker that judges this run (deploy contract, rule 2) is never the copy in this checkout,
+          # which is the code under proof: a commit that weakened it would grade itself. It is the copy in a commit an
+          # earlier release already proved, read from git into a new folder; nothing when that commit holds none as a
+          # regular file.
+          trusted_checker() {
+            local entry mode type object path dir
+            entry=$(git ls-tree "$1" -- "$RELEASE_CHECK" 2>/dev/null) || return 1
+            read -r mode type object path <<<"$entry"
+            case $mode in 100644 | 100755) ;; *) return 1 ;; esac
+            [ "$type" = blob ] && [ "$path" = "$RELEASE_CHECK" ] || return 1
+            dir=$(mktemp -d "$RUNNER_TEMP/release-check.XXXXXX")
+            git cat-file blob "$object" > "$dir/factory-release-check" || return 1
+            echo "$dir/factory-release-check"
+          }
+          # The one way this step starts it: Python's isolated mode (-I), so no module of this checkout can load into
+          # it, whether through PYTHONPATH, the user's site folder or the current directory.
+          release_check() { python3 -I "$checker" "$@"; }
+          # The release job chose that commit and proved the checker there: the live one, or this commit's first parent.
+          checker_commit=${LIVE_SHA:-$(git rev-parse --verify "$SHA^1")}
+          checker=$(trusted_checker "$checker_commit")
+          release_check notes --from "$LIVE_SHA" --to "$SHA" --changelog "$CHANGELOG" \
+            --version "$RELEASE_VERSION" > "$RUNNER_TEMP/notes.md"
+
+      - name: Did the build pass?
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          if [ "$BUILD_RESULT" != success ]; then
+            echo "::error title=Build failed::The build job ended with '$BUILD_RESULT': nothing is deployed."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24' # what the pinned wrangler needs, whatever the project uses
+          package-manager-cache: false # no cache restored into a job that holds a secret
+
+      # Before any byte of the artefact is in this job.
+      - name: Install the pinned deploy tool
+        run: bash "$RECIPE/bin/deploy-tool.sh" install "$RUNNER_TEMP/deploy-tool"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # No run-id and no token: only this run's artefacts.
+          name: ${{ needs.build.outputs.artefact }}
+          path: ${{ runner.temp }}/artefact
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Check the artefact and the Wrangler config
+        id: artefact
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # The config from the gated checkout, never from the artefact: no custom build, no redirect.
+          # A refusal is in the output: print it before stopping.
+          if ! config=$(python3 "$RECIPE/bin/wrangler-config.py" check ${WRANGLER_CONFIG:+--config "$WRANGLER_CONFIG"}); then
+            echo "$config"; exit 1
+          fi
+          echo "$config"
+          value() { sed -n "s/^$1=//p" <<<"$config"; }
+          if ! unpacked=$(python3 "$RECIPE/bin/artefact.py" unpack --from "$RUNNER_TEMP/artefact" --digest "$DIGEST" \
+            --target "$TARGET" --sha "$SHA" --run-id "$RUN_ID" --into "$RUNNER_TEMP/release" \
+            --config "$(value config)" --main-stem "$(value main_stem)" --assets "$(value assets)"); then
+            echo "$unpacked"; exit 1
+          fi
+          echo "$unpacked"
+          # entry=, config= (the copy) and tree=: the release tree, apart from the checkout, which stays as checked out.
+          echo "$unpacked" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONFIG: ${{ steps.artefact.outputs.config }}
+          ENTRY: ${{ steps.artefact.outputs.entry }}
+          TREE: ${{ steps.artefact.outputs.tree }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
+        run: |
+          # The bundle as the build job made it (--no-bundle: nothing is built here), from the release tree: the
+          # checked config's copy and the assets, nothing else. The checkout is not touched.
+          cd "$TREE"
+          # shellcheck disable=SC2086 # WRANGLER is a command line on purpose
+          $WRANGLER deploy ${ENTRY:+"$ENTRY" --no-bundle} --name "$WORKER" --config "$CONFIG" \
+            --tag "${SHA:0:12}" --message "factory $TARGET production $SHA"
+          version=$(jq -sr '[.[] | select(.type == "deploy")] | last | .version_id // empty' "$WRANGLER_OUTPUT_FILE_PATH")
+          echo "version_id=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke check
+        id: smoke
+        continue-on-error: true
+        run: bash "$RECIPE/bin/smoke.sh" "$URL" "$SMOKE"
+
+      - name: Roll back after a failed smoke check
+        id: rollback
+        if: >-
+          steps.smoke.outcome == 'failure' &&
+          env.ROLLBACK_ON_FAILURE == 'true' &&
+          needs.release.outputs.live_version_id != '' &&
+          needs.release.outputs.data_risk == 'false'
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PREVIOUS: ${{ needs.release.outputs.live_version_id }}
+        run: |
+          # shellcheck disable=SC2086
+          $WRANGLER rollback "$PREVIOUS" --name "$WORKER" --yes --message "factory: smoke check failed for ${SHA:0:12}"
+          bash "$RECIPE/bin/smoke.sh" "$URL" "$SMOKE"
+
+      - name: Open a bug (P1 when production fails its smoke check)
+        if: steps.smoke.outcome == 'failure' || failure()
+        env:
+          PREVIOUS: ${{ needs.release.outputs.live_version_id }}
+          LIVE_VERSION: ${{ needs.release.outputs.live_version }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
+          DATA_RISK: ${{ needs.release.outputs.data_risk }}
+        run: |
+          if [ "$SMOKE_OUTCOME" != failure ]; then
+            # Setup, build or deploy failed: the live version did not change, unless `wrangler deploy` failed halfway.
+            labels="type:bug,priority:P2"
+            title="Production release of $TARGET failed at ${SHA:0:7}"
+            what="The release failed before its smoke check (setup, build or deploy); see the run. Production most likely still runs the previous release; check with \`factory deploy $TARGET production --status\`."
+          else
+            labels="type:bug,priority:P1"
+            title="Production smoke check failed for $TARGET at ${SHA:0:7}"
+            case $ROLLBACK_OUTCOME in
+              success)
+                if [ -n "$LIVE_VERSION" ]; then back="release \`$LIVE_VERSION\` (Cloudflare version \`$PREVIOUS\`)"
+                else back="Cloudflare version \`$PREVIOUS\`, a release without a version"; fi
+                what="Rolled back to $back, from release \`$RELEASE_VERSION\` (not recorded: it failed its smoke check), and the smoke check passes again. Production runs the previous release."
+                ;;
+              failure) what="**The automatic rollback failed, or the smoke check still fails after it. Production may be down.** Roll back by hand: \`factory deploy $TARGET production --rollback\`." ;;
+              *)
+                if [ "$DATA_RISK" != false ]; then why="this release needed your OK for what it carries (a migration, an H7 hold, a breaking change or a range that could not be shown), so old code may not work with what it changed and rolling back is your call, with its own approval"
+                elif [ "$ROLLBACK_ON_FAILURE" != true ]; then why="rollback_on_failure is off for this target"
+                else why="no earlier version is known"; fi
+                what="**Not rolled back automatically: $why.** The new version is live. To roll back: \`factory deploy $TARGET production --rollback\`."
+                ;;
+            esac
+          fi
+          {
+            echo "$what"
+            echo
+            echo "- Commit: \`$SHA\`"
+            echo "- URL: $URL"
+            echo "- Run: $RUN_URL"
+            echo
+            echo "## Release notes of the failed release"
+            echo
+            cat "$RUNNER_TEMP/notes.md" 2>/dev/null || echo "(none)"
+          } > "$RUNNER_TEMP/bug.md"
+          url=$(bash "$RECIPE/bin/issue.sh" open "factory-deploy-failed:$TARGET/production/${SHA:0:12}" \
+            "$title" "$RUNNER_TEMP/bug.md" "$labels")
+          { echo "## Failed: \`$TARGET\` production at \`${SHA:0:7}\`"; echo; echo "$what"; echo; echo "Bug: $url"; } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Release failed::$url"
+          exit 1
+
+      - name: Release notes
+        if: steps.smoke.outcome == 'success'
+        env:
+          PROOF: ${{ needs.release.outputs.proof }}
+          VERSION: ${{ steps.deploy.outputs.version_id }}
+        run: |
+          {
+            echo "## Released: \`$TARGET\` production at \`${SHA:0:7}\`"
+            echo
+            echo "- URL: $URL"
+            echo "- Cloudflare version: \`${VERSION:-unknown}\`"
+            echo "- Gate: $PROOF"
+            echo "- Roll back: \`factory deploy $TARGET production --rollback\`"
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+          bash "$RECIPE/bin/issue.sh" close "factory-deploy-hold:$TARGET/production" "Released \`${SHA:0:7}\` in $RUN_URL." || true
+
+  record:
+    name: 'Release version (app)'
+    needs: [release, deploy]
+    # Only after the deploy job passed, which it does only when the smoke check passed (a failed one ends that job
+    # red). Holds no secret, checks out nothing and runs no project code: it names the released commit with its
+    # version, through GitHub's API.
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # the version's tag on the released commit
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ needs.release.outputs.sha }}
+      VERSION_TAG: ${{ needs.release.outputs.version_tag }}
+    steps:
+      - name: Record the version on the released commit
+        run: |
+          # The release checker's form, factory/<target>/v<X.Y.Z>, on a full commit SHA, or nothing is recorded.
+          tag_re='^factory/[a-z0-9][a-z0-9_-]*/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ $VERSION_TAG =~ $tag_re ]] || ! [[ $SHA =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Version not recorded::The release job gave no valid version tag or commit."
+            exit 1
+          fi
+          # A lightweight tag: a ref to the commit. One that exists already must name this same commit.
+          if ! gh api "repos/$REPO/git/refs" -f "ref=refs/tags/$VERSION_TAG" -f "sha=$SHA" > /dev/null; then
+            there=$(gh api "repos/$REPO/git/ref/tags/$VERSION_TAG" --jq '.object.sha' 2>/dev/null || true)
+            if [ "$there" != "$SHA" ]; then
+              [[ $there =~ ^[0-9a-f]{40}$ ]] || there="nothing readable"
+              echo "::error title=Version not recorded::The tag $VERSION_TAG could not be created on $SHA (it names $there). The release is live without a version; the next release counts from the highest recorded one."
+              exit 1
+            fi
+          fi
+          echo "Version \`${VERSION_TAG##*/v}\` recorded as the tag \`$VERSION_TAG\` on \`$SHA\`." >> "$GITHUB_STEP_SUMMARY"

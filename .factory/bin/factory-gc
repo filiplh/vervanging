@@ -1,0 +1,1056 @@
+#!/bin/sh
+# factory-gc: free the disk space of worktrees whose pull request is merged or closed.
+#
+#   factory-gc                       dry run: counts per category, nothing is changed
+#   factory-gc --apply               delete the dependency folders of the eligible worktrees
+#   factory-gc --apply --remove-worktrees
+#                                    move the eligible worktrees into quarantine instead; nothing is deleted
+#   factory-gc --purge-quarantine    list what is in quarantine; with --apply, delete what has rested long enough
+#
+# Options:
+#   --apply               act; without it nothing is changed
+#   --remove-worktrees    whole worktrees, not only dependency folders. Each eligible worktree is moved, with one
+#                         rename, into <git dir>/factory-gc-quarantine/. Nothing is deleted, and
+#                         "git worktree move <there> <old path>" brings one back. Off by default: the runtime that
+#                         created a worktree may still track it.
+#   --purge-quarantine    the second step, for a person to run: delete quarantined worktrees with their git dirs and
+#                         branches. Only those that have rested --min-age minutes and are still exactly as they were
+#                         moved. Needs no network.
+#   --include-detached    also consider worktrees without a branch (skipped by default; see below)
+#   --no-fetch            dry run without git fetch: uses the commits already here, so results may be stale
+#                         (gh is still asked for PR and issue state). Not allowed with --apply.
+#   --dirs "LIST"         dependency folder names to free (default: $FACTORY_GC_DIRS or the list below)
+#   --depth N             how deep to look for them inside a worktree (default 3, so monorepo packages count)
+#   --min-age MIN         skip worktrees changed in the last MIN minutes; with --purge-quarantine, the minutes a
+#                         worktree must have rested in quarantine (default 90)
+#   --root DIR            only consider worktrees under DIR
+#   --remote NAME         the GitHub remote (default origin)
+#   --sizes               also measure the space each category holds (du; slow on large trees)
+#   -v, --verbose         list every worktree with its category
+#   -h, --help            this text
+#
+# Run it from any checkout of the repository. Every worktree of the repository except the main checkout and the
+# one you run it from is a candidate. A worktree is eligible only when all of these hold:
+#   - it is a worktree of this repository: its .git file names this repository's worktrees/<id>, which points back;
+#   - it is not in use: not locked (git worktree lock), no running process has its working directory inside it,
+#     and nothing in it (or in its git dir) changed in the last --min-age minutes;
+#   - it has no uncommitted or untracked work (git status --porcelain is empty);
+#   - it is on a branch (with --include-detached a detached HEAD may qualify too, with no PR required);
+#   - it is not part of an open PR: not its branch name, not its head commit (even when that commit is already on the
+#     default branch, as after a fast-forward), not one of its commits that are not on the default branch; and the
+#     issue in its branch name (<type>/<N>-<slug>) is not labelled status:in-progress;
+#   - it has no commit outside GitHub: HEAD is reachable from the default branch or from a merged or closed PR head;
+#   - it belongs to a merged or closed PR: same branch name as the PR head, or HEAD is one of that PR's commits
+#     (agents often work on a local branch or detached HEAD and push HEAD:<branch>, so names alone miss most).
+#
+# Dependency folders are found by name and freed only when git ignores them and tracks nothing inside them, so a
+# committed vendor/ folder is never touched. The commands.setup of the project restores them.
+#
+# How it acts. In a shell every tool works on names, and a name can point at something else a moment after it was
+# checked. So one rule holds everywhere: only private names are destroyed. Anything with a public name is first
+# renamed (one atomic step that destroys nothing) to a private name, then compared by device and inode with what the
+# decisive check recorded, and only then removed. When the comparison fails it is put back and nothing is removed.
+#
+# Every change to a worktree goes through one step that fails closed on any doubt:
+#   1. GitHub is asked again for the open PRs and in-progress issues, and new open PR heads are fetched;
+#   2. git's own lock files of that worktree are taken (index.lock, HEAD.lock and the branch's ref lock), so no commit,
+#      checkout, reset or branch update can happen there until the change is done; if one exists, git is busy there;
+#   3. the list of running processes is read again;
+#   4. the decisive check: the worktree is classified again from scratch, from inside its folder (pinned with cd),
+#      and must still be eligible, with the same folder, git dir, branch and HEAD as in the scan;
+#   5. the change itself:
+#      - a dependency folder: from the pinned worktree it walks one folder at a time (each a real folder, no symlink,
+#        same device, the dev:inode it saw just before entering, the kernel's path as expected), renames the folder
+#        to a private name inside its parent, compares it with the dev:inode of step 4, and removes that one name
+#        with rm -rf kept on one file system;
+#      - --remove-worktrees: every entry of the tree is listed with its dev:inode, size and change time, then the
+#        worktree is moved into the quarantine folder with git worktree move (a rename; git never copies). There,
+#        where no path leads to it any more, it is checked again: the same folder, the same listing entry for entry,
+#        still clean, the same HEAD, no process inside. If anything differs it is moved back. A record of its
+#        identity and listing is kept next to it. Nothing is deleted in this step.
+#   --purge-quarantine is a separate run. For each record it takes the same lock files and checks that the worktree
+#   and its git dir are the recorded ones by dev:inode, that the listing, HEAD and branch are unchanged, that it is
+#   clean, that no process is inside and that it has rested --min-age minutes. Then the worktree is renamed to a
+#   private name; under that name the process list, its listing and its state are compared once more, and it is
+#   removed. Its git dir goes through rename, compare (our two locks in it included), remove. The branch is deleted
+#   only if it still points at the recorded commit.
+#   Lock files are created through the same walk and hold this run's token. One is released by renaming it to a
+#   private name, comparing token and inode after the rename, and removing the private name. A lock that turns out
+#   not to be ours is put back with ln, which never overwrites; it is never removed.
+#
+# Known limits:
+#   - Running agents are detected, not locked out: a process can start in a worktree after the process list is read.
+#     Then it loses a dependency folder (commands.setup restores it), or its worktree moves into quarantine, where
+#     nothing is deleted until a purge finds no process in it after --min-age minutes.
+#   - A dependency folder goes with everything inside it at that moment, wherever it is by then: if its parent
+#     folder is moved elsewhere after the last check, the checked folder is still the one that is removed.
+#   - A whole worktree goes with its ignored files, as with git worktree remove: git does not count them as work.
+#   - Private names (.factory-gc-trash.<pid>, .factory-gc-unlock.<pid>.*, and what is inside the quarantine folder)
+#     are trusted: something that deliberately replaces one between its check and its removal is not noticed.
+#   - git worktree move finds the worktree by its path. If another copy of it sits at that path at that instant, the
+#     copy is moved; the check in quarantine sees that and moves it back. Nothing is deleted either way.
+#   - What "unchanged" means for a quarantined worktree: every entry below it, ignored files included, has the same
+#     name, device, inode, size and change time (ctime) as when it was listed. A write, a truncation, a rename, a
+#     chmod, a new or a missing entry changes at least one of these, also when the modification time is put back
+#     afterwards (tools cannot set the change time). Not seen: a write that keeps the size and falls in the same
+#     tick of the file system's clock as the previous change of that file (nanoseconds on APFS, up to a few
+#     milliseconds on Linux, a whole second on file systems that store seconds), or one made with the system clock
+#     set back. Two entries are left out on purpose: the worktree folder's own change time, which the move itself
+#     changes (its entries are still compared), and its .git file, which git rewrites on a move and which is
+#     checked by its content. The listing is compared through a checksum (cksum): a guard against accidents, not
+#     against forgery.
+#   - A lock can stay behind: after kill -9; when its folder can no longer be reached safely; or when a lock that is
+#     not ours could not be put back because its name was taken again (it is kept under the private name). The
+#     last two are reported.
+#   - File systems mounted inside a folder: rm stays on one file system (rm -x or --one-file-system); without
+#     either, nothing is removed when the mount table shows a mount inside.
+#
+# Needs: a POSIX shell, git 2.17 or later (files ref storage for --apply), gh (authenticated; not for
+# --purge-quarantine), find with -maxdepth and -mmin, test -ef, and stat -c or stat -f for device and inode
+# (dependency folders fall back to ls -di and df -P). --remove-worktrees and --purge-quarantine need a stat that
+# prints change times with fractions of a second (GNU stat -c %.9Z or BSD stat -f %Fc) and refuse to run without.
+# Optional: lsof or /proc, to see running processes; without them it relies on locks and --min-age.
+# Exit codes: 0 done, 1 stopped on an error before changing anything (or some changes refused), 2 bad usage.
+set -eu
+export LC_ALL=C
+# git and cd must act on the paths given here, not on the caller's environment.
+unset CDPATH GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES
+
+prog=factory-gc
+DEFAULT_DIRS="node_modules .venv venv .tox .nox vendor deps Pods .dart_tool"
+QNAME=factory-gc-quarantine
+APPLY=0
+REMOVE=0
+PURGE=0
+DETACHED=0
+NO_FETCH=0
+VERBOSE=0
+SIZES=0
+DEPTH=3
+MIN_AGE=90
+ROOT_IN=
+REMOTE=origin
+DIRS="${FACTORY_GC_DIRS:-$DEFAULT_DIRS}"
+
+usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; }
+bad() { printf '%s\n' "$prog: $*" >&2; exit 2; }
+die() { printf '%s\n' "$prog: $*; stopping, nothing was changed" >&2; exit 1; }
+is_num() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --apply) APPLY=1 ;;
+    --remove-worktrees) REMOVE=1 ;;
+    --purge-quarantine) PURGE=1 ;;
+    --include-detached) DETACHED=1 ;;
+    --no-fetch) NO_FETCH=1 ;;
+    --sizes) SIZES=1 ;;
+    -v | --verbose) VERBOSE=1 ;;
+    -h | --help) usage; exit 0 ;;
+    --dirs) [ $# -ge 2 ] || bad "--dirs needs a value"; DIRS=$2; shift ;;
+    --depth) if [ $# -lt 2 ] || ! is_num "$2"; then bad "--depth needs a number"; fi; DEPTH=$2; shift ;;
+    --min-age) if [ $# -lt 2 ] || ! is_num "$2"; then bad "--min-age needs a number"; fi; MIN_AGE=$2; shift ;;
+    --root) [ $# -ge 2 ] || bad "--root needs a directory"; ROOT_IN=$2; shift ;;
+    --remote) [ $# -ge 2 ] || bad "--remote needs a name"; REMOTE=$2; shift ;;
+    *) bad "unknown option $1 (see --help)" ;;
+  esac
+  shift
+done
+for d in $DIRS; do
+  case $d in '' | . | .. | */* | *[[:cntrl:]]* | -*) bad "--dirs takes plain folder names, not \"$d\"" ;; esac
+done
+[ "$DEPTH" -ge 1 ] || bad "--depth must be 1 or more"
+[ "$NO_FETCH" = 0 ] || [ "$APPLY" = 0 ] || bad "--no-fetch is for dry runs only; --apply needs fresh commits"
+if [ "$PURGE" = 1 ]; then
+  [ "$REMOVE" = 0 ] || bad "--purge-quarantine is a run of its own; do not combine it with --remove-worktrees"
+  [ "$NO_FETCH" = 0 ] || bad "--purge-quarantine never fetches; leave --no-fetch out"
+fi
+
+# ====================================================================================================================
+# Helpers
+# ====================================================================================================================
+
+# Physical path of a directory, or failure. Only for paths that are not candidates (the repository, the root).
+resolve_dir() { (cd -P -- "$1" 2>/dev/null && /bin/pwd -P); }
+
+# pinned_at <path>: the working directory (entered by an earlier cd) is the directory at <path> right now: same device
+# and inode, and the kernel's path of it is exactly <path>. A shell's builtin pwd re-resolves the path it remembers,
+# so it would still "match" a directory renamed after the cd; /bin/pwd asks the kernel.
+pinned_at() { [ . -ef "$1" ] && [ "$(/bin/pwd -P 2>/dev/null)" = "$1" ]; }
+
+# For tests only: a command run at named points of a change, to simulate what happens in between.
+hook() { [ -z "${FACTORY_GC_TEST_HOOK:-}" ] || sh -c "$FACTORY_GC_TEST_HOOK" factory-gc-hook "$1" "$2" < /dev/null >&2 || true; }
+
+G() { git --git-dir="$COMMON" "$@"; } # git on the shared repository
+
+# devino <path>: "<device>:<inode>" of the path itself (a symlink is not followed), or failure.
+if stat -c '%d:%i' / > /dev/null 2>&1; then
+  STAT_KIND=gnu
+  devino() { stat -c '%d:%i' "$1" 2> /dev/null; }
+elif stat -f '%d:%i' / > /dev/null 2>&1; then
+  STAT_KIND=bsd
+  devino() { stat -f '%d:%i' "$1" 2> /dev/null; }
+else
+  STAT_KIND=none
+  devino() { # POSIX fallback: the file system from df -P, the inode from ls -di (-d: a symlink is not followed)
+    # shellcheck disable=SC2012 # ls -di prints only the inode of one named entry here
+    _d_i=$(ls -di "$1" 2> /dev/null | awk '{ print $1 }') && [ -n "$_d_i" ] || return 1
+    _d_f=$(df -P "$1" 2> /dev/null | awk 'NR == 2 { print $1 }') && [ -n "$_d_f" ] || return 1
+    printf '%s\n' "$_d_f:$_d_i"
+  }
+fi
+dev_of() { printf '%s\n' "${1%%:*}"; }
+
+# LIST_FMT: how this stat prints an entry's size and its change time with fractions of a second; empty when it
+# cannot, and then the listing below fails, so nothing is moved into quarantine or purged.
+LIST_FMT=
+case $STAT_KIND in
+  gnu) _l_probe=$(stat -c '%.9Z' / 2> /dev/null || true) ;;
+  bsd) _l_probe=$(stat -f '%Fc' / 2> /dev/null || true) ;;
+  *) _l_probe= ;;
+esac
+case $_l_probe in
+  '' | *[!0-9.]* | *.*.*) ;;
+  ?*.?*) LIST_FMT=$STAT_KIND ;;
+esac
+
+# listing: a checksum over "<dev:inode> <size> <change time> <path>" of every entry below the current folder, ignored
+# files included. Two equal listings mean the same entries under the same names, none written to, truncated, renamed
+# or chmod-ed in between: any of those moves the change time, which tools cannot set back. Two entries differ on
+# purpose: the folder itself counts with its dev:inode only (moving it changes its own change time), and its .git
+# file is left out (git rewrites it when it moves a worktree; it is checked by its content instead). Fails when an
+# entry cannot be read or this stat cannot print change times with fractions.
+listing() {
+  case $LIST_FMT in
+    gnu) find . -exec stat -c '%d:%i %s %.9Z %n' {} + ;;
+    bsd) find . -exec stat -f '%d:%i %z %Fc %N' {} + ;;
+    *) false ;;
+  esac > "$TMP/listing" 2> /dev/null || return 1
+  awk '{ name = $0; for (k = 0; k < 3; k++) name = substr(name, index(name, " ") + 1)
+         if (name == "./.git") next
+         if (name == ".") { print $1, "."; next }
+         print }' "$TMP/listing" | sort | cksum
+}
+
+# walk_into <relative folder>: from the current folder, whose kernel path is $WALK_AT and whose device is $WALK_DEV,
+# cd into each component in turn. Each must be a real folder (not a symlink) on that device; the folder landed in must
+# be the dev:inode checked just before the cd, and the kernel's path must be $WALK_AT/<component>. Fails on any doubt.
+# Call it in a subshell: it changes the current folder. (No "local" in POSIX sh: helper variables carry a prefix.)
+walk_into() {
+  _w_rest=$1
+  while :; do case $_w_rest in ./*) _w_rest=${_w_rest#./} ;; *) break ;; esac; done
+  [ "$_w_rest" != . ] || _w_rest=
+  while [ -n "$_w_rest" ]; do
+    case $_w_rest in
+      */*) _w_c=${_w_rest%%/*}; _w_rest=${_w_rest#*/} ;;
+      *) _w_c=$_w_rest; _w_rest= ;;
+    esac
+    case $_w_c in '' | . | ..) return 1 ;; esac
+    { [ -d "./$_w_c" ] && [ ! -L "./$_w_c" ]; } || return 1
+    _w_id=$(devino "./$_w_c") || return 1
+    [ "$(dev_of "$_w_id")" = "$WALK_DEV" ] || return 1
+    cd -P "./$_w_c" 2> /dev/null || return 1
+    [ "$(devino .)" = "$_w_id" ] || return 1
+    WALK_AT="$WALK_AT/$_w_c"
+    [ "$(/bin/pwd -P 2> /dev/null)" = "$WALK_AT" ] || return 1
+  done
+}
+
+# walk_make <relative folder>: walk_into, making each folder that is missing (mkdir of one name in the walked folder).
+walk_make() {
+  _m_rest=$1
+  while [ -n "$_m_rest" ]; do
+    case $_m_rest in
+      */*) _m_c=${_m_rest%%/*}; _m_rest=${_m_rest#*/} ;;
+      *) _m_c=$_m_rest; _m_rest= ;;
+    esac
+    if [ ! -e "./$_m_c" ] && [ ! -L "./$_m_c" ]; then mkdir "./$_m_c" 2> /dev/null || [ -d "./$_m_c" ] || return 1; fi
+    walk_into "$_m_c" || return 1
+  done
+}
+
+# in_common: cd into the repository's git directory and start a walk there. Call it in a subshell.
+in_common() {
+  cd -P "$COMMON" 2> /dev/null && pinned_at "$COMMON" || return 1
+  WALK_AT=$COMMON
+  WALK_DEV=$(devino .) || return 1
+  WALK_DEV=$(dev_of "$WALK_DEV")
+}
+
+# in_quarantine [make]: cd into the quarantine folder through the checked walk. Call it in a subshell.
+in_quarantine() {
+  in_common || return 1
+  if [ "${1:-}" = make ]; then walk_make "$QNAME"; else walk_into "$QNAME"; fi
+}
+
+rm_tree() { if [ -n "$RM_ONEFS" ]; then rm -rf "$RM_ONEFS" "$1"; else rm -rf "$1"; fi; }
+
+# mounts_under <path>: true when the mount table shows a file system mounted at or below <path>, or cannot be read.
+mounts_under() {
+  { mount > "$TMP/mounts" 2> /dev/null && [ -s "$TMP/mounts" ]; } || return 0
+  M=$1 awk 'BEGIN { m = ENVIRON["M"] }
+    { s = $0; i = index(s, " on "); if (!i) next; s = substr(s, i + 4)
+      j = index(s, " type "); if (!j) j = index(s, " ("); if (j) s = substr(s, 1, j - 1)
+      if (s == m || index(s, m "/") == 1) { f = 1; exit } }
+    END { exit !f }' "$TMP/mounts"
+}
+
+# safe_rmdir <name> <dev:inode> [check]: remove the folder <name> of the current, walked folder ($WALK_AT), only
+# while it is the real folder that was checked: renamed to a private name first, then compared, then removed. With
+# <check> (a function), "<check> <private name>" must also succeed, called from the walked folder after the rename.
+# Prints why on refusal. Call it in a subshell, after a walk.
+safe_rmdir() {
+  _s_n=$1
+  { [ -d "./$_s_n" ] && [ ! -L "./$_s_n" ] && [ "$(devino "./$_s_n")" = "$2" ] && [ "$(dev_of "$2")" = "$WALK_DEV" ]; } \
+    || { echo "changed since the check"; return 1; }
+  if [ -z "$RM_ONEFS" ] && mounts_under "$WALK_AT/$_s_n"; then echo "a file system may be mounted inside it"; return 1; fi
+  _s_q=".factory-gc-trash.$$"
+  if [ -e "./$_s_q" ] || [ -L "./$_s_q" ]; then printf '%s\n' "$WALK_AT/$_s_q is in the way"; return 1; fi
+  mv "./$_s_n" "./$_s_q" 2> /dev/null || { echo "could not move it aside"; return 1; }
+  _s_got=$(devino "./$_s_q") || _s_got=
+  if [ "$_s_got" != "$2" ] || [ "$(/bin/pwd -P 2> /dev/null)" != "$WALK_AT" ] \
+    || { [ -n "${3:-}" ] && ! "$3" "$_s_q"; }; then
+    # Not the folder that was checked, or no longer as it was: put it back while its name is free; remove nothing.
+    if [ ! -e "./$_s_n" ] && [ ! -L "./$_s_n" ] && mv "./$_s_q" "./$_s_n" 2> /dev/null \
+      && [ -n "$_s_got" ] && [ "$(devino "./$_s_n")" = "$_s_got" ]; then
+      echo "changed since the check (put back)"
+    else
+      printf '%s\n' "changed since the check; what was found there is kept under $WALK_AT (as $_s_q or inside $_s_n)"
+    fi
+    return 1
+  fi
+  rm_tree "./$_s_q" || { printf '%s\n' "rm failed, partly deleted ($WALK_AT/$_s_q is left)"; return 1; }
+}
+
+# --- Worktrees -----------------------------------------------------------------------------------------------------
+# NUL-separated porcelain keeps paths byte for byte. POSIX read cannot split on NUL, so NULs become newlines; a path
+# that contains a newline then splits into fragments, and a fragment never passes the identity check below.
+list_worktrees() {
+  G worktree list --porcelain -z > "$TMP/wt.z" || return 1
+  tr '\0' '\n' < "$TMP/wt.z" | sed -n 's/^worktree //p' > "$TMP/worktrees"
+}
+
+# --- GitHub state --------------------------------------------------------------------------------------------------
+# read_prs <state> <file>: every PR in that state, paginated so the list is never cut short:
+# "<number> <open|merged|closed> <head sha> <head branch>".
+# Every gh call names the repository ($NWO, read once at the start): the change step runs from /, where gh could not
+# find it from the current directory. What gh prints on failure is never shown: it may hold credentials.
+read_prs() {
+  gh api --paginate "repos/$NWO/pulls?state=$1&per_page=100" \
+    --jq '.[] | "\(.number) \(if .state == "open" then "open" elif .merged_at then "merged" else "closed" end) \(.head.sha) \(.head.ref)"' \
+    > "$2" 2>/dev/null || return 1
+  ! grep -Evq '^[0-9]+ (open|merged|closed) [0-9a-f]{40,64} [^[:space:]]+$' "$2"
+}
+read_in_progress() {
+  gh issue list -R "$NWO" --state open --label status:in-progress --limit 1000 --json number -q '.[].number' \
+    > "$TMP/in-progress" 2>/dev/null || return 1
+  ! grep -Evq '^[0-9]+$' "$TMP/in-progress" && [ "$(wc -l < "$TMP/in-progress" | tr -d ' ')" -lt 1000 ]
+}
+# valid_repo <owner/name>: a strict subset of GitHub's names, checked before the name goes into a URL or -R.
+# Owner: ASCII letters, digits and single hyphens, not starting or ending with a hyphen, up to 39 characters.
+# Name: ASCII letters, digits, ".", "_" and "-", not "." or "..", up to 100 characters.
+# The letters are spelled out: a range such as A-Z follows the locale and can let a non-ASCII letter through.
+valid_repo() {
+  case $1 in */*) ;; *) return 1 ;; esac
+  _v_o=${1%%/*}; _v_n=${1#*/}
+  case $_v_o in
+    '' | -* | *- | *--* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-]*) return 1 ;;
+  esac
+  case $_v_n in
+    '' | . | .. | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*) return 1 ;;
+  esac
+  [ "${#_v_o}" -le 39 ] && [ "${#_v_n}" -le 100 ]
+}
+split_open() { # <prs file> -> open-shas, open-branches
+  awk '$2 == "open" { print $3 }' "$1" > "$TMP/open-shas"
+  awk '$2 == "open" { print $4 }' "$1" > "$TMP/open-branches"
+}
+# fetch_missing <prs file>: fetch the PR heads that are not here yet. Objects only, no local refs: --git-dir on the
+# common directory, FETCH_HEAD is all it writes. Skipped with --no-fetch.
+fetch_missing() {
+  [ "$NO_FETCH" = 0 ] || return 0
+  cut -d' ' -f3 "$1" | G cat-file --batch-check 2>/dev/null | awk '$2 == "missing" { print $1 }' > "$TMP/missing"
+  [ -s "$TMP/missing" ] || return 0
+  awk 'NR == FNR { m[$1] = 1; next } ($3 in m) { print "refs/pull/" $1 "/head" }' "$TMP/missing" "$1" \
+    > "$TMP/fetch-refs"
+  xargs -n 100 git --git-dir="$COMMON" fetch -q --no-tags "$REMOTE" < "$TMP/fetch-refs" 2>/dev/null
+}
+# build_open_set: open-commits holds every open PR head (exact, even when already on the default branch) and every
+# commit of an open PR that is not on the default branch. Fails when an open head is missing, unless --no-fetch.
+build_open_set() {
+  G cat-file --batch-check < "$TMP/open-shas" > "$TMP/open-check" 2>/dev/null || return 1
+  awk '$2 == "commit" { print $1 }' "$TMP/open-check" > "$TMP/open-here"
+  if [ "$(wc -l < "$TMP/open-here")" -ne "$(wc -l < "$TMP/open-shas")" ]; then
+    [ "$NO_FETCH" = 1 ] || return 1
+    printf '%s\n' "$prog: warning: some open PR heads are not here (--no-fetch); only their branch names protect them" >&2
+  fi
+  { cat "$TMP/open-here"; printf '%s\n' "^$REF"; } | G rev-list --stdin > "$TMP/open-commits.new" 2>/dev/null || return 1
+  cat "$TMP/open-shas" >> "$TMP/open-commits.new"
+  mv "$TMP/open-commits.new" "$TMP/open-commits"
+}
+# Asked again right before each change: the open PRs (with their new heads fetched) and the in-progress issues.
+# On failure READ_FAILED names the read that failed.
+refresh_github() {
+  read_prs open "$TMP/prs-open" || { READ_FAILED="gh api pulls (open PRs) failed"; return 1; }
+  read_in_progress || { READ_FAILED="gh issue list (in-progress issues) failed or was cut short"; return 1; }
+  split_open "$TMP/prs-open"
+  fetch_missing "$TMP/prs-open" || { READ_FAILED="git fetch of open PR heads failed"; return 1; }
+  build_open_set || { READ_FAILED="an open PR head is missing or its commits could not be listed"; return 1; }
+}
+
+# --- Running processes: their working directories ------------------------------------------------------------------
+# lsof -F writes a byte it does not print (LC_ALL=C: every byte outside 0x20-0x7e) as \b \f \n \r \t, ^<char> or
+# \x<two hex digits>, and a backslash twice; a caret stays as it is, so "^A" may be a caret and an A or the byte
+# 0x01. has_process decodes the escapes and writes both sides with the caret form for every control byte (and ^? for
+# 0xff), so the only mix-up left makes two paths look the same: the worktree is kept, never freed on a guess. An
+# escape outside that format makes the line count from that point on as any path.
+CWD_FORM=raw
+read_processes() { # -> $TMP/cwds (CWD_FORM lsof: one escaped path a line; raw: as readlink prints them);
+  SEES_NOW=1      # SEES_NOW=1 when the list could be read
+  if command -v lsof > /dev/null 2>&1; then
+    CWD_FORM=lsof
+    lsof -nP -w -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' > "$TMP/cwds" || true
+  elif [ -d /proc/self ]; then
+    CWD_FORM=raw
+    for pd in /proc/[0-9]*; do readlink "$pd/cwd" 2>/dev/null || true; done > "$TMP/cwds"
+  else
+    CWD_FORM=raw
+    : > "$TMP/cwds"
+  fi
+  [ -s "$TMP/cwds" ] || SEES_NOW=0
+}
+has_process() { # a running process has its working directory in the worktree at $P
+  P=$P CWD_FORM=$CWD_FORM awk '
+    function canon(s,  o, i, n, ch, c) { # control bytes in caret form, as lsof writes them
+      o = ""; n = length(s)
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1); c = ord[ch]
+        if (c == 255) o = o "^?"
+        else if (c < 32 && c != 8 && c != 9 && c != 10 && c != 12 && c != 13) o = o "^" chr[c + 64]
+        else o = o ch
+      }
+      return o
+    }
+    function decode(s,  o, i, n, ch, e, h) { # sets odd=1 and stops at an escape outside the format
+      o = ""; odd = 0; n = length(s)
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (ch != "\\") { o = o ch; continue }
+        e = substr(s, i + 1, 1)
+        if (e == "\\") o = o "\\"
+        else if (e == "b") o = o "\b"
+        else if (e == "f") o = o "\f"
+        else if (e == "n") o = o "\n"
+        else if (e == "r") o = o "\r"
+        else if (e == "t") o = o "\t"
+        else if (e == "x" && (h = substr(s, i + 2, 2)) ~ /^[0-9a-fA-F][0-9a-fA-F]$/) {
+          o = o chr[hex[substr(h, 1, 1)] * 16 + hex[substr(h, 2, 1)]]; i += 2
+        } else { odd = 1; return o }
+        i++
+      }
+      return o
+    }
+    BEGIN {
+      for (i = 1; i < 256; i++) { chr[i] = sprintf("%c", i); ord[chr[i]] = i }
+      for (i = 0; i < 16; i++) { hex[substr("0123456789abcdef", i + 1, 1)] = i; hex[substr("0123456789ABCDEF", i + 1, 1)] = i }
+      lsof = ENVIRON["CWD_FORM"] == "lsof"
+      p = lsof ? canon(ENVIRON["P"]) : ENVIRON["P"]
+    }
+    {
+      d = $0; odd = 0
+      if (lsof && index(d, "\\")) d = canon(decode(d))
+      if (d == p || index(d, p "/") == 1 || (odd && index(p "/", d) == 1)) { f = 1; exit }
+    }
+    END { exit !f }' "$TMP/cwds"
+}
+
+# --- Classification ------------------------------------------------------------------------------------------------
+g() { git --no-optional-locks --git-dir="$gd" --work-tree=. "$@" 2>/dev/null; } # git on the pinned worktree only
+
+is_recent() { # inside the pinned worktree
+  for f in "$gd/HEAD" "$gd/index" "$gd/logs/HEAD" .; do
+    [ -e "$f" ] && [ -n "$(find "$f" -maxdepth 0 -mmin -"$MIN_AGE" 2>/dev/null)" ] && return 0
+  done
+  set -- -name .git
+  for d in $DIRS; do set -- "$@" -o -name "$d"; done
+  [ -n "$(find . \( "$@" \) -prune -o -mmin -"$MIN_AGE" -print 2>/dev/null | head -n 1)" ]
+}
+
+find_deps() { # the dependency folders of the pinned worktree into $TMP/deps: "<dev:inode><TAB><./path>"
+  set --
+  for d in $DIRS; do set -- "$@" -o -name "$d"; done
+  shift
+  : > "$TMP/deps"
+  find . -maxdepth "$DEPTH" -name .git -prune -o -type d \( "$@" \) -prune -print 2>/dev/null > "$TMP/found" || true
+  while IFS= read -r d; do
+    case $d in ./*) ;; *) continue ;; esac
+    case $d in *[[:cntrl:]]*) continue ;; esac
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    g check-ignore -q -- "$d" || continue                  # git does not ignore it: project files
+    [ -z "$(g ls-files -- "$d" | head -n 1)" ] || continue # git tracks something in it
+    # Its identity, reached through the same checked walk the removal uses; a folder that cannot be reached that way
+    # (a symlink on the way, another device) is left alone.
+    id=$(WALK_AT=$P; WALK_DEV=$(dev_of "$ROOT_ID")
+      walk_into "${d%/*}" || exit 1
+      { [ -d "./${d##*/}" ] && [ ! -L "./${d##*/}" ]; } || exit 1
+      i=$(devino "./${d##*/}") && [ "$(dev_of "$i")" = "$WALK_DEV" ] && printf '%s\n' "$i") || continue
+    printf '%s\t%s\n' "$id" "$d" >> "$TMP/deps"
+  done < "$TMP/found"
+}
+
+# pin <path>: cds into <path> (pins it) and proves it is a worktree of this repository. Sets P (its physical path),
+# ROOT_ID (its dev:inode), gd (its git dir) and GD_ID (the git dir's dev:inode, reached by a checked walk from the
+# repository's git directory). After the cd, every check reads "." or the git dir named by its own .git file, never
+# <path> again, so a later swap of <path> cannot change what was checked. On failure CAT says why and it returns 1.
+# With PIN_SCAN=1 it also sorts out what the scan must not consider: outside --root, or already in quarantine.
+pin() {
+  CAT=other; P=; ROOT_ID=; gd=; GD_ID=
+  case $1 in *[[:cntrl:]]*) CAT=unsafe; return 1 ;; esac
+  [ ! -L "$1" ] || { CAT=unsafe; return 1; }
+  P=$(resolve_dir "$1") || { CAT=missing; return 1; }
+  if [ "$PIN_SCAN" = 1 ]; then
+    if [ -n "$ROOT" ]; then
+      case $P in "$ROOT"/*) ;; *) CAT=outside; return 1 ;; esac
+    fi
+    case $P in "$QDIR"/*) CAT=quarantined; return 1 ;; esac
+  fi
+  cd -P -- "$P" 2>/dev/null || { CAT=missing; return 1; }
+  pinned_at "$P" || { CAT=unsafe; return 1; } # swapped while we got here
+  ROOT_ID=$(devino .) || return 1
+  [ ! . -ef "$MAIN" ] || { CAT=main; return 1; }
+  [ -z "$SELF" ] || [ ! . -ef "$SELF" ] || { CAT=self; return 1; }
+
+  # Identity: our own .git file names this repository's worktrees/<id>, and that entry points back to us.
+  { [ -f .git ] && [ ! -L .git ] && IFS= read -r line < .git; } 2>/dev/null || return 1
+  case $line in 'gitdir: '?*) ;; *) return 1 ;; esac
+  gd=$(resolve_dir "${line#gitdir: }") || { gd=; return 1; }
+  [ "${gd%/*}" = "$COMMON/worktrees" ] && [ ! -L "$gd" ] || { gd=; return 1; } # another repository
+  { IFS= read -r back < "$gd/gitdir"; } 2>/dev/null || { gd=; return 1; }
+  [ "$back" -ef .git ] || { gd=; return 1; } # git records this worktree elsewhere (moved or prunable)
+  GD_ID=$(in_common && walk_into worktrees && [ -d "./${gd##*/}" ] && [ ! -L "./${gd##*/}" ] \
+    && devino "./${gd##*/}") || { gd=; return 1; }
+}
+
+read_head() { # in the pinned worktree: HEAD_OID, BRANCH_REF and BRANCH; fails when HEAD cannot be read or is odd
+  HEAD_OID=$(g rev-parse -q --verify HEAD) || return 1
+  BRANCH_REF=$(g symbolic-ref -q HEAD || true)
+  case $BRANCH_REF in
+    '') BRANCH= ;;
+    refs/heads/*) BRANCH=${BRANCH_REF#refs/heads/} ;;
+    *) return 1 ;;
+  esac
+  case $BRANCH in *..* | *[[:cntrl:]]* | *[[:space:]]*) return 1 ;; esac
+}
+
+# classify <path>: pins it and sets CAT (and BRANCH, BRANCH_REF, HEAD_OID). Used for the scan and again, from scratch,
+# in the change step.
+# CAT: outside quarantined unsafe main self missing other busy-locked busy-process busy-recent dirty detached open
+#      progress unpushed no-pr nothing eligible
+classify() {
+  BRANCH=; BRANCH_REF=; HEAD_OID=; : > "$TMP/deps"
+  PIN_SCAN=1
+  pin "$1" || return 0
+
+  # In use?
+  [ ! -e "$gd/locked" ] || { CAT=busy-locked; return 0; }
+  ! has_process || { CAT=busy-process; return 0; }
+  ! is_recent || { CAT=busy-recent; return 0; }
+  [ -z "$(g status --porcelain || echo error)" ] || { CAT=dirty; return 0; }
+  read_head || return 0
+  [ -n "$BRANCH" ] || [ "$DETACHED" = 1 ] || { CAT=detached; return 0; }
+
+  # Still part of an open PR or an issue in progress?
+  if grep -qxF -- "$HEAD_OID" "$TMP/open-commits" \
+    || { [ -n "$BRANCH" ] && grep -qxF -- "$BRANCH" "$TMP/open-branches"; }; then
+    CAT=open; return 0
+  fi
+  issue=$(printf '%s\n' "$BRANCH" | sed -n 's|^[A-Za-z]*/\([0-9][0-9]*\)-.*|\1|p')
+  if [ -n "$issue" ] && grep -qxF -- "$issue" "$TMP/in-progress"; then CAT=progress; return 0; fi
+
+  # Part of a merged or closed PR? (A detached HEAD needs none; the next check covers it.)
+  if [ -n "$BRANCH" ] && ! grep -qxF -- "$BRANCH" "$TMP/done-branches" \
+    && ! grep -qxF -- "$HEAD_OID" "$TMP/done-commits" && ! grep -qxF -- "$HEAD_OID" "$TMP/done-here"; then
+    CAT=no-pr; return 0
+  fi
+  # Every commit on GitHub: reachable from the default branch or a merged or closed PR head?
+  if [ -n "$({ printf '%s\n' "$HEAD_OID"; cat "$TMP/known-roots"; } | G rev-list --stdin -n 1 2>/dev/null || echo error)" ]; then
+    CAT=unpushed; return 0
+  fi
+
+  if [ "$REMOVE" = 0 ]; then
+    find_deps
+    [ -s "$TMP/deps" ] || { CAT=nothing; return 0; }
+  fi
+  CAT=eligible
+}
+
+# --- Lock files ----------------------------------------------------------------------------------------------------
+# git's own lock files, created the way git creates them (fails if one exists). While we hold them, git refuses to
+# commit, check out, reset or move the branch in this worktree. Each is remembered as
+# "<dev:inode><TAB><folder under the git directory><TAB><name>" and holds this run's token.
+L_INDEX=; L_HEAD=; L_REF=
+take_lock() { # <folder under the git directory> <name> [make]: creates it and prints what to remember
+  (in_common || exit 1
+    if [ "${3:-}" = make ]; then walk_make "$1"; else walk_into "$1"; fi || exit 1
+    (set -C; printf '%s\n' "$LOCK_TOKEN" > "./$2") || exit 1
+    _t_id=$(devino "./$2") || exit 1
+    printf '%s\t%s\t%s\n' "$_t_id" "$1" "$2") 2> /dev/null
+}
+take_locks() { # <git dir name under worktrees/> <branch ref or empty>
+  L_INDEX=$(take_lock "worktrees/$1" index.lock) || { L_INDEX=; return 1; }
+  L_HEAD=$(take_lock "worktrees/$1" HEAD.lock) || { L_HEAD=; return 1; }
+  if [ -n "$2" ]; then
+    L_REF=$(take_lock "${2%/*}" "${2##*/}.lock" make) || { L_REF=; return 1; }
+  fi
+}
+lock_parts() { _l_id=${1%%"$TAB"*}; _l_rest=${1#*"$TAB"}; _l_dir=${_l_rest%"$TAB"*}; _l_n=${_l_rest##*"$TAB"}; }
+# is_ours <name in the current folder> <dev:inode>: a regular file, the inode we created, holding our token.
+is_ours() {
+  [ -f "./$1" ] && [ ! -L "./$1" ] && [ "$(devino "./$1")" = "$2" ] && [ "$(cat "./$1" 2> /dev/null)" = "$LOCK_TOKEN" ]
+}
+lock_held() (
+  lock_parts "$1"
+  in_common && walk_into "$_l_dir" && is_ours "$_l_n" "$_l_id"
+)
+locks_ours() { # every lock we took is still ours
+  for l in "$L_INDEX" "$L_HEAD" "$L_REF"; do
+    [ -z "$l" ] || lock_held "$l" || return 1
+  done
+}
+# release_lock <lock>: the release is one rename to a private name; the lock is compared again after the rename, and
+# only the private name is ever removed. Exit 0: released (or already gone). 1: not ours or not reachable; nothing
+# was touched. 2: the rename took a lock that is not ours; it was put back with ln, which fails rather than
+# overwrite. 3: it could not be put back; it is kept under the private name.
+release_lock() (
+  lock_parts "$1"
+  in_common && walk_into "$_l_dir" || exit 1
+  { [ -e "./$_l_n" ] || [ -L "./$_l_n" ]; } || exit 0
+  is_ours "$_l_n" "$_l_id" || exit 1
+  u=".factory-gc-unlock.$$.$_l_n"
+  { [ ! -e "./$u" ] && [ ! -L "./$u" ]; } || exit 1
+  mv "./$_l_n" "./$u" 2> /dev/null || exit 1
+  if is_ours "$u" "$_l_id"; then
+    rm -f "./$u"
+    exit 0
+  fi
+  if [ -f "./$u" ] && [ ! -L "./$u" ] && ln "./$u" "./$_l_n" 2> /dev/null; then
+    rm -f "./$u" # the other name of the lock we just put back
+    exit 2
+  fi
+  exit 3
+)
+release_locks() {
+  for l in "$L_REF" "$L_HEAD" "$L_INDEX"; do
+    [ -n "$l" ] || continue
+    lock_parts "$l"
+    if release_lock "$l"; then
+      :
+    else
+      case $? in
+        2) printf '%s\n' "a lock of another process was at $COMMON/$_l_dir/$_l_n; it was put back untouched" ;;
+        3) printf '%s\n' "a lock of another process is kept at $COMMON/$_l_dir/.factory-gc-unlock.$$.$_l_n; it could not be put back" ;;
+        *) printf '%s\n' "lock left behind: $COMMON/$_l_dir/$_l_n (not ours any more, or not reachable safely)" ;;
+      esac
+    fi
+  done
+  L_INDEX=; L_HEAD=; L_REF=
+}
+
+# --- The change step -----------------------------------------------------------------------------------------------
+refuse() { printf '%s\n' "$*"; exit 1; }
+
+gd_ok() { # the git dir is still the dev:inode of the decisive check, reached by the checked walk, and not locked
+  (in_common && walk_into worktrees && [ -d "./${gd##*/}" ] && [ ! -L "./${gd##*/}" ] \
+    && [ "$(devino "./${gd##*/}")" = "$GD_ID" ] && [ ! -e "./${gd##*/}/locked" ])
+}
+
+free_deps() { # in the pinned worktree, under the locks: each folder through the checked walk and safe_rmdir
+  while IFS="$TAB" read -r id d; do
+    { pinned_at "$P" && [ "$(devino .)" = "$ROOT_ID" ] && gd_ok; } || refuse "changed or locked during the check"
+    # shellcheck disable=SC2030 # the walk is meant to stay in this subshell
+    why=$(WALK_AT=$P; WALK_DEV=$(dev_of "$ROOT_ID")
+      walk_into "${d%/*}" || { echo "a folder on the way to it changed"; exit 1; }
+      safe_rmdir "${d##*/}" "$id") || refuse "$why ($d)"
+  done < "$TMP/deps"
+}
+
+# move_back <name in quarantine> <registered path>: undo a move with git, when the path is free. Prints the outcome.
+move_back() {
+  if [ ! -e "$2" ] && [ ! -L "$2" ] && (in_quarantine && G worktree move "./$1" "$2") > /dev/null 2>&1; then
+    echo "moved back"
+  else
+    printf '%s\n' "left at $QDIR/$1; nothing was deleted, and git worktree move brings it back"
+  fi
+}
+
+# quarantine <registered path>: in the pinned worktree, under the locks, after the decisive check. Moves the worktree
+# into the quarantine folder and checks it again there. Deletes nothing.
+quarantine() {
+  _q_from=$1
+  [ ! -e "$gd/modules" ] || refuse "it has submodules; remove it with git worktree remove"
+  list_worktrees || refuse "git worktree list failed"
+  while IFS= read -r w; do # another worktree inside this one would move with it
+    wp=$(resolve_dir "$w" 2>/dev/null) || continue
+    case $wp in "$P"/*) refuse "another worktree is inside it ($wp)" ;; esac
+  done < "$TMP/worktrees"
+  { pinned_at "$P" && [ "$(devino .)" = "$ROOT_ID" ]; } || refuse "changed during the check"
+  gd_ok || refuse "its git dir changed, or it was locked, during the check"
+  _q_n=${gd##*/}
+  _q_qid=$(in_quarantine make && devino .) || refuse "cannot make or enter the quarantine folder"
+  [ "$(dev_of "$_q_qid")" = "$(dev_of "$ROOT_ID")" ] \
+    || refuse "it is on another file system than the repository, so one rename cannot move it"
+  (in_quarantine && [ ! -e "./$_q_n" ] && [ ! -L "./$_q_n" ] && [ ! -e "./$_q_n.info" ] && [ ! -L "./$_q_n.info" ]) \
+    || refuse "$QDIR/$_q_n is in the way"
+  _q_list=$(listing) || refuse "its files could not be listed"
+  hook before-move "$_q_from"
+
+  # The move: git finds the worktree by its path, renames it (it never copies) and updates its own records.
+  _q_err=$(in_quarantine && G worktree move "$_q_from" "./$_q_n" 2>&1) \
+    || refuse "git worktree move failed: $(printf '%s\n' "$_q_err" | head -n 1)"
+
+  # Checked again where it is now: no path leads here any more, so what is found is what will stay.
+  if _q_why=$(in_quarantine || { echo "cannot enter the quarantine folder"; exit 1; }
+    { [ -d "./$_q_n" ] && [ ! -L "./$_q_n" ] && [ "$(devino "./$_q_n")" = "$ROOT_ID" ]; } \
+      || { echo "another folder was at its path when it was moved"; exit 1; }
+    walk_into "$_q_n" || { echo "it changed while it was moved"; exit 1; }
+    [ "$(listing)" = "$_q_list" ] || { echo "its files changed after the last check"; exit 1; }
+    [ -z "$(g status --porcelain || echo error)" ] || { echo "uncommitted or untracked work appeared"; exit 1; }
+    [ "$(g rev-parse -q --verify HEAD)" = "$HEAD_OID" ] || { echo "HEAD moved"; exit 1; }); then
+    :
+  else
+    refuse "$_q_why; $(move_back "$_q_n" "$_q_from")"
+  fi
+  cd / # out of the worktree, or this shell would count as a process inside it
+  read_processes
+  P="$QDIR/$_q_n"
+  if { [ "$SEES_PROCS" = 1 ] && [ "$SEES_NOW" = 0 ]; } || has_process; then
+    refuse "a process is running in it; $(move_back "$_q_n" "$_q_from")"
+  fi
+  (in_quarantine && set -C && {
+    echo "factory-gc quarantine record 2"
+    printf '%s\n' "root $ROOT_ID"
+    printf '%s\n' "gd $GD_ID"
+    printf '%s\n' "head $HEAD_OID"
+    printf '%s\n' "ref $BRANCH_REF"
+    printf '%s\n' "list $_q_list"
+    printf '%s\n' "from $_q_from"
+  } > "./$_q_n.info") 2> /dev/null || refuse "its record could not be written; $(move_back "$_q_n" "$_q_from")"
+  printf '%s\n' "moved to $QDIR/$_q_n"
+}
+
+# change <path> <HEAD at scan>: the one step that may change a worktree. A subshell, so its cd and locks stay inside.
+change() (
+  trap 'release_locks' EXIT
+  trap 'echo "stopped by a signal"; exit 1' HUP INT TERM
+  hook act-start "$1"
+  READ_FAILED=
+  refresh_github || refuse "GitHub state could not be read again: $READ_FAILED"
+  classify "$1" < /dev/null
+  [ "$CAT" = eligible ] || refuse "now $CAT"
+  locked_gd=$gd; locked_gd_id=$GD_ID; locked_root=$ROOT_ID; locked_ref=$BRANCH_REF
+  take_locks "${gd##*/}" "$BRANCH_REF" || refuse "git is busy in it, or its lock files cannot be reached safely"
+  hook locked "$1"
+  cd / # out of the worktree, or this shell would count as a process inside it
+  read_processes
+  [ "$SEES_PROCS" = 0 ] || [ "$SEES_NOW" = 1 ] || refuse "cannot see running processes any more"
+  classify "$1" < /dev/null # the decisive check: from scratch, under the locks
+  [ "$CAT" = eligible ] || refuse "now $CAT"
+  { [ "$gd" = "$locked_gd" ] && [ "$GD_ID" = "$locked_gd_id" ] && [ "$ROOT_ID" = "$locked_root" ] \
+    && [ "$BRANCH_REF" = "$locked_ref" ]; } || refuse "changed during the check"
+  [ "$HEAD_OID" = "$2" ] || refuse "HEAD moved since the scan"
+  hook before-change "$1"
+  if [ "$REMOVE" = 1 ]; then quarantine "$1"; else free_deps; fi
+)
+
+# --- Purge: the second step --------------------------------------------------------------------------------------
+field() { sed -n "s/^$1 //p" "$2" | head -n 1; } # <key> <record file>
+
+# check_quarantined: pins the quarantined worktree $QDIR/$n and compares it with its record (r_*). On failure WHY
+# says what differs. Needs a fresh process list, read from outside the worktree.
+check_quarantined() {
+  PIN_SCAN=0
+  pin "$QDIR/$n" || { WHY="it is no longer a worktree of this repository"; return 1; }
+  { [ "$ROOT_ID" = "$r_root" ] && [ "$GD_ID" = "$r_gd" ]; } || { WHY="it is not the worktree that was quarantined"; return 1; }
+  [ ! -e "$gd/locked" ] || { WHY="it is locked (git worktree lock)"; return 1; }
+  ! has_process || { WHY="a process is running in it"; return 1; }
+  read_head || { WHY="its HEAD cannot be read"; return 1; }
+  { [ "$HEAD_OID" = "$r_head" ] && [ "$BRANCH_REF" = "$r_ref" ]; } || { WHY="its HEAD or branch changed"; return 1; }
+  [ -z "$(g status --porcelain || echo error)" ] || { WHY="it has uncommitted or untracked work"; return 1; }
+  [ "$(listing)" = "$r_list" ] || { WHY="its files changed since it was quarantined"; return 1; }
+}
+
+# still_as_recorded <private name>: the last look at a quarantined worktree, after it was renamed to its private name
+# in the walked quarantine folder. No path that anything else knows leads to it now, so what is found here stays so:
+# no process inside, the recorded listing, clean.
+still_as_recorded() {
+  read_processes
+  [ "$SEES_PROCS" = 0 ] || [ "$SEES_NOW" = 1 ] || return 1
+  # shellcheck disable=SC2031 # called by safe_rmdir, in the subshell that did the walk
+  P="$WALK_AT/$1"
+  ! has_process || return 1
+  (cd -P "./$1" 2> /dev/null && [ "$(devino .)" = "$r_root" ] && [ "$(listing)" = "$r_list" ] \
+    && [ -z "$(g status --porcelain || echo error)" ])
+}
+# gd_locks_ours <private name>: the two locks inside the renamed git dir are still the ones we created.
+gd_locks_ours() {
+  (cd -P "./$1" 2> /dev/null || exit 1
+    lock_parts "$L_INDEX"; is_ours index.lock "$_l_id" || exit 1
+    lock_parts "$L_HEAD"; is_ours HEAD.lock "$_l_id")
+}
+
+# purge_one <name>: prints the outcome. Exit 0: deleted (or, in a dry run, would be). 1: kept. 3: has not rested long
+# enough. 4: no longer in quarantine; its record was dropped. A subshell, so its cd and locks stay inside.
+purge_one() (
+  trap 'release_locks' EXIT
+  trap 'echo "stopped by a signal"; exit 1' HUP INT TERM
+  n=$1
+  in_quarantine || refuse "cannot enter the quarantine folder"
+  { [ -f "./$n.info" ] && [ ! -L "./$n.info" ]; } || refuse "it has no record"
+  r_root=$(field root "./$n.info"); r_gd=$(field gd "./$n.info"); r_head=$(field head "./$n.info")
+  r_ref=$(field ref "./$n.info"); r_list=$(field list "./$n.info"); r_from=$(field from "./$n.info")
+  { [ "$(sed -n 1p "./$n.info")" = "factory-gc quarantine record 2" ] && [ -n "$r_root" ] && [ -n "$r_gd" ] \
+    && [ -n "$r_head" ] && [ -n "$r_list" ]; } || refuse "its record cannot be read"
+  if [ ! -e "./$n" ] && [ ! -L "./$n" ]; then
+    [ "$APPLY" = 0 ] || rm -f "./$n.info" # our own record, in our own folder
+    echo "no longer in quarantine (moved back?); its record is dropped"
+    exit 4
+  fi
+  { [ -d "./$n" ] && [ ! -L "./$n" ] && [ "$(devino "./$n")" = "$r_root" ]; } \
+    || refuse "it is not the folder that was quarantined"
+  if [ "$MIN_AGE" -gt 0 ] && [ -n "$(find "./$n.info" -maxdepth 0 -mmin -"$MIN_AGE" 2> /dev/null)" ]; then
+    printf '%s\n' "quarantined less than $MIN_AGE min ago"
+    exit 3
+  fi
+  cd /
+  read_processes
+  check_quarantined || refuse "$WHY"
+  if [ "$APPLY" = 0 ]; then
+    printf '%s\n' "would delete (from $r_from)"
+    exit 0
+  fi
+  take_locks "${gd##*/}" "$BRANCH_REF" || refuse "git is busy in it, or its lock files cannot be reached safely"
+  hook purge-locked "$QDIR/$n"
+  cd /
+  read_processes
+  [ "$SEES_PROCS" = 0 ] || [ "$SEES_NOW" = 1 ] || refuse "cannot see running processes any more"
+  check_quarantined || refuse "$WHY" # the decisive check: from scratch, under the locks
+  cd /
+  locks_ours || refuse "a lock was taken over during the check"
+  hook before-purge "$QDIR/$n"
+  why=$(in_quarantine || { echo "cannot enter the quarantine folder"; exit 1; }
+    safe_rmdir "$n" "$r_root" still_as_recorded) || refuse "$why"
+  # Its git dir goes with our index.lock and HEAD.lock inside, so they must still be ours after the rename.
+  why=$(in_common || { echo "cannot enter the git directory"; exit 1; }
+    walk_into worktrees || { echo "the path to it changed"; exit 1; }
+    safe_rmdir "${gd##*/}" "$r_gd" gd_locks_ours) || refuse "deleted, but its git dir was kept: $why"
+  L_INDEX=; L_HEAD=
+  (in_quarantine && rm -f "./$n.info") || true
+  if [ -n "$r_ref" ]; then
+    release_locks
+    # Deletes the branch only if it still points at the recorded commit (git compares and deletes atomically).
+    G update-ref -d "$r_ref" "$r_head" 2> /dev/null || refuse "deleted, but branch ${r_ref#refs/heads/} was kept (it moved)"
+  fi
+  printf '%s\n' "deleted (from $r_from)"
+)
+
+shown() { case $1 in *[[:cntrl:]]*) printf '(name with control characters)' ;; *) printf '"%s"' "$1" ;; esac; }
+avail() { df -Pk "$MAIN" 2>/dev/null | awk 'NR == 2 { print $4 }'; }
+
+purge_main() {
+  mode="dry run"
+  [ "$APPLY" = 0 ] || mode=apply
+  printf '%s\n' "$prog: $QDIR (purge, $mode; only what has rested $MIN_AGE min)"
+  if ! (in_quarantine) 2> /dev/null; then
+    echo "Nothing is in quarantine."
+    exit 0
+  fi
+  (in_quarantine && ls -A) > "$TMP/qlist" 2> /dev/null || die "the quarantine folder cannot be read"
+  sed -n 's/\.info$//p' "$TMP/qlist" > "$TMP/qnames"
+  before=$(avail)
+  n_del=0; n_kept=0; n_wait=0
+  while IFS= read -r qn; do
+    case $qn in '' | */* | *[[:cntrl:]]*) continue ;; esac
+    if out=$(purge_one "$qn"); then rc=0; else rc=$?; fi
+    case $rc in
+      0) n_del=$((n_del + 1)); printf '  %s %s\n' "$(shown "$qn")" "$out" ;;
+      3) n_wait=$((n_wait + 1)); printf '  waiting %s: %s\n' "$(shown "$qn")" "$out" ;;
+      4) printf '  %s %s\n' "$(shown "$qn")" "$out" ;;
+      *) n_kept=$((n_kept + 1)); printf '  kept %s: %s\n' "$(shown "$qn")" "$out" ;;
+    esac
+  done < "$TMP/qnames"
+  while IFS= read -r e; do # anything without a record is never touched
+    case $e in *.info | .factory-gc-trash.*) continue ;; esac
+    grep -qxF -- "$e" "$TMP/qnames" || printf '  left alone %s: it has no record\n' "$(shown "$e")"
+  done < "$TMP/qlist"
+  if [ "$APPLY" = 0 ]; then
+    printf '%s\n' "Dry run: $n_del quarantined worktrees would be deleted ($n_wait waiting, $n_kept kept). Run with --purge-quarantine --apply to delete them."
+    exit 0
+  fi
+  after=$(avail)
+  printf '%s\n' "Deleted $n_del quarantined worktrees ($n_wait waiting, $n_kept kept). Free space: $((before / 1024)) MB -> $((after / 1024)) MB."
+  [ "$n_kept" -eq 0 ]
+}
+
+# ====================================================================================================================
+# Main
+# ====================================================================================================================
+COMMON=$(git rev-parse --git-common-dir 2>/dev/null) || die "not inside a git repository"
+COMMON=$(resolve_dir "$COMMON") || die "cannot resolve the git directory"
+QDIR="$COMMON/$QNAME"
+SELF=$(git rev-parse --show-toplevel 2>/dev/null || true)
+[ -z "$SELF" ] || SELF=$(resolve_dir "$SELF" || true)
+ROOT=
+if [ -n "$ROOT_IN" ]; then
+  ROOT=$(resolve_dir "$ROOT_IN") || die "cannot resolve --root $ROOT_IN"
+fi
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/factory-gc.XXXXXX") || die "mktemp failed"
+trap 'rm -rf "$TMP"' EXIT
+trap 'exit 1' HUP INT TERM
+TAB=$(printf '\t')
+LOCK_TOKEN="factory-gc pid $$ run ${TMP##*/}"
+
+# rm on one file system: rm -x (BSD) or rm --one-file-system (GNU), whichever this rm has; empty when neither.
+RM_ONEFS=
+if [ "$APPLY" = 1 ]; then
+  mkdir "$TMP/rmprobe" && { rm -rf -x "$TMP/rmprobe" 2> /dev/null || true; }
+  if [ ! -e "$TMP/rmprobe" ]; then
+    RM_ONEFS=-x
+  else
+    rm -rf --one-file-system "$TMP/rmprobe" 2> /dev/null || true
+    [ -e "$TMP/rmprobe" ] || RM_ONEFS=--one-file-system
+  fi
+  # The lock files are those of the files ref storage; reftable keeps refs elsewhere.
+  case $(G config --get extensions.refstorage 2>/dev/null || true) in
+    '' | files) ;;
+    *) die "--apply supports only the files ref storage" ;;
+  esac
+fi
+if [ "$PURGE" = 1 ] || { [ "$APPLY" = 1 ] && [ "$REMOVE" = 1 ]; }; then
+  [ -n "$LIST_FMT" ] || die "--remove-worktrees and --purge-quarantine need a stat that prints change times with fractions of a second (GNU stat -c %.9Z or BSD stat -f %Fc)"
+fi
+
+list_worktrees || die "git worktree list failed"
+MAIN=$(sed -n 1p "$TMP/worktrees")
+[ -n "$MAIN" ] || die "git worktree list is empty"
+tail -n +2 "$TMP/worktrees" > "$TMP/candidates"
+
+read_processes
+SEES_PROCS=$SEES_NOW
+[ "$SEES_PROCS" = 1 ] || printf '%s\n' "$prog: warning: cannot see running processes; relying on locks and --min-age" >&2
+
+if [ "$PURGE" = 1 ]; then
+  purge_main
+  exit $?
+fi
+
+# --- GitHub state and objects: any failure stops the run ------------------------------------------------------------
+# The repository is read from here once; every later gh call names it (the change step runs from /).
+REPO_DEF=$(gh repo view --json nameWithOwner,defaultBranchRef -q '.nameWithOwner + " " + .defaultBranchRef.name' \
+  2>/dev/null) || die "gh repo view failed"
+NWO=${REPO_DEF%% *}; DEF=${REPO_DEF#* }
+valid_repo "$NWO" || die "GitHub gave a repository name outside owner/name (letters, digits and the allowed marks)"
+case $DEF in '' | *[[:space:]]* | "$REPO_DEF") die "could not read the default branch from GitHub" ;; esac
+REF="refs/remotes/$REMOTE/$DEF"
+read_prs all "$TMP/prs" || die "gh api pulls failed"
+read_in_progress || die "gh issue list failed or was cut short"
+split_open "$TMP/prs"
+awk '$2 != "open" { print $3 }' "$TMP/prs" > "$TMP/done-shas"
+awk '$2 != "open" { print $4 }' "$TMP/prs" > "$TMP/done-branches"
+
+if [ "$NO_FETCH" = 1 ]; then
+  printf '%s\n' "$prog: --no-fetch: nothing fetched, so these results may be stale" >&2
+  G rev-parse -q --verify "$REF" > /dev/null || die "$REF is not here; run once without --no-fetch"
+else
+  G fetch -q --no-tags "$REMOTE" "+refs/heads/$DEF:$REF" 2>/dev/null || die "git fetch $REMOTE $DEF failed"
+  fetch_missing "$TMP/prs" || die "git fetch of PR heads failed"
+fi
+build_open_set || die "an open PR head is missing or its commits could not be listed"
+# A missing merged or closed head only makes the run more careful (fewer worktrees qualify): dropped with a warning.
+G cat-file --batch-check < "$TMP/done-shas" | awk '$2 == "commit" { print $1 }' > "$TMP/done-here"
+dropped=$(($(wc -l < "$TMP/done-shas") - $(wc -l < "$TMP/done-here")))
+[ "$dropped" -eq 0 ] || printf '%s\n' "$prog: warning: $dropped merged or closed PR heads are not here; ignored" >&2
+# Commits of merged or closed PRs that are not on the default branch, and the exclusion list for "outside GitHub".
+{ cat "$TMP/done-here"; printf '%s\n' "^$REF"; } | G rev-list --stdin > "$TMP/done-commits" 2>/dev/null \
+  || die "git rev-list of finished PRs failed"
+{ printf '%s\n' "^$REF"; sed 's/^/^/' "$TMP/done-here"; } > "$TMP/known-roots"
+
+# --- Scan ----------------------------------------------------------------------------------------------------------
+size_kb() { # total size of the dependency folders (or the whole worktree) of the pinned worktree
+  if [ "$REMOVE" = 1 ]; then du -sk . 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; return; fi
+  [ -s "$TMP/deps" ] || find_deps
+  [ -s "$TMP/deps" ] || { echo 0; return; }
+  cut -f2 "$TMP/deps" | tr '\n' '\0' | xargs -0 du -sk 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'
+}
+
+: > "$TMP/counts"
+: > "$TMP/eligible"
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  classify "$path" < /dev/null
+  kb=0
+  if [ "$SIZES" = 1 ] && [ -n "$gd" ]; then kb=$(size_kb); fi
+  cd /
+  [ "$CAT" != outside ] || continue
+  printf '%s\n' "$CAT $kb" >> "$TMP/counts"
+  [ "$VERBOSE" = 0 ] || printf '  %-13s %s %s\n' "$CAT" "$(shown "$path")" "$BRANCH"
+  [ "$CAT" != eligible ] || printf '%s\t%s\n' "$HEAD_OID" "$path" >> "$TMP/eligible"
+done < "$TMP/candidates"
+
+count() { awk -v c="$1" '$1 == c { n++ } END { print n + 0 }' "$TMP/counts"; }
+kb_of() { awk -v c="$1" '$1 == c { s += $2 } END { printf "%d", s / 1024 }' "$TMP/counts"; }
+line() { # line <label> <categories...>
+  label=$1; shift; n=0; mb=0
+  for c in "$@"; do n=$((n + $(count "$c"))); mb=$((mb + $(kb_of "$c"))); done
+  if [ "$SIZES" = 1 ]; then printf '  %5s  %-62s %8s MB\n' "$n" "$label" "$mb"; else printf '  %5s  %s\n' "$n" "$label"; fi
+}
+
+what="frees dependency folders ($DIRS)"
+[ "$REMOVE" = 0 ] || what="moves whole worktrees into quarantine"
+mode="dry run"
+[ "$NO_FETCH" = 0 ] || mode="dry run, --no-fetch: may be stale"
+[ "$APPLY" = 0 ] || mode=apply
+printf '%s\n' "$prog: $COMMON ($mode; $what)"
+line "eligible (PR merged or closed, clean, not in use)" eligible
+line "open PR" open
+line "issue in progress (status:in-progress)" progress
+line "in use (locked, a running process, or changed < $MIN_AGE min)" busy-locked busy-process busy-recent
+line "uncommitted or untracked work" dirty
+line "commits that are not on GitHub" unpushed
+line "no merged or closed PR" no-pr
+[ "$DETACHED" = 1 ] || line "no branch (detached; --include-detached to consider)" detached
+[ "$REMOVE" = 1 ] || line "nothing to free (no ignored dependency folder)" nothing
+[ "$(count quarantined)" = 0 ] || line "in quarantine (--purge-quarantine deletes them)" quarantined
+line "skipped (main checkout, this checkout, missing, unsafe path or another repository)" \
+  main self missing unsafe other
+
+total=$(wc -l < "$TMP/eligible" | tr -d ' ')
+if [ "$APPLY" != 1 ]; then
+  if [ "$REMOVE" = 1 ]; then
+    printf '%s\n' "Dry run: $total worktrees would be moved into quarantine. Run with --apply to do it."
+  else
+    printf '%s\n' "Dry run: $total worktrees would be freed. Run with --apply to do it."
+  fi
+  [ "$NO_FETCH" = 0 ] || echo "Nothing was fetched (--no-fetch), so these counts may be stale."
+  exit 0
+fi
+
+before=$(avail)
+done_n=0; refused=0
+while IFS="$TAB" read -r oid path; do
+  if why=$(change "$path" "$oid"); then
+    done_n=$((done_n + 1))
+    [ -z "$why" ] || printf '  note %s: %s\n' "$(shown "$path")" "$why"
+  else
+    refused=$((refused + 1)); printf '  refused %s: %s\n' "$(shown "$path")" "$why"
+  fi
+done < "$TMP/eligible"
+if [ "$REMOVE" = 1 ]; then
+  printf '%s\n' "Moved $done_n worktrees into quarantine ($refused refused). Nothing was deleted."
+  [ "$done_n" -eq 0 ] || printf '%s\n' "To delete them: $prog --purge-quarantine --apply (after $MIN_AGE min). To bring one back: git worktree move <its place in quarantine> <its old path>."
+else
+  after=$(avail)
+  printf '%s\n' "Freed $done_n worktrees ($refused refused). Free space: $((before / 1024)) MB -> $((after / 1024)) MB."
+fi
+[ "$refused" -eq 0 ]

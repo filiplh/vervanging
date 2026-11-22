@@ -1,0 +1,23 @@
+#!/bin/sh
+# factory-headless: the headless runtime's runner (runtime/headless.md). It starts one unattended run of the logged-in
+# claude or codex CLI, with an explicit model and effort, in its own worktree, inside the caps, after the emergency stop
+# and the usage reserve, and ends it with a report.
+#
+#   factory-headless run JOB [--now] [--urgent]        start a job of ~/.factory/headless.yaml (what launchd calls)
+#   factory-headless start --project DIR --role ROLE --spec SPEC --brief FILE [--name NAME] [--max-turns N]
+#                          [--timeout-minutes M] [--heavy] [--urgent]
+#   factory-headless result RUN                         a run's report
+#   factory-headless cancel RUN                         stop a running run; it ends with a report
+#   factory-headless runs                               the runs, newest first
+#   factory-headless plist JOB                          print the launchd job for JOB (you install it, see headless.md)
+#   factory-headless resolve SPEC [--project DIR]       check the CLI and its flags, show the command line; runs no model
+#
+# Everything else is in factory-headless.py next to this file (python3, standard library only). Exit codes: 0 done;
+# 1 could not finish; 2 the run ended without its own report (a cap, a usage limit, a failure, a cancel); 3 refused
+# before anything started; 64 bad usage. It never reads, asks for or prints a credential.
+set -u
+unset CDPATH
+here=$(cd -P "$(dirname "$0")" 2> /dev/null && pwd -P) || { echo "factory-headless: cannot find its own folder" >&2; exit 1; }
+command -v python3 > /dev/null 2>&1 || { echo "factory-headless: needs python3 (standard library only); install Python 3" >&2; exit 1; }
+[ -f "$here/factory-headless.py" ] || { echo "factory-headless: factory-headless.py is missing next to it; restore the core files with factory-update" >&2; exit 1; }
+exec python3 -I -B "$here/factory-headless.py" "$@"

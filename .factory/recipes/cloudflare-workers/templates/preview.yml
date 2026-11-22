@@ -1,0 +1,246 @@
+# Preview of deploy target '__FACTORY_TARGET__' on Cloudflare Workers, on request.
+# Rendered by factory-init from the cloudflare-workers recipe (.factory/recipes/cloudflare-workers/). Do not edit by
+# hand: change factory.yaml and re-render, so factory doctor finds no drift.
+#
+# - A pull request with the preview label: build its head commit (not GitHub's merge commit), then `wrangler versions upload --preview-alias pr-<N>`.
+#   That uploads a version without deploying it: production traffic never changes. One PR comment holds the URLs;
+#   every later push updates it in place. Adding the label to an open PR starts a preview; removing it stops later
+#   pushes from uploading one. Without the label every job skips, which bills no minutes.
+# - The smoke check runs against this exact version's URL. A failed check fails this run, nothing else.
+# - The Worker must exist: its first deploy is a production release, which is a human gate. Previews never create it.
+# - Two jobs (deploy contract, rule 6). `build` runs the project's setup and build and wrangler's bundle of the Worker,
+#   holds no secret, and hands on an artefact of this run. `preview` holds the secrets and runs no project install,
+#   build or lifecycle script: it installs the recipe's pinned wrangler (version and checksum, bin/deploy-tool.sh),
+#   checks the artefact as untrusted data and uploads it as it is (--no-bundle). Secrets reach only the steps that
+#   call Cloudflare. Fork and bot PRs get no secrets, so they skip.
+name: 'Preview __FACTORY_TARGET__'
+
+on:
+  pull_request:
+    # `labeled` is how adding the preview label to an open PR starts a preview.
+    types: [opened, synchronize, reopened, labeled]
+    # __FACTORY_PR_PATHS__
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  # One group per PR, so a new push cancels the preview of the superseded commit. Adding any other label starts a run
+  # whose jobs all skip; it gets its own group so it never cancels a real preview.
+  group: ${{ github.workflow }}-${{ (github.event.action != 'labeled' || github.event.label.name == '__FACTORY_PREVIEW_LABEL__') && format('pr-{0}', github.event.number) || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  TARGET: '__FACTORY_TARGET__'
+  WORKER: '__FACTORY_WORKER__'
+  WRANGLER_CONFIG: '__FACTORY_CONFIG__'
+  SMOKE: '__FACTORY_SMOKE__'
+  RECIPE: '__FACTORY_RECIPE_DIR__'
+  # The deploy tool, pinned by version and by the sha256 of the files that pin every package (bin/deploy-tool.sh).
+  DEPLOY_TOOL: 'wrangler@4.160.1'
+  DEPLOY_TOOL_PACKAGE_SHA256: 'bd4a242dd4f008da2fd3e3698e3b3e752108325c4b8f4b33255b8da451099b89'
+  DEPLOY_TOOL_LOCK_SHA256: 'ecb1f9b0f2ca7615848e018e4e04ef11e39ca2793d4e3d93896ac183026c3afc'
+  WRANGLER_SEND_METRICS: 'false'
+  # The API host wrangler sends the token to, set explicitly rather than left to its defaults and .env files.
+  CLOUDFLARE_API_BASE_URL: 'https://api.cloudflare.com/client/v4'
+
+jobs:
+  build:
+    name: 'Preview build (__FACTORY_TARGET__)'
+    if: >-
+      contains(github.event.pull_request.labels.*.name, '__FACTORY_PREVIEW_LABEL__') &&
+      (github.event.action != 'labeled' || github.event.label.name == '__FACTORY_PREVIEW_LABEL__') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    # Runs the project's setup and build, so third-party code: it holds no secret, its token can only read the repo,
+    # and all it hands on is the artefact, which the preview job checks as untrusted data.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artefact: ${{ steps.pack.outputs.file }}
+      digest: ${{ steps.pack.outputs.digest }}
+    env:
+      SETUP: '__FACTORY_SETUP__'
+      BUILD: '__FACTORY_BUILD__'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The PR head, so what is built is what the tag, the message and the comment name (HEAD_SHA).
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Empty: the runner's own Node.
+          node-version-file: '__FACTORY_NODE_VERSION_FILE__'
+
+      - name: Setup
+        if: env.SETUP != ''
+        run: sh -c "$SETUP"
+
+      - name: Build
+        if: env.BUILD != ''
+        run: sh -c "$BUILD"
+
+      - name: Install the pinned deploy tool
+        run: bash "$RECIPE/bin/deploy-tool.sh" install "$RUNNER_TEMP/deploy-tool"
+
+      - name: Bundle the Worker and pack the artefact
+        id: pack
+        env:
+          SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # A refusal is in the output: print it before stopping.
+          if ! config=$(python3 "$RECIPE/bin/wrangler-config.py" show ${WRANGLER_CONFIG:+--config "$WRANGLER_CONFIG"}); then
+            echo "$config"; exit 1
+          fi
+          echo "$config"
+          value() { sed -n "s/^$1=//p" <<<"$config"; }
+          if [ -n "$(value main_stem)" ]; then
+            # shellcheck disable=SC2086 # WRANGLER is a command line on purpose
+            $WRANGLER deploy --dry-run --outdir "$RUNNER_TEMP/bundle" --name "$WORKER" --config "$(value config)"
+          fi
+          python3 "$RECIPE/bin/artefact.py" pack --bundle "$RUNNER_TEMP/bundle" --assets "$(value assets)" \
+            --target "$TARGET" --sha "$SHA" --run-id "$RUN_ID" --out "$RUNNER_TEMP/out/factory-$TARGET-$RUN_ID.tar.gz" \
+            >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ runner.temp }}/out/${{ steps.pack.outputs.file }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  preview:
+    name: 'Preview (__FACTORY_TARGET__)'
+    needs: build
+    # Holds the secrets, and runs no project install, build or lifecycle script: only the recipe's own scripts and
+    # the pinned wrangler, on files it checked.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write # the preview comment
+    env:
+      PR: ${{ github.event.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24' # what the pinned wrangler needs, whatever the project uses
+          package-manager-cache: false # no cache restored into a job that holds a secret
+
+      # Before any byte of the artefact is in this job.
+      - name: Install the pinned deploy tool
+        run: bash "$RECIPE/bin/deploy-tool.sh" install "$RUNNER_TEMP/deploy-tool"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # No run-id and no token: only this run's artefacts.
+          name: ${{ needs.build.outputs.artefact }}
+          path: ${{ runner.temp }}/artefact
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Check the artefact and the Wrangler config
+        id: artefact
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # The config from the checkout, never from the artefact: no custom build, no redirect.
+          # A refusal is in the output: print it before stopping.
+          if ! config=$(python3 "$RECIPE/bin/wrangler-config.py" check ${WRANGLER_CONFIG:+--config "$WRANGLER_CONFIG"}); then
+            echo "$config"; exit 1
+          fi
+          echo "$config"
+          value() { sed -n "s/^$1=//p" <<<"$config"; }
+          if ! unpacked=$(python3 "$RECIPE/bin/artefact.py" unpack --from "$RUNNER_TEMP/artefact" --digest "$DIGEST" \
+            --target "$TARGET" --sha "$HEAD_SHA" --run-id "$RUN_ID" --into "$RUNNER_TEMP/release" \
+            --config "$(value config)" --main-stem "$(value main_stem)" --assets "$(value assets)"); then
+            echo "$unpacked"; exit 1
+          fi
+          echo "$unpacked"
+          # entry=, config= (the copy) and tree=: the release tree, apart from the checkout, which stays as checked out.
+          echo "$unpacked" >> "$GITHUB_OUTPUT"
+
+      - name: Does the Worker exist?
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          live=$(bash "$RECIPE/bin/versions.sh" live "$WORKER")
+          echo "$live"
+          if grep -qx 'exists=false' <<<"$live"; then
+            echo "::error title=No Worker::Worker $WORKER does not exist yet. Its first deploy is a production release and needs your OK (factory deploy $TARGET production); previews work after that."
+            exit 1
+          fi
+
+      - name: Upload a preview version
+        id: upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONFIG: ${{ steps.artefact.outputs.config }}
+          ENTRY: ${{ steps.artefact.outputs.entry }}
+          TREE: ${{ steps.artefact.outputs.tree }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
+        run: |
+          # The bundle as the build job made it (--no-bundle: nothing is built here), from the release tree: the
+          # checked config's copy and the assets, nothing else. The checkout is not touched.
+          cd "$TREE"
+          # shellcheck disable=SC2086 # WRANGLER is a command line on purpose
+          $WRANGLER versions upload ${ENTRY:+"$ENTRY" --no-bundle} --name "$WORKER" --config "$CONFIG" \
+            --preview-alias "pr-$PR" --tag "${HEAD_SHA:0:12}" --message "factory preview $TARGET PR #$PR $HEAD_SHA"
+          result=$(jq -sc '[.[] | select(.type == "version-upload")] | last' "$WRANGLER_OUTPUT_FILE_PATH")
+          alias_url=$(jq -r '.preview_alias_url // empty' <<<"$result")
+          version_url=$(jq -r '.preview_url // empty' <<<"$result")
+          if [ -z "$version_url" ]; then
+            echo "::error::Wrangler reported no preview URL. Are preview URLs on for the Worker (preview_urls in the Wrangler config)?"
+            exit 1
+          fi
+          echo "url=${alias_url:-$version_url}" >> "$GITHUB_OUTPUT"
+          echo "version_url=$version_url" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke check
+        env:
+          URL: ${{ steps.upload.outputs.version_url }}
+        run: bash "$RECIPE/bin/smoke.sh" "$URL" "$SMOKE"
+
+      - name: Comment the preview URL on the PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          URL: ${{ steps.upload.outputs.url }}
+          VERSION_URL: ${{ steps.upload.outputs.version_url }}
+        run: |
+          marker="<!-- factory-preview:$TARGET -->"
+          {
+            echo "$marker"
+            echo "**Preview** of \`$TARGET\` at ${HEAD_SHA:0:7}: $URL"
+            echo
+            echo "- This exact commit (does not move on new pushes): $VERSION_URL"
+            echo
+            echo "Updated on every push while the PR has the preview label. Production is not touched."
+          } > "$RUNNER_TEMP/comment.md"
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F "body=@$RUNNER_TEMP/comment.md" > /dev/null
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -F "body=@$RUNNER_TEMP/comment.md" > /dev/null
+          fi
+          echo "### Preview of $TARGET: $URL" >> "$GITHUB_STEP_SUMMARY"
