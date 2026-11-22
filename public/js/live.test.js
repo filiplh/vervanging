@@ -237,3 +237,17 @@ test('live screen: the button reads Einde match at the last block', () => {
   wisselButton(view).fire('click');
   assert.equal(h1(view), 'Einde match');
 });
+
+test('live screen: no In the zone button for a player who is out', () => {
+  const { view, setup } = open();
+  const { grid } = setup.plan;
+  const off = grid[0].filter((p) => !grid[1].includes(p));
+  const before = chips(view, 'In the zone').length;
+  // Mark the first player of the starting five out: they become due off at the next change.
+  const row = find(view, 'tr', (tr) => find(tr, 'span', (sp) => sp.className === 'number' && sp.text === '#1').length > 0)[0];
+  find(row, 'button', (b) => b.text === 'Uit')[0].fire('click');
+  const offNow = numbers(listOf(view, 'off'));
+  assert.ok(offNow.includes(1));
+  assert.equal(chips(view, 'In the zone').length, offNow.length - 1, 'every player due off except the out one');
+  assert.ok(before >= off.length - 1);
+});

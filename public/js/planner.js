@@ -289,9 +289,10 @@ export function maxSubsFrom(grid, fromChange = 0) {
 
 // Last resort when no plan meets the targets under the sub rule (late in a match, after several live changes): keep
 // the planned line-ups as far as possible, but put in an available player for anyone who is not available (fewest
-// blocks first) and hold every change to at most MAX_SUBS subs by keeping players on instead (fewest blocks so far
-// come on first). Totals may then differ by more than a block; the minutes on screen show it. Never fails while at
-// least ON_COURT players are available.
+// blocks first) and hold every change to at most MAX_SUBS subs by keeping available players on instead (fewest blocks
+// so far come on first). The one exception: players who are not available must leave, so a change may need as many
+// subs as the unavailable players it takes off, when that is more than MAX_SUBS (four players uit at once). Totals may
+// then differ by more than a block; the minutes on screen show it. Never fails while ON_COURT players are available.
 export function repairRemaining({ grid, players, available = players, fromBlock }) {
   if (available.length < ON_COURT) throw new PlanError(`at least ${ON_COURT} players must be available`);
   const out = grid.map((court) => court.slice());

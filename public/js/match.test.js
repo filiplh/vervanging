@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { makePlan, planStats, maxSubsFrom, blockCounts } from './planner.js';
 import {
   startMatch, wissel, undo, canUndo, applyAction, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
-  normaliseMatchState, MatchError, MATCH_VERSION, uit, terug, proposedBench,
+  normaliseMatchState, MatchError, MATCH_VERSION, uit, terug, proposedBench, capHolds,
 } from './match.js';
+import { seededRandom } from './planner.js';
 
 const players = (n) => Array.from({ length: n }, (_, i) => i + 1);
 const planFor = (schedule, n = 12, seed = 1) => makePlan({ players: players(n), start: [1, 2, 3, 4, 5], schedule, seed });
@@ -329,4 +330,73 @@ test('in the zone at the second-to-last change keeps the cap of 3 (repair when n
       }
     }
   }
+});
+
+// ---------- review of PR #19: mixed actions ----------
+
+test('F1: a player marked uit cannot be kept on in the zone', () => {
+  const plan = planFor('equal');
+  const out = uit(startMatch(plan), 1);
+  assert.ok(nextChange(out).off.includes(1), 'the out player is due off');
+  assert.throws(() => wissel(out, { keep: 1 }), MatchError);
+});
+
+test('F2: four players uit at once: the next change takes all four off, the only case above 3 subs', () => {
+  const plan = planFor('equal');
+  let state = startMatch(plan);
+  for (const p of [1, 2, 3, 4]) state = uit(state, p);
+  const subs = state.grid[1].filter((p) => !state.grid[0].includes(p)).length;
+  assert.equal(subs, 4, 'four forced departures need four subs');
+  assert.ok(state.grid.slice(1).every((court) => [1, 2, 3, 4].every((p) => !court.includes(p))));
+  assert.ok(capHolds(state.grid, 0, state.out), 'allowed: every sub above 3 is a forced departure');
+  assert.ok(maxSubsFrom(state.grid, 1) <= 3, 'all later changes keep 3');
+});
+
+test('F3: damaged version 2 plans and undo snapshots are refused', () => {
+  const plan = planFor('equal');
+  const fiveSubs = roundTrip(startMatch(plan, 's'));
+  fiveSubs.grid[1] = [6, 7, 8, 9, 10];
+  assert.equal(normaliseMatchState(fiveSubs, plan, 's'), null, 'a five-sub change with nobody out');
+  const badHistory = roundTrip(wissel(startMatch(plan, 's')));
+  badHistory.previous.out = [1];
+  assert.equal(normaliseMatchState(badHistory, plan, 's'), null, 'undo would bring back an out player still planned');
+});
+
+test('random mixed sequences: the sub rule, nobody out playing, one-step undo and save/restore always hold', () => {
+  let cases = 0;
+  for (const schedule of ['equal', 'five']) {
+    for (let n = 8; n <= 12; n++) {
+      for (let seed = 1; seed <= 6; seed++) {
+        const plan = planFor(schedule, n, seed);
+        const random = seededRandom(seed * 97 + n);
+        let state = startMatch(plan, 's');
+        while (!state.ended) {
+          const before = state;
+          const x = random();
+          try {
+            const change = nextChange(state);
+            const keepable = change ? change.off.filter((p) => !state.out.includes(p)) : [];
+            if (x < 0.2 && keepable.length) state = wissel(state, { keep: keepable[0] });
+            else if (x < 0.35) {
+              const pool = state.players.filter((p) => !state.out.includes(p));
+              state = uit(state, pool[Math.floor(random() * pool.length)]);
+            } else if (x < 0.45 && state.out.length) state = terug(state, state.out[0]);
+            else if (x < 0.5) state = undo(state);
+            else state = wissel(state);
+          } catch (error) {
+            if (!(error instanceof MatchError)) throw error;
+            assert.match(error.message, /last block|at least 5|no change left/, error.message);
+            state = wissel(state);
+          }
+          cases += 1;
+          assert.ok(capHolds(state.grid, state.block - 1, state.out), `${schedule} ${n} seed ${seed} block ${state.block}`);
+          assert.ok(state.grid.slice(state.block).every((court) => court.every((p) => !state.out.includes(p))));
+          assert.deepEqual(state.grid.slice(0, Math.min(before.block, state.block) - 1), before.grid.slice(0, Math.min(before.block, state.block) - 1), 'played blocks never change');
+          assert.deepEqual(normaliseMatchState(roundTrip(state), plan, 's'), state, 'every state saves and restores');
+          if (state.previous) assert.equal(canUndo(undo(state)), false);
+        }
+      }
+    }
+  }
+  assert.ok(cases > 500);
 });

@@ -122,7 +122,7 @@ export function liveScreen(root, { store }) {
         el('h2', { id: 'h-next' }, 'Bij de volgende wissel'),
         el('div', { className: 'change' },
           el('div', {}, el('h3', {}, 'Eruit'), change.off.length
-            ? nameList(change.off, 'off', (id) => el('button', {
+            ? nameList(change.off, 'off', (id) => !isOut(id) && el('button', {
               type: 'button', className: 'chip', 'aria-pressed': zone && zone.keep === id ? 'true' : 'false',
               onclick: () => toggleZone(id),
             }, 'In the zone'))

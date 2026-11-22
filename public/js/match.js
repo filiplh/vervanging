@@ -42,6 +42,23 @@ export function startMatch(plan, setupSavedAt = null) {
 
 const available = (state) => state.players.filter((p) => !state.out.includes(p));
 
+// The sub rule for a live plan (decision #21): at most MAX_SUBS subs per change, except that a player marked uit who
+// is on court must leave at the next change whatever the count, so a change may have as many subs as the players it
+// takes off for being uit, when that is more than MAX_SUBS. Checked for every change after block `fromChange`
+// (0-based index of the block the change starts from).
+export function subsAllowed(grid, k, out) {
+  const forced = grid[k - 1].filter((p) => out.includes(p) && !grid[k].includes(p)).length;
+  return Math.max(MAX_SUBS, forced);
+}
+
+export function capHolds(grid, fromChange, out) {
+  for (let k = Math.max(1, fromChange + 1); k < grid.length; k++) {
+    const subs = grid[k].filter((p) => !grid[k - 1].includes(p)).length;
+    if (subs > subsAllowed(grid, k, out)) return false;
+  }
+  return true;
+}
+
 // The incoming player the app proposes to keep on the bench when `keep` stays on: the one with the most minutes so
 // far, ties to the lowest number (decision #9).
 export function proposedBench(state) {
@@ -58,6 +75,7 @@ export function proposedBench(state) {
 function keepOn(state, keep, bench) {
   const change = nextChange(state);
   if (!change) throw new MatchError('no change left: this is the last block');
+  if (state.out.includes(keep)) throw new MatchError(`player ${keep} is out and cannot stay on`);
   if (!change.off.includes(keep)) throw new MatchError(`player ${keep} is not due off at this change`);
   const q = bench ?? proposedBench(state);
   if (!change.on.includes(q)) throw new MatchError(`player ${q} is not due on at this change`);
@@ -72,7 +90,7 @@ function keepOn(state, keep, bench) {
     if (!kept[k].includes(keep) || kept[k].includes(q)) continue;
     const swapped = copyGrid(kept);
     swapped[k] = sorted(swapped[k].filter((p) => p !== keep).concat(q));
-    if (maxSubsFrom(swapped, next) <= MAX_SUBS) return swapped;
+    if (capHolds(swapped, next, state.out)) return swapped;
   }
   const replan = (targets) => {
     try {
@@ -241,14 +259,16 @@ export function normaliseMatchState(stored, plan, setupSavedAt = null) {
   if (!point(raw)) return null;
   // The first block is the coach's starting five and never changes.
   if (JSON.stringify(sorted(raw.grid[0])) !== JSON.stringify(sorted(fresh.grid[0]))) return null;
-  // Nobody who is out plays in a block after the current one.
-  if (raw.grid.slice(raw.block).some((court) => court.some((p) => raw.out.includes(p)))) return null;
+  // From the current block on: nobody who is out plays, and every change keeps the sub rule.
+  const planHolds = (p) => !p.grid.slice(p.block).some((court) => court.some((q) => p.out.includes(q)))
+    && capHolds(p.grid, p.block - 1, p.out);
+  if (!planHolds(raw)) return null;
   if (raw.previous != null) {
     // The only history an action leaves: a wissel from the active block just before this one (or, after the end,
     // from the active last block), or an uit or terug on this same active block. Blocks that were already played
     // are the same in both. Anything else would make undo jump, so it is refused.
     const prev = raw.previous;
-    if (!point(prev) || prev.ended !== false) return null;
+    if (!point(prev) || prev.ended !== false || !planHolds(prev)) return null;
     const allowed = raw.ended ? [fresh.blocks] : [raw.block - 1, raw.block];
     if (!allowed.includes(prev.block)) return null;
     if (!samePrefix(prev.grid, raw.grid, prev.block)) return null;
