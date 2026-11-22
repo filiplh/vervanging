@@ -1,0 +1,9 @@
+Final report: post it as one comment on your PR (on the issue if there is no PR; a hunter posts it on the status
+issue, the open issue labelled factory:status), with `gh pr comment <P> --body-file <file>` or
+`gh issue comment <N> --body-file <file>`, then end your run with the same text as your final message. It ends with
+the line: PR <full URL>, head <SHA>, checks and reviews <state> (a run that opened no PR ends with: No PR).
+You run unattended, started by the factory's headless runtime: nobody reads your messages before you end, nobody
+answers a question, and nothing wakes you later. Never wait for input: when you need a person's judgement, write the
+question in your report (or file it as the question issue your skill describes) and go on, or end.
+Run every command in the foreground. A command left running in the background ends with your run, and its result
+reaches nobody. Do not link or watch PRs, do not merge, do not start other agents and do not launch threads.

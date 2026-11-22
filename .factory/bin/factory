@@ -1,0 +1,63 @@
+#!/bin/sh
+# factory: the one entry point to the factory's tools.
+#
+#   factory <subcommand> [arguments]
+#   factory help              the subcommands
+#
+# The existing tools run by name, unchanged: `factory gc --dry-run` runs `factory-gc --dry-run` next to this file,
+# with the same arguments, input, output and exit code (doctor, gc, pause, settings, update, install, metrics,
+# release-check).
+# Every other subcommand is the factory tool's own, in factory.py next to this file (python3, standard library only);
+# `factory help` lists them. A part that adds a subcommand adds it to factory.py's COMMANDS table only.
+#
+# This script prints only its fixed messages; every other line comes from the tool it runs.
+set -u
+unset CDPATH
+here=$(cd -P "$(dirname "$0")" 2> /dev/null && pwd -P) || { echo "factory: cannot find its own folder" >&2; exit 1; }
+
+needs_python() {
+  command -v python3 > /dev/null 2>&1 && return 0
+  echo "factory: needs python3 (standard library only); install Python 3" >&2
+  exit 1
+}
+
+tool() { # tool <name>: the existing tool factory-<name> next to this file, or a fixed message
+  [ -f "$here/factory-$1" ] && return 0
+  echo "factory: factory-$1 is missing next to factory; restore the core files with factory update" >&2
+  exit 1
+}
+
+help() {
+  cat << 'EOF'
+factory <subcommand> [arguments]; `factory <subcommand> --help` for one.
+
+Tools:
+  doctor         check the project's factory setup and say how to fix it
+  gc             free the disk space of worktrees whose pull request is merged or closed
+  pause          show, set or clear the emergency stop
+  settings       show every setting in use and where each comes from
+  update         move the project to a newer core version
+  install        write the factory into a project (used by factory-init)
+  release-check  release checks and release notes for a range of commits
+  metrics        merged work per tier: fix rounds, findings, model fit, usage; --post on the status issue
+
+Board:
+EOF
+  needs_python
+  [ -f "$here/factory.py" ] || { echo "factory: factory.py is missing next to factory; restore the core files with factory update" >&2; exit 1; }
+  python3 -I -B "$here/factory.py" help
+}
+
+[ $# -gt 0 ] || { help; exit; }
+sub=$1
+shift
+case $sub in
+  doctor | gc | pause | settings | update | install | metrics) tool "$sub"; exec sh "$here/factory-$sub" "$@" ;;
+  release-check) tool "$sub"; needs_python; exec python3 "$here/factory-$sub" "$@" ;;
+  help | -h | --help) [ $# -eq 0 ] || { echo "factory: help takes no arguments" >&2; exit 64; }; help; exit ;;
+  -*) echo "factory: unknown option (not shown); run factory help" >&2; exit 64 ;;
+  *)
+    needs_python
+    [ -f "$here/factory.py" ] || { echo "factory: factory.py is missing next to factory; restore the core files with factory update" >&2; exit 1; }
+    exec python3 -I -B "$here/factory.py" "$sub" "$@" ;;
+esac

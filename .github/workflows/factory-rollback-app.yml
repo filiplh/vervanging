@@ -1,0 +1,312 @@
+# One-command rollback of deploy target 'app' in production on Cloudflare Workers.
+# Rendered by factory-init from the cloudflare-workers recipe (.factory/recipes/cloudflare-workers/). Do not edit by
+# hand: change factory.yaml and re-render, so factory doctor finds no drift.
+#
+# Run it with `factory deploy app production --rollback [<version id>]`, or Actions → this workflow → Run
+# workflow. It uses wrangler's own `rollback`: no build, the platform switches back to a version it already has.
+# Without a version id it restores the version of the newest earlier deployment that ran another version.
+# A rollback restores code, not data: D1, KV, R2, Durable Objects and other bound resources stay as they are. So when
+# any commit in the range being undone touches the migration paths, has a breaking change, or belongs to a pull
+# request that recorded an H7 release hold, it holds for your OK with that warning, like the release did. Past a
+# client-side stored-data version bump (an IndexedDB schema, a local file format, an app-cache manifest), browsers
+# that opened the live version keep data the restored one cannot read: prefer a roll-forward fix.
+# The smoke check runs after it. If the restored version fails it too, a `priority:P1` bug is opened.
+# The summary and the held issue name the release version it returns to and the one it leaves (deploy contract, rule
+# 4), as the core's release checker reads them from the two commits; a rollback records no version of its own.
+# The checker is the copy in the live commit (only with that unknown, the restored one), which a release proved, never
+# the copy in this checkout of the default branch's tip (deploy contract, rule 2); when that copy cannot be used, it
+# holds.
+# One job, which holds the secrets and builds nothing: no project install, build or lifecycle script runs in it, and
+# wrangler is the recipe's pinned tool (version and checksum, bin/deploy-tool.sh), never fetched through npx.
+name: 'Roll back app (production)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why (goes into the version message and the summary)'
+        required: true
+      version:
+        description: 'Cloudflare version id to restore. Empty: the version that was live before the current one'
+        required: false
+        default: ''
+      approve:
+        description: 'Only for a held rollback: the full version id (or full 40-character commit SHA) of the live version you approve undoing'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  # The same group as the production deploy: a rollback never runs during a deploy, and neither is ever cancelled.
+  group: 'factory-deploy-app-production'
+  cancel-in-progress: false
+
+env:
+  TARGET: 'app'
+  WORKER: 'vervanging'
+  URL: 'https://vervanging.filip-lhommelet.workers.dev'
+  SMOKE: '["/"]'
+  MIGRATIONS: '[]'
+  RECIPE: '.factory/recipes/cloudflare-workers'
+  RELEASE_CHECK: '.factory/bin/factory-release-check' # the core's one release checker, shared by every recipe
+  # The deploy tool, pinned by version and by the sha256 of the files that pin every package (bin/deploy-tool.sh).
+  DEPLOY_TOOL: 'wrangler@4.160.1'
+  DEPLOY_TOOL_PACKAGE_SHA256: 'bd4a242dd4f008da2fd3e3698e3b3e752108325c4b8f4b33255b8da451099b89'
+  DEPLOY_TOOL_LOCK_SHA256: 'ecb1f9b0f2ca7615848e018e4e04ef11e39ca2793d4e3d93896ac183026c3afc'
+  WRANGLER_SEND_METRICS: 'false'
+  # The API host wrangler sends the token to, set explicitly rather than left to its defaults and .env files.
+  CLOUDFLARE_API_BASE_URL: 'https://api.cloudflare.com/client/v4'
+
+jobs:
+  rollback:
+    name: 'Rollback (app)'
+    # The scripts come from the default branch, never from a pull request.
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # the held-rollback issue and the P1 bug
+      pull-requests: read # the H7 holds recorded on the pull requests in the range being undone
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      WORKFLOW_FILE: 'factory-rollback-app.yml'
+      REASON: ${{ inputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the history between the two versions, for the migration check
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24' # what the pinned wrangler needs, whatever the project uses
+          package-manager-cache: false # no cache restored into a job that holds a secret
+
+      - name: Install the pinned deploy tool
+        run: bash "$RECIPE/bin/deploy-tool.sh" install "$RUNNER_TEMP/deploy-tool"
+
+      - name: What is live, and what comes back?
+        id: plan
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          INPUT_VERSION: ${{ inputs.version }}
+          APPROVE: ${{ inputs.approve }}
+        run: |
+          value() { sed -n "s/^$1=//p" <<<"$2"; }
+          # A version's commit only as versions.sh proves it (full SHA from the factory's own version message,
+          # matching the tag), and only when it is in this history. Anything less is unknown, and unknown holds.
+          commit_of() {
+            if [[ $1 =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$1^{commit}" 2>/dev/null; then echo "$1"; fi
+          }
+          live=$(bash "$RECIPE/bin/versions.sh" live "$WORKER")
+          echo "$live"
+          if [ "$(value exists "$live")" != true ]; then
+            echo "::error title=Nothing to roll back::Worker $WORKER does not exist."
+            exit 1
+          fi
+          live_id=$(value version_id "$live")
+          live_commit=$(value commit "$live")
+          split=$(value split "$live")
+          version=$(tr -d '[:space:]' <<<"$INPUT_VERSION" | tr 'A-F' 'a-f')
+          if [ -n "$version" ]; then
+            if ! [[ $version =~ ^[0-9a-f-]{1,64}$ ]]; then
+              echo "::error title=Not a version id::The version input is not a Cloudflare version id."
+              exit 1
+            fi
+            target=$(bash "$RECIPE/bin/versions.sh" tag "$WORKER" "$version")
+            target_id=$version
+          else
+            target=$(bash "$RECIPE/bin/versions.sh" previous "$WORKER")
+            target_id=$(value version_id "$target")
+          fi
+          target_commit=$(value commit "$target")
+          if [ -z "$target_id" ]; then
+            echo "::error title=Nothing to roll back to::No earlier version of $WORKER is known."
+            exit 1
+          fi
+          if [ "$target_id" = "$live_id" ]; then
+            echo "::error title=Already live::Version $target_id is already live."
+            exit 1
+          fi
+          live_sha=$(commit_of "$live_commit")
+          target_sha=$(commit_of "$target_commit")
+          if [ "$split" = true ]; then
+            live_sha=""   # two versions share the traffic: what is live is not one commit
+          fi
+          # The release checker that reads the range (deploy contract, rule 2) is never the copy in this checkout, the
+          # default branch's tip, which may hold commits no release has proved yet. It is the copy in a commit that
+          # was released, so a release proved it: the live commit whenever it is known, and the restored one only when
+          # the live commit is unknown. The chosen commit must be on the tip's first-parent line (the default branch's
+          # own history) and hold the checker as a regular file, read from git into a new folder. When it fails, there
+          # is no checker and the rollback holds: a known live commit never falls back to the restored one.
+          trusted_checker() {
+            local entry mode type object path dir
+            entry=$(git ls-tree "$1" -- "$RELEASE_CHECK" 2>/dev/null) || return 1
+            read -r mode type object path <<<"$entry"
+            case $mode in 100644 | 100755) ;; *) return 1 ;; esac
+            [ "$type" = blob ] && [ "$path" = "$RELEASE_CHECK" ] || return 1
+            dir=$(mktemp -d "$RUNNER_TEMP/release-check.XXXXXX")
+            git cat-file blob "$object" > "$dir/factory-release-check" || return 1
+            echo "$dir/factory-release-check"
+          }
+          # The one way this step starts it: Python's isolated mode (-I), so no module of this checkout can load into
+          # it, whether through PYTHONPATH, the user's site folder or the current directory.
+          release_check() { python3 -I "$checker" "$@"; }
+          checker=""
+          no_checker=""
+          if [ -n "$live_sha" ]; then
+            anchor=$live_sha which="live"
+          else
+            anchor=$target_sha which="restored"
+          fi
+          if [ -z "$anchor" ]; then
+            no_checker="no released commit is known"
+          elif ! grep -qxF "$anchor" <<<"$(git rev-list --first-parent HEAD)"; then
+            no_checker="the $which commit is not on the default branch's first-parent line"
+          elif ! checker=$(trusted_checker "$anchor"); then
+            checker=""
+            no_checker="the $which commit holds no release checker at $RELEASE_CHECK (a regular file)"
+          else
+            echo "Release checker: $RELEASE_CHECK as of $anchor"
+          fi
+          # The release versions recorded on both commits (deploy contract, rules 4 and 5); none for an unknown one.
+          version_of() {
+            if [ -n "$1" ] && [ -n "$checker" ]; then release_check version --target "$TARGET" --at "$1"; fi
+          }
+          live_version=$(version_of "$live_sha")
+          target_version=$(version_of "$target_sha")
+
+          # A rollback restores code, not data: undoing a migration, a breaking change or an H7 hold waits for your OK.
+          # Every commit in the undone range counts, not only the two ends.
+          reasons=()
+          if [ -n "$live_sha" ] && [ -n "$target_sha" ] && git merge-base --is-ancestor "$target_sha" "$live_sha" &&
+             [ -n "$checker" ]; then
+            found=$(release_check check --from "$target_sha" --to "$live_sha" --migrations "$MIGRATIONS" \
+              --repo "$REPO" --branch "$DEFAULT_BRANCH" --holds)
+            while IFS= read -r line; do
+              [ -n "$line" ] && reasons+=("$line")
+            done <<<"$found"
+          else
+            # Unknown or unordered history: what the rollback would undo cannot be shown, and an H7 change (a config
+            # schema, a file format, a public interface) needs no migration path. Refuse to guess: hold.
+            reasons+=("the range being undone cannot be shown (live commit \`${live_sha:-unknown}\`, restored commit \`${target_sha:-unknown}\`${live_sha:+${target_sha:+${checker:+, not in order}}}${no_checker:+, no release checker: $no_checker}), so it may hold migrations, breaking changes or H7 holds")
+          fi
+          # The approval names the live version exactly: its full version id or its full commit SHA, never a prefix.
+          approve=$(tr -d '[:space:]' <<<"$APPROVE" | tr 'A-F' 'a-f')
+          approved=false
+          if { [ ${#approve} -ge 32 ] && [ "$approve" = "$(tr 'A-F' 'a-f' <<<"$live_id")" ]; } ||
+             { [ ${#approve} -eq 40 ] && [ "$approve" = "$live_sha" ]; }; then
+            approved=true
+          elif [ -n "$approve" ]; then
+            # Never echo the input itself: it could carry workflow commands.
+            echo "::warning title=Approval ignored::The approval (${#approve} characters) does not name the live version ($live_id) in full."
+          fi
+          go=true
+          if [ ${#reasons[@]} -gt 0 ] && [ "$approved" != true ]; then
+            go=false
+          fi
+          printf '%s\n' "${reasons[@]}" | sed '/^$/d' > "$RUNNER_TEMP/reasons.txt"
+          {
+            echo "go=$go"
+            echo "live_id=$live_id"
+            echo "live_ref=${live_sha:-unknown}"
+            echo "target_id=$target_id"
+            echo "target_ref=${target_sha:-unknown}"
+            echo "live_version=$live_version"
+            echo "target_version=$target_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Hold for your OK
+        if: steps.plan.outputs.go == 'false'
+        env:
+          LIVE_ID: ${{ steps.plan.outputs.live_id }}
+          LIVE_REF: ${{ steps.plan.outputs.live_ref }}
+          TARGET_ID: ${{ steps.plan.outputs.target_id }}
+          TARGET_REF: ${{ steps.plan.outputs.target_ref }}
+          LIVE_VERSION: ${{ steps.plan.outputs.live_version }}
+          TARGET_VERSION: ${{ steps.plan.outputs.target_version }}
+        run: |
+          release_name() { if [ -n "$1" ]; then echo "release \`$1\`"; else echo "a release without a version"; fi; }
+          {
+            echo "A rollback of \`$TARGET\` in production waits for your OK. **A rollback restores code, not data**: stored data keeps every migration and shape change of the range below, and the restored code must still work with it."
+            echo
+            echo "**Client-side stored data too:** if the range below bumps a stored-data version kept on the client's side (an IndexedDB schema version, a local file format, an app-cache manifest), devices that opened version \`$LIVE_ID\` keep data the old build can't read. It refuses to open that data, and a reload serves the old build again, so those devices stay broken until a newer release. Prefer a roll-forward: a fix released on top of the live version. Approving this rollback accepts that consequence."
+            echo
+            echo "- Live: $(release_name "$LIVE_VERSION"), Cloudflare version \`$LIVE_ID\` (commit \`$LIVE_REF\`)"
+            echo "- Would restore: $(release_name "$TARGET_VERSION"), Cloudflare version \`$TARGET_ID\` (commit \`$TARGET_REF\`)"
+            echo "- Reason given: $REASON"
+            echo "- Held by: $RUN_URL"
+            echo
+            echo "Why:"
+            sed 's/^/- /' "$RUNNER_TEMP/reasons.txt"
+            echo
+            echo "Check that the restored code works with the migrated data first. To roll back anyway, do it yourself:"
+            echo "- GitHub: Actions → \"$GITHUB_WORKFLOW\" → Run workflow, with \`$TARGET_ID\` in **version** and \`$LIVE_ID\` in **approve**;"
+            echo "- or: \`gh workflow run $WORKFLOW_FILE --ref $DEFAULT_BRANCH -f reason=... -f version=$TARGET_ID -f approve=$LIVE_ID\`."
+          } > "$RUNNER_TEMP/hold.md"
+          url=$(bash "$RECIPE/bin/issue.sh" open "factory-rollback-hold:$TARGET/production" \
+            "Rollback of $TARGET in production waits for your OK" "$RUNNER_TEMP/hold.md" "status:needs-human")
+          { echo "## Held: rollback of \`$TARGET\` production"; echo; echo "Waiting for your OK: $url"; } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Held::The rollback waits for your OK: $url"
+
+      - name: Roll back
+        if: steps.plan.outputs.go == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TARGET_ID: ${{ steps.plan.outputs.target_id }}
+        run: |
+          message="factory rollback: $REASON"
+          # shellcheck disable=SC2086 # WRANGLER is a command line on purpose
+          $WRANGLER rollback "$TARGET_ID" --name "$WORKER" --yes --message "${message:0:120}"
+
+      - name: Smoke check
+        id: smoke
+        if: steps.plan.outputs.go == 'true'
+        continue-on-error: true
+        run: bash "$RECIPE/bin/smoke.sh" "$URL" "$SMOKE"
+
+      - name: Report
+        if: steps.plan.outputs.go == 'true'
+        env:
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          LIVE_ID: ${{ steps.plan.outputs.live_id }}
+          LIVE_REF: ${{ steps.plan.outputs.live_ref }}
+          TARGET_ID: ${{ steps.plan.outputs.target_id }}
+          TARGET_REF: ${{ steps.plan.outputs.target_ref }}
+          LIVE_VERSION: ${{ steps.plan.outputs.live_version }}
+          TARGET_VERSION: ${{ steps.plan.outputs.target_version }}
+        run: |
+          release_name() { if [ -n "$1" ]; then echo "release \`$1\`"; else echo "a release without a version"; fi; }
+          {
+            echo "## Rolled back: \`$TARGET\` production, to $(release_name "$TARGET_VERSION")"
+            echo
+            echo "- From: $(release_name "$LIVE_VERSION"), Cloudflare version \`$LIVE_ID\` (commit \`$LIVE_REF\`)"
+            echo "- To: $(release_name "$TARGET_VERSION"), Cloudflare version \`$TARGET_ID\` (commit \`$TARGET_REF\`)"
+            echo "- Reason: $REASON"
+            echo "- Smoke check: $SMOKE_OUTCOME"
+          } | tee "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          bash "$RECIPE/bin/issue.sh" close "factory-rollback-hold:$TARGET/production" "Rolled back in $RUN_URL." || true
+          if [ "$SMOKE_OUTCOME" != success ]; then
+            {
+              echo "**The restored version fails the smoke check too. Production may be down.**"
+              echo
+              cat "$RUNNER_TEMP/report.md"
+              echo "- Run: $RUN_URL"
+            } > "$RUNNER_TEMP/bug.md"
+            url=$(bash "$RECIPE/bin/issue.sh" open "factory-rollback-failed:$TARGET/production/$TARGET_ID" \
+              "Production smoke check fails after rolling back $TARGET" "$RUNNER_TEMP/bug.md" "type:bug,priority:P1")
+            echo "::error title=Smoke check failed after rollback::$url"
+            exit 1
+          fi

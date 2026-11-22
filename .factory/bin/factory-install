@@ -1,0 +1,2593 @@
+#!/bin/sh
+# factory-install: the mechanical half of factory-init. The skill detects and asks; this script writes. It never
+# overwrites a file the project owns, never deletes anything, and a second run with the same inputs changes nothing.
+#
+#   factory-install apply  --source DIR --target DIR --values DIR [--report FILE] [--proposals DIR] [--dry-run]
+#                          [--update-from VERSION [--keep PATH]... [--discard PATH]...]
+#   factory-install labels --source DIR --repo OWNER/NAME --values DIR [--keep-existing [--use-factory NAME]...] [--dry-run]
+#   factory-install status-issue --repo OWNER/NAME [--adopt N] [--not-status N[,N...]] [--dry-run]
+#   factory-install pin    OWNER/REPO TAG
+#   factory-install check  --target DIR
+#   factory-install fs-tool id PATH | fs-tool flush ROOT ROOT_ID GUARD_ID KIND QUEUE
+#
+# apply         Writes the overlay files from the core templates (only where missing), copies the core into the
+#               project (.claude/skills, .claude/agents, .factory/), renders the CI workflows and the deploy
+#               recipes' templates, links .agents/skills, merges the hook and sandbox settings, and writes .factory/core.lock
+#               (the core version, the upstream factory repo, and the sha256 of every core file as the core ships it).
+#               In a repo that already has rules, CI or agent setup (brownfield), it keeps every existing file: the
+#               factory's sections and the CLAUDE.md pointer are added to the rules file or proposed (RULES_MERGE),
+#               the factory's CI is proposed instead of installed when the repo has its own CI (CI_WORKFLOWS), and a
+#               project skill or agent under a name the core owns (factory-*) stops the install. --proposals DIR
+#               (outside the target) receives each proposed file and its unified diff, for the install PR.
+#               --update-from VERSION is the version change factory-update runs (against its staging copy): the
+#               lock must record exactly VERSION and factory.yaml must already pin the source's version. A core file
+#               that is still the old core's copy (its sha256 is the old lock's) is replaced by the new core's; a
+#               locked file the new core no longer ships is removed (and the folders it leaves empty); an edited core
+#               file (another hash, missing, or a symlink) needs a decision: --keep PATH leaves the edit (the new
+#               core's version is proposed and reported as differs), --discard PATH writes the core's file there (a
+#               symlink is removed, never what it points to). An undecided edit stops the run before anything is
+#               written. Every write and removal goes through the same checks and fs_tool queue as a fresh install.
+# labels        Creates the label set from the core's labels.yaml and updates labels whose colour or description
+#               differ (--keep-existing: leaves them as they are and reports them; --use-factory NAME then updates
+#               that one label all the same). Each updated or kept line gives the old and the factory's colour and
+#               description, so a change can be put back from the report. Never deletes or renames a label.
+# status-issue  Creates the one open issue labelled factory:status, with the fixed note, and pins it. An existing
+#               status issue is left exactly as it is: its body is never rewritten. An open issue that looks like a
+#               status board stops it for a person: --adopt N labels and pins that issue instead, --not-status N
+#               says it is not one.
+# pin           Resolves a GitHub Action's release tag to its commit and prints "<owner>/<repo>@<sha> # <tag>".
+# check         Compares the core files with .factory/core.lock and looks for unfilled placeholders.
+# fs-tool       The descriptor-relative writer below (fs_tool), for factory-update's commit and rollback.
+#
+# --source is the factory source: the folder that holds core/, runtime/ (and recipes/, packs/ when they exist) and
+# .claude-plugin/plugin.json, whose "version" is the core version being installed. In a clone of the factory repo that
+# folder is <clone>/plugin, not the repo root (the root has no .claude-plugin/plugin.json); for an installed plugin it
+# is the plugin's install folder. --values is a folder with one file per answer, described in the factory-init skill's
+# references/values.md.
+#
+# Every line of output starts with what happened: added, unchanged, kept, differs, merged, replaced, linked, created,
+# updated, proposed, skipped, removed (with "would " in front under --dry-run).
+#
+# Needs: a POSIX shell, cp, find, awk, sort, sha256sum or shasum; python3 (standard library only) to check the action
+# pins in rendered workflows, to merge .claude/settings.json and the rules file and to write diffs, and Python 3.11+
+# for .codex/config.toml; gh for labels, status-issue and pin.
+# Exit codes: 0 done; 1 error, nothing half-written; 2 bad usage; 3 done, but some core files differ from the core
+# or need a person (listed as "differs"); 4 the project pins another core version (that is factory-update's job), or
+# the lock does not record the --update-from version.
+# shellcheck disable=SC2030,SC2031 # apply's dry pass runs apply_run in a subshell with DRY=1 on purpose
+set -eu
+unset CDPATH
+
+prog=factory-install
+newline='
+'
+
+die() { printf '%s\n' "$prog: $*" >&2; exit 1; }
+usage() { sed -n '5,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+hash_file() {
+  if command -v sha256sum > /dev/null 2>&1; then sha256sum < "$1" | cut -d' ' -f1
+  else shasum -a 256 < "$1" | cut -d' ' -f1; fi
+}
+
+# --- arguments ------------------------------------------------------------------------------------------------------
+[ $# -gt 0 ] || usage
+cmd=$1; shift
+SOURCE='' TARGET='' VALUES='' REPORT='' REPO='' DRY=0 PROPOSALS='' PROPOSE_WRITE=1 KEEP_LABELS=0 USE_FACTORY='' ADOPT='' NOT_STATUS=''
+UPDATE_FROM='' DECISIONS=''
+case $cmd in
+  pin)
+    [ $# -eq 2 ] || usage ;;
+  fs-tool)
+    case ${1:-} in id) [ $# -eq 2 ] || usage ;; flush) [ $# -eq 6 ] || usage ;; *) usage ;; esac ;;
+  apply | labels | status-issue | check)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --source) [ $# -ge 2 ] || usage; SOURCE=$2; shift ;;
+        --target) [ $# -ge 2 ] || usage; TARGET=$2; shift ;;
+        --values) [ $# -ge 2 ] || usage; VALUES=$2; shift ;;
+        --report) [ $# -ge 2 ] || usage; REPORT=$2; shift ;;
+        --repo) [ $# -ge 2 ] || usage; REPO=$2; shift ;;
+        --proposals) [ $# -ge 2 ] || usage; PROPOSALS=$2; shift ;;
+        --keep-existing) KEEP_LABELS=1 ;;
+        --use-factory)
+          [ $# -ge 2 ] || usage
+          case $2 in '' | *"$newline"* | *"	"*) die "unsupported label name: $2" ;; esac
+          USE_FACTORY="$USE_FACTORY$2$newline"; shift ;;
+        --adopt) [ $# -ge 2 ] || usage; ADOPT=$2; shift ;;
+        --not-status) [ $# -ge 2 ] || usage; NOT_STATUS="$NOT_STATUS,$2"; shift ;;
+        --update-from) [ $# -ge 2 ] || usage; UPDATE_FROM=$2; shift ;;
+        --keep | --discard)
+          [ $# -ge 2 ] || usage
+          case $2 in '' | *"$newline"* | *"	"*) die "unsupported path: $2" ;; esac
+          DECISIONS="$DECISIONS${1#--}	$2$newline"; shift ;;
+        --dry-run) DRY=1 ;;
+        *) printf '%s\n' "$prog: unknown option $1" >&2; usage ;;
+      esac
+      shift
+    done ;;
+  -h | --help) sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) printf '%s\n' "$prog: unknown command $cmd" >&2; usage ;;
+esac
+[ "$cmd" = apply ] || [ -z "$UPDATE_FROM$DECISIONS" ] || usage
+[ -z "$USE_FACTORY" ] || { [ "$cmd" = labels ] && [ "$KEEP_LABELS" = 1 ]; } || usage
+
+abs_dir() { (cd -P "$1" 2> /dev/null && pwd -P) || die "not a folder: $1"; }
+
+valid_repo() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; }
+valid_slug() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9_-]*$'; }
+
+# The value of answer $1 from the values folder (trailing newlines dropped); fails when the file is absent.
+val() { [ -f "$VALUES/$1" ] || return 1; cat "$VALUES/$1"; }
+# The non-empty lines of answer $1 (in folder $2, default the values folder), trimmed, or nothing.
+val_lines() {
+  _vl_vf=${2:-$VALUES}/$1
+  [ -f "$_vl_vf" ] || return 0
+  grep -v '^[[:space:]]*$' "$_vl_vf" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true
+}
+
+# --- output -----------------------------------------------------------------------------------------------------------
+CONFLICTS=0
+report() { # report <action> <path> [note]
+  a=$1; [ "$DRY" = 0 ] || a="would $a"
+  line="$a  $2${3:+  ($3)}"
+  printf '%s\n' "$line"
+  [ -z "$REPORT" ] || printf '%s\n' "$line" >> "$REPORT"
+}
+
+# --- rendering --------------------------------------------------------------------------------------------------------
+# Double every ' (a value placeholder in YAML sits inside a single-quoted string).
+dq() {
+  _dq_s=$1 _dq_r=
+  while :; do
+    case $_dq_s in
+      *"'"*) _dq_r=$_dq_r${_dq_s%%"'"*}"''"; _dq_s=${_dq_s#*"'"} ;;
+      *) _dq_r=$_dq_r$_dq_s; break ;;
+    esac
+  done
+  printf '%s' "$_dq_r"
+}
+
+# render TEMPLATE OUT VALDIR [yaml|text]
+#   `__FACTORY_<NAME>__` takes the file <NAME> from VALDIR; when only <NAME>.drop exists the whole line is dropped;
+#   neither is an error. A line holding only `# __FACTORY_<NAME>__` is a block: replaced by <NAME>.block at the line's
+#   indentation, or removed when that file is absent or empty. In yaml mode every ' in a value is doubled, `${{` is
+#   refused, and every `uses:` must be pinned to a full commit SHA.
+render() {
+  _rn_tpl=$1 _rn_out=$2 _rn_vd=$3 _rn_mode=${4:-}
+  if [ -z "$_rn_mode" ]; then case $_rn_out in *.yml | *.yaml) _rn_mode=yaml ;; *) _rn_mode=text ;; esac; fi
+  : > "$_rn_out"
+  _rn_bad=0
+  while IFS= read -r _rn_line || [ -n "$_rn_line" ]; do
+    case $_rn_line in
+      *__FACTORY_*__*) ;;
+      *) printf '%s\n' "$_rn_line" >> "$_rn_out"; continue ;;
+    esac
+    _rn_ind=${_rn_line%%[! 	]*}
+    _rn_rest=${_rn_line#"$_rn_ind"}
+    _rn_rest=${_rn_rest%"${_rn_rest##*[! 	]}"}
+    case $_rn_rest in
+      "# __FACTORY_"*"__")
+        _rn_n=${_rn_rest#"# __FACTORY_"}; _rn_n=${_rn_n%__}
+        case $_rn_n in '' | *[!A-Z0-9_]*) ;; *)
+          if [ -f "$_rn_vd/$_rn_n.block" ]; then
+            while IFS= read -r _rn_bl || [ -n "$_rn_bl" ]; do
+              if [ -z "$_rn_bl" ]; then echo >> "$_rn_out"; else printf '%s%s\n' "$_rn_ind" "$_rn_bl" >> "$_rn_out"; fi
+            done < "$_rn_vd/$_rn_n.block"
+          fi
+          continue ;;
+        esac ;;
+    esac
+    _rn_res='' _rn_r=$_rn_line _rn_drop=0
+    while :; do
+      case $_rn_r in *__FACTORY_*__*) ;; *) break ;; esac
+      _rn_pre=${_rn_r%%__FACTORY_*}
+      _rn_t=${_rn_r#*__FACTORY_}
+      _rn_n=${_rn_t%%__*}
+      _rn_r=${_rn_t#*__}
+      case $_rn_n in '' | *[!A-Z0-9_]*) printf '%s\n' "$prog: $_rn_tpl: malformed placeholder near __FACTORY_$_rn_n" >&2; _rn_bad=1; continue ;; esac
+      if [ -f "$_rn_vd/$_rn_n" ]; then
+        _rn_v=$(cat "$_rn_vd/$_rn_n")
+      elif [ -f "$_rn_vd/$_rn_n.drop" ]; then
+        _rn_drop=1; break
+      else
+        printf '%s\n' "$prog: $_rn_tpl: no value for __FACTORY_${_rn_n}__" >&2; _rn_bad=1; _rn_v=
+      fi
+      case $_rn_v in *"$newline"*) printf '%s\n' "$prog: $_rn_tpl: the value of $_rn_n has a line break" >&2; _rn_bad=1 ;; esac
+      case $_rn_v in *__FACTORY_*) printf '%s\n' "$prog: $_rn_tpl: the value of $_rn_n holds a placeholder" >&2; _rn_bad=1 ;; esac
+      if [ "$_rn_mode" = yaml ]; then
+        # shellcheck disable=SC2016 # a literal ${{, the start of a GitHub expression
+        case $_rn_v in *'${{'*) printf '%s\n' "$prog: $_rn_tpl: the value of $_rn_n contains \${{, which GitHub would evaluate" >&2; _rn_bad=1 ;; esac
+        _rn_v=$(dq "$_rn_v")
+      fi
+      _rn_res=$_rn_res$_rn_pre$_rn_v
+    done
+    [ "$_rn_drop" = 0 ] || continue
+    printf '%s\n' "$_rn_res$_rn_r" >> "$_rn_out"
+  done < "$_rn_tpl"
+  if [ "$_rn_mode" = yaml ] && ! check_pins "$_rn_out"; then
+    printf '%s\n' "$prog: $_rn_tpl: an action reference is not pinned to a full commit SHA, or is in a form this check does not read" >&2
+    _rn_bad=1
+  fi
+  [ "$_rn_bad" = 0 ]
+}
+
+# check_pins FILE: every action reference in a rendered workflow names <owner>/<repo>[/<path>]@<40 hex characters>,
+# because a tag or a branch can change what runs. It does not search lines for text; it reads the file as YAML text
+# and decodes every mapping key, as YAML would:
+#   - block and flow context; plain, single- and double-quoted scalars (escapes and line folding decoded, also over
+#     several lines); comments; block scalars, whose content is opaque, so text in a `run: |` never counts;
+#   - a key that decodes to `uses` (in any case) is an action reference: its value must be one plain or quoted scalar
+#     on the key's line, pinned as above;
+#   - values are never taken for keys, so a `run:` string with quotes and colons in it is fine.
+# Whatever it cannot read exactly is refused, never guessed: explicit `?` keys, anchors, aliases and tags, block
+# scalars as `uses` values, merge keys (<<), keys over several lines or that are collections, a plain scalar over
+# several lines, unbalanced quotes or brackets, tabs used for indentation, document markers and directives, and line
+# breaks other than \n. Prints the reason or the offending lines on stderr and fails.
+check_pins() {
+  python3 - "$1" <<'PY'
+import re, sys
+
+# Every mapping key in a rendered workflow, decoded as YAML decodes it; a key that decodes to "uses" (any case) is an
+# action reference, and its value must be one scalar on the key's line naming <owner>/<repo>[/<path>]@<40 hex>.
+# Whatever this cannot read exactly is refused, never guessed.
+PIN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[^@\s]+)?@[0-9a-f]{40}")
+FLOW_IND = ",[]{}"
+WS = ("", " ", "\t")
+ESC = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
+       "e": "\x1b", " ": " ", '"': '"', "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0", "L": " ", "P": " "}
+HEX = {"x": 2, "u": 4, "U": 8}
+
+
+class Refuse(Exception):
+    pass
+
+
+class Node:
+    def __init__(self, kind, value=None, multiline=False):
+        self.kind, self.value, self.multiline = kind, value, multiline
+
+
+def is_uses(key):
+    return key.casefold() == "uses"
+
+
+class Scan:
+    def __init__(self, text):
+        self.lines = text.split("\n")
+        self.li = self.ci = 0
+        self.bad = []
+
+    # --- positions -------------------------------------------------------------------------------------------------
+    def refuse(self, msg, li=None):
+        raise Refuse("line %d: %s" % ((self.li if li is None else li) + 1, msg))
+
+    def peek(self, k=0):
+        line = self.lines[self.li]
+        j = self.ci + k
+        return line[j] if 0 <= j < len(line) else ""
+
+    def skip_inline_ws(self):
+        while self.peek() in (" ", "\t") and self.peek():
+            self.ci += 1
+
+    def rest_is_end(self):
+        """Only white space or a comment is left on the line."""
+        self.skip_inline_ws()
+        line = self.lines[self.li]
+        if self.ci >= len(line):
+            return True
+        return line[self.ci] == "#" and (self.ci == 0 or line[self.ci - 1] in " \t")
+
+    # --- block context ---------------------------------------------------------------------------------------------
+    def run(self):
+        for i, line in enumerate(self.lines):
+            if re.match(r"(---|\.\.\.)([ \t]|$)", line):
+                self.refuse("a document marker", i)
+            if line.startswith("%"):
+                self.refuse("a directive", i)
+        while self.li < len(self.lines):
+            line = self.lines[self.li]
+            if line.strip(" ") == "":
+                self.li += 1
+                continue
+            if line.strip(" \t") == "":
+                self.refuse("a line of tabs")
+            self.ci = len(line) - len(line.lstrip(" "))
+            if self.peek() == "\t":
+                self.refuse("a tab used for indentation")
+            if self.peek() == "#":
+                self.li += 1
+                continue
+            self.item()
+        return self.bad
+
+    def item(self):
+        """One line of block structure: dashes, then a key and its value, or a value after a dash."""
+        owner, dash = None, False
+        while self.peek() == "-" and self.peek(1) in WS:
+            owner, dash = self.ci, True
+            self.ci += 1
+            self.skip_inline_ws()
+        if self.rest_is_end():
+            self.li += 1  # a bare dash: nested content follows
+            return
+        c = self.peek()
+        if c == "?":
+            self.refuse("a key starting with ? (an explicit key, or a key this check does not read)")
+        if c == ":" and self.peek(1) in WS:
+            self.refuse("a : entry without a key")
+        if c in "|>":
+            if not dash:
+                self.refuse("a block scalar on a line of its own")
+            self.block_scalar(owner)
+            return
+        start, kline = self.ci, self.li
+        node = self.node(flow=False)
+        self.skip_inline_ws()
+        if self.value_indicator(node, flow=False):
+            key = self.key_of(node, kline)
+            owner = start
+            self.ci += 1
+            uses = is_uses(key)
+            if self.rest_is_end():
+                if uses:
+                    self.refuse("a uses value that is not on the key's line")
+                self.li += 1  # nested content follows
+                return
+            if self.peek() in "|>":
+                if uses:
+                    self.refuse("a block scalar as a uses value")
+                self.block_scalar(owner)
+                return
+            vline = self.li
+            value = self.node(flow=False)
+            if uses:
+                self.check_uses(value, vline)
+            self.skip_inline_ws()
+            if self.value_indicator(value, flow=False):
+                self.refuse("a second : on one line")
+        elif not dash:
+            self.refuse("a value on a line of its own (not supported)")
+        if not self.rest_is_end():
+            self.refuse("unexpected text after a value")
+        self.li += 1
+        self.check_next(owner)
+
+    def check_next(self, owner):
+        """After a complete value, the next line must not be indented deeper: that would be a plain scalar across
+        lines (not supported) or text YAML rejects."""
+        j = self.li
+        while j < len(self.lines):
+            stripped = self.lines[j].strip(" \t")
+            if stripped and not stripped.startswith("#"):
+                if len(self.lines[j]) - len(self.lines[j].lstrip(" ")) > owner:
+                    self.refuse("a value that continues on the next line (not supported)", j)
+                return
+            j += 1
+
+    def block_scalar(self, owner):
+        """A literal or folded block scalar: its content is opaque, it ends at the first line indented less."""
+        header = self.li
+        self.ci += 1
+        while self.peek() and self.peek() in "+-123456789":
+            if self.peek().isdigit():
+                self.refuse("a block scalar with an explicit indentation (not supported)")
+            self.ci += 1
+        if not self.rest_is_end():
+            self.refuse("unexpected text after a block scalar indicator")
+        j, content = header + 1, None
+        while j < len(self.lines):
+            line = self.lines[j]
+            if line.strip(" ") == "":
+                j += 1
+                continue
+            ind = len(line) - len(line.lstrip(" "))
+            if content is None:
+                if ind <= owner:
+                    break
+                content = ind
+            if ind < content:
+                if line[ind] == "\t":
+                    self.refuse("a tab used for indentation in a block scalar", j)
+                break
+            j += 1
+        self.li = j
+        self.check_next(owner)
+
+    # --- nodes -----------------------------------------------------------------------------------------------------
+    def value_indicator(self, node, flow):
+        if self.peek() != ":":
+            return False
+        if node.kind in ("double", "single", "flow"):
+            return True  # a value may follow a JSON-like node directly
+        nxt = self.peek(1)
+        return nxt in WS or (flow and nxt in FLOW_IND)
+
+    def key_of(self, node, li):
+        if node.kind == "flow":
+            self.refuse("a collection used as a key", li)
+        if node.kind == "empty":
+            self.refuse("an empty key", li)
+        if node.multiline:
+            self.refuse("a key across lines (decodes to %r)" % node.value, li)
+        if node.value == "<<":
+            self.refuse("a merge key (<<)", li)
+        return node.value
+
+    def check_uses(self, value, li):
+        if value.kind not in ("plain", "single", "double") or value.multiline or not PIN.fullmatch(value.value or ""):
+            self.bad.append("line %d: %s" % (li + 1, self.lines[li].strip()))
+
+    def node(self, flow):
+        c = self.peek()
+        if c == "":
+            return Node("empty")
+        if c in "&*!":
+            self.refuse("an anchor, alias or tag (not supported)")
+        if c in "@`%#":
+            self.refuse("%r cannot start a value" % c)
+        if c in "|>":
+            self.refuse("a block scalar where it is not supported")
+        if c in FLOW_IND and c not in "[{":
+            self.refuse("%r where a value should start" % c)
+        if c in "-?:" and (self.peek(1) in WS or (flow and self.peek(1) in FLOW_IND)):
+            self.refuse("an indicator %r where a value should start" % c)
+        if c == '"':
+            return self.quoted(double=True)
+        if c == "'":
+            return self.quoted(double=False)
+        if c in "[{":
+            return self.flow()
+        return self.plain(flow)
+
+    def plain(self, flow):
+        """A plain scalar on one line; it ends at a value indicator, a comment or the end of the line."""
+        line, j = self.lines[self.li], self.ci
+        while j < len(line):
+            ch = line[j]
+            nxt = line[j + 1] if j + 1 < len(line) else ""
+            if ch == ":":
+                if nxt in WS or (flow and nxt in FLOW_IND):
+                    break
+                if flow:
+                    self.refuse("a : inside a plain scalar in a flow collection (not supported)")
+            elif ch in " \t" and nxt == "#":
+                break
+            elif flow and ch in FLOW_IND:
+                break
+            j += 1
+        text = line[self.ci:j].rstrip(" \t")
+        self.ci += len(text)
+        return Node("plain", text)
+
+    def quoted(self, double):
+        """A single- or double-quoted scalar, over as many lines as it takes, decoded: escapes (double-quoted) and
+        line folding."""
+        start = self.li
+        quote = '"' if double else "'"
+        self.ci += 1
+        out, tail, multiline = [], 0, False  # tail: raw white space at the end of out, dropped at a folded break
+        while True:
+            line = self.lines[self.li]
+            if self.ci >= len(line):
+                self.fold(out, tail, False, start)
+                tail, multiline = 0, True
+                continue
+            ch = line[self.ci]
+            if ch == quote:
+                if not double and self.peek(1) == "'":
+                    out.append("'")
+                    self.ci += 2
+                    tail = 0
+                    continue
+                self.ci += 1
+                break
+            if double and ch == "\\":
+                e = self.peek(1)
+                if e == "":
+                    self.ci = len(line)
+                    self.fold(out, 0, True, start)
+                    tail, multiline = 0, True
+                    continue
+                if e in ESC:
+                    out.append(ESC[e])
+                    self.ci += 2
+                elif e in HEX:
+                    digits = line[self.ci + 2:self.ci + 2 + HEX[e]]
+                    if len(digits) != HEX[e] or not re.fullmatch(r"[0-9A-Fa-f]+", digits) or int(digits, 16) > 0x10FFFF:
+                        self.refuse("a bad \\%s escape" % e)
+                    out.append(chr(int(digits, 16)))
+                    self.ci += 2 + HEX[e]
+                else:
+                    self.refuse("an unknown escape \\%s" % e)
+                tail = 0
+                continue
+            out.append(ch)
+            tail = tail + 1 if ch in " \t" else 0
+            self.ci += 1
+        return Node("double" if double else "single", "".join(out), multiline)
+
+    def fold(self, out, tail, escaped, start):
+        """A line break inside a quoted scalar: trailing white space dropped (unless escaped), empty lines become
+        line feeds, otherwise one space (none after an escaped break); the next line's leading white space dropped."""
+        if tail:
+            del out[-tail:]
+        empty = 0
+        while True:
+            self.li += 1
+            if self.li >= len(self.lines):
+                self.refuse("an unbalanced quote", start)
+            line = self.lines[self.li]
+            if line.strip(" \t") == "":
+                empty += 1
+                continue
+            lead = len(line) - len(line.lstrip(" \t"))
+            if "\t" in line[:lead]:
+                self.refuse("a tab used for indentation in a quoted scalar")
+            self.ci = lead
+            break
+        if empty:
+            out.append("\n" * empty)
+        elif not escaped:
+            out.append(" ")
+
+    # --- flow context ----------------------------------------------------------------------------------------------
+    def skip_flow_ws(self, start):
+        while True:
+            line = self.lines[self.li]
+            while self.ci < len(line) and line[self.ci] in " \t":
+                self.ci += 1
+            if self.ci < len(line) and line[self.ci] == "#" and (self.ci == 0 or line[self.ci - 1] in " \t"):
+                self.ci = len(line)
+            if self.ci < len(line):
+                return
+            self.li += 1
+            if self.li >= len(self.lines):
+                self.refuse("an unclosed flow collection", start)
+            nxt = self.lines[self.li]
+            lead = len(nxt) - len(nxt.lstrip(" \t"))
+            if nxt.strip(" \t") and "\t" in nxt[:lead]:
+                self.refuse("a tab used for indentation")
+            self.ci = 0
+
+    def flow(self):
+        """A flow mapping or sequence, over as many lines as it takes. Keys are implicit keys of a mapping, or the key
+        of a single-pair mapping inside a sequence."""
+        start = self.li
+        opener = self.peek()
+        closer = "}" if opener == "{" else "]"
+        self.ci += 1
+        while True:
+            self.skip_flow_ws(start)
+            c = self.peek()
+            if c == closer:
+                self.ci += 1
+                return Node("flow")
+            if c in "]}":
+                self.refuse("a mismatched bracket")
+            if c == ",":
+                self.refuse("an empty entry in a flow collection")
+            if c == "?":
+                self.refuse("a key starting with ? (an explicit key, or a key this check does not read)")
+            if c == ":" and (self.peek(1) in WS or self.peek(1) in FLOW_IND):
+                self.refuse("a : entry without a key")
+            kline = self.li
+            node = self.node(flow=True)
+            self.skip_flow_ws(start)
+            if self.value_indicator(node, flow=True):
+                key = self.key_of(node, kline)
+                uses = is_uses(key)
+                self.ci += 1
+                self.skip_flow_ws(start)
+                if self.peek() in (",", closer):
+                    if uses:
+                        self.refuse("a uses key without a value")
+                else:
+                    vline = self.li
+                    value = self.node(flow=True)
+                    if uses:
+                        self.check_uses(value, vline)
+                    self.skip_flow_ws(start)
+                    if self.value_indicator(value, flow=True):
+                        self.refuse("a second : in one entry")
+            elif opener == "{" and is_uses(self.key_of(node, kline)):
+                self.refuse("a uses key without a value")
+            c = self.peek()
+            if c == ",":
+                self.ci += 1
+            elif c != closer:
+                self.refuse("expected , or %s in a flow collection" % closer)
+
+
+def main(path):
+    with open(path, encoding="utf-8", newline="") as f:  # no newline translation: \r must reach the check below
+        text = f.read()
+    try:
+        for ch in ("\r", "\x85", " ", " ", "﻿"):
+            if ch in text:
+                raise Refuse("a %r character (only \\n line breaks are supported)" % ch)
+        bad = Scan(text).run()
+    except Refuse as e:
+        print("  " + str(e), file=sys.stderr)
+        return 1
+    for b in bad:
+        print("  " + b, file=sys.stderr)
+    return 1 if bad else 0
+
+
+sys.exit(main(sys.argv[1]))
+PY
+}
+
+# --- writing into the target ------------------------------------------------------------------------------------------
+# safe_dest REL [final]: refuse a destination whose parent folders inside the target include a symlink, or that is not
+# a folder: a write could land outside the target. With "final", the destination itself must not be a symlink either
+# (or a folder): every path this script writes is checked that way, in the dry pass, before anything is written.
+safe_dest() {
+  _sd_p=$1 _sd_at=$TARGET
+  while :; do
+    case $_sd_p in */*) _sd_c=${_sd_p%%/*}; _sd_p=${_sd_p#*/} ;; *) break ;; esac
+    case $_sd_c in '' | . | ..) die "bad destination path: $1" ;; esac
+    _sd_at=$_sd_at/$_sd_c
+    [ ! -L "$_sd_at" ] || die "$1: $_sd_at is a symlink; not writing through it"
+    [ ! -e "$_sd_at" ] || [ -d "$_sd_at" ] || die "$1: $_sd_at is not a folder"
+  done
+  case $_sd_p in '' | . | ..) die "bad destination path: $1" ;; esac
+  if [ "${2:-}" = final ]; then
+    [ ! -L "$TARGET/$1" ] || die "$1 is a symlink; not writing through it (nothing was written)"
+    [ ! -d "$TARGET/$1" ] || die "$1 is a folder, not a file"
+  fi
+}
+
+# --- writing: relative to verified folder descriptors ------------------------------------------------------------------
+# A path checked by name can change before it is used: a folder on the way swapped for a symlink would redirect the
+# write. So nothing here writes by path. put_file and put_prop check the path by name (safe_dest, safe_prop, for clear
+# early errors) and queue the write; flush_writes hands each queue to fs_tool, which opens the root once, walks to the
+# file one folder descriptor at a time without following a symlink, and writes and renames relative to the last one.
+# A swap after that point only moves a folder nobody holds open: the write lands in the folder that was checked, or
+# fails. factory-update uses the same tool, as `factory-install fs-tool`, for every write in its commit and rollback.
+
+# fs_tool id PATH                                   prints PATH's "dev:inode", reached from / without a symlink
+# fs_tool flush ROOT ROOT_ID GUARD_ID KIND QUEUE    performs the queued writes under ROOT, in order
+#   ROOT must be reached from / without following a symlink and still be ROOT_ID (checked once, when it is opened).
+#   With a GUARD_ID (not -), neither ROOT, any folder above it (by ".." from its descriptor) nor any folder on the way
+#   to a file may be that folder: proposals never land in the target. QUEUE lines, fields separated by a TAB:
+#     put    mode rel src [tmp]  a file: written to a temporary file (O_CREAT|O_EXCL|O_NOFOLLOW; named tmp when given,
+#                                a plain name starting ".factory-"), then rename(2) over rel, both relative to the
+#                                folder descriptor; the temporary file is removed on any failure
+#     link   -    rel text       a new symlink
+#     remove -    rel -          unlinks the file or symlink rel (never what a link points to); missing is fine
+#     rmdir  -    rel -          removes the folder rel when it is empty; missing or not empty is fine
+#     mkdir  mode rel -          makes the folder rel (when missing) and sets its mode
+#   put, link and mkdir make missing folders on the way with mkdir relative to their parent's descriptor; remove and
+#   rmdir never make one. A final name that is a symlink or a folder is refused (for remove: a folder; for rmdir and
+#   mkdir: anything but a folder).
+#   FACTORY_INSTALL_TEST_HOOK=before-write runs FACTORY_INSTALL_TEST_HOOK_CMD (with KIND and rel as $1 and $2) after
+#   the last check of each write or removal and before it happens: for the tests only.
+fs_tool() {
+  python3 - "$@" <<'PY'
+import os, secrets, stat, subprocess, sys
+
+DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def die(msg):
+    print("factory-install: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def ident(st):
+    return "%d:%d" % (st.st_dev, st.st_ino)
+
+
+def open_root(path):
+    """The folder at path, reached from / one component at a time, never through a symlink."""
+    if not path.startswith("/"):
+        die("not an absolute path: %s" % path)
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    for part in [p for p in path.split("/") if p]:
+        try:
+            nfd = os.open(part, DIR, dir_fd=fd)
+        except OSError:
+            os.close(fd)
+            die("%s: a folder on the way is missing, a symlink or not a folder; not writing there" % path)
+        os.close(fd)
+        fd = nfd
+    return fd
+
+
+def clear_above(fd, guard):
+    """Neither the folder nor any folder above it is the guard folder."""
+    cur = os.dup(fd)
+    try:
+        while True:
+            st = os.fstat(cur)
+            if ident(st) == guard:
+                return False
+            up = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=cur)
+            ust = os.fstat(up)
+            os.close(cur)
+            cur = up
+            if (ust.st_dev, ust.st_ino) == (st.st_dev, st.st_ino):
+                return True
+    finally:
+        os.close(cur)
+
+
+def plain(name, what):
+    if name in ("", ".", "..") or "/" in name or "\0" in name:
+        die("%s: bad path component %r" % (what, name))
+
+
+def walk(root, parts, guard, what, create=True):
+    """The folder root/parts, one descriptor at a time; missing folders are made (create) or None is returned."""
+    fd = os.dup(root)
+    for part in parts:
+        plain(part, what)
+        try:
+            nfd = os.open(part, DIR, dir_fd=fd)
+        except FileNotFoundError:
+            if not create:
+                os.close(fd)
+                return None
+            try:
+                os.mkdir(part, 0o777, dir_fd=fd)
+            except FileExistsError:
+                pass
+            try:
+                nfd = os.open(part, DIR, dir_fd=fd)
+            except OSError:
+                os.close(fd)
+                die("%s: %s is a symlink or not a folder; not writing through it" % (what, part))
+        except OSError:
+            os.close(fd)
+            die("%s: %s is a symlink or not a folder; not writing through it" % (what, part))
+        os.close(fd)
+        fd = nfd
+        if guard and ident(os.fstat(fd)) == guard:
+            os.close(fd)
+            die("%s: %s is the target; a proposal is never written there" % (what, part))
+    return fd
+
+
+def final_ok(fd, name, what):
+    try:
+        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(st.st_mode) or stat.S_ISDIR(st.st_mode):
+        die("%s is a symlink or a folder; not writing through it" % what)
+    return True
+
+
+def hook(kind, rel):
+    if os.environ.get("FACTORY_INSTALL_TEST_HOOK") == "before-write":
+        subprocess.run(["sh", "-c", os.environ.get("FACTORY_INSTALL_TEST_HOOK_CMD", ""), "hook", kind, rel])
+
+
+RENAME = os.replace if os.replace in os.supports_dir_fd else os.rename  # rename(2) replaces a file on POSIX too
+
+
+def put(root, rel, src, mode, guard, kind, tmp=None):
+    what = "%s %s" % (kind, rel)
+    parts = rel.split("/")
+    plain(parts[-1], what)
+    if tmp is not None:
+        plain(tmp, what)
+        if not tmp.startswith(".factory-"):
+            die("%s: a temporary name must start with .factory-" % what)
+    fd = walk(root, parts[:-1], guard, what)
+    try:
+        final_ok(fd, parts[-1], what)
+        with open(src, "rb") as f:
+            data = f.read()
+        hook(kind, rel)
+        tmp = tmp or ".factory-install." + secrets.token_hex(8)
+        wfd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(wfd, view):]
+            os.fchmod(wfd, mode)
+            os.close(wfd)
+            wfd = None
+            final_ok(fd, parts[-1], what)
+            RENAME(tmp, parts[-1], src_dir_fd=fd, dst_dir_fd=fd)
+        except BaseException:
+            if wfd is not None:
+                os.close(wfd)
+            try:
+                os.unlink(tmp, dir_fd=fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(fd)
+
+
+def link(root, rel, text, guard, kind):
+    what = "%s %s" % (kind, rel)
+    parts = rel.split("/")
+    plain(parts[-1], what)
+    fd = walk(root, parts[:-1], guard, what)
+    try:
+        if final_ok(fd, parts[-1], what):
+            die("%s appeared while writing" % what)
+        hook(kind, rel)
+        os.symlink(text, parts[-1], dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def remove(root, rel, guard, kind):
+    what = "%s %s" % (kind, rel)
+    parts = rel.split("/")
+    plain(parts[-1], what)
+    fd = walk(root, parts[:-1], guard, what, create=False)
+    if fd is None:
+        return
+    try:
+        try:
+            st = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(st.st_mode):
+            die("%s is a folder; not removing it" % what)
+        hook(kind, rel)
+        os.unlink(parts[-1], dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def open_sub(fd, name, what):
+    """The folder name in fd, never through a symlink; None when missing."""
+    try:
+        return os.open(name, DIR, dir_fd=fd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        die("%s is a symlink or not a folder; not going through it" % what)
+
+
+def rmdir(root, rel, guard, kind):
+    what = "%s %s" % (kind, rel)
+    parts = rel.split("/")
+    plain(parts[-1], what)
+    fd = walk(root, parts[:-1], guard, what, create=False)
+    if fd is None:
+        return
+    try:
+        dfd = open_sub(fd, parts[-1], what)
+        if dfd is None:
+            return
+        try:
+            empty = not os.listdir(dfd)
+        finally:
+            os.close(dfd)
+        if empty:
+            hook(kind, rel)
+            os.rmdir(parts[-1], dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def mkdir(root, rel, mode, guard, kind):
+    what = "%s %s" % (kind, rel)
+    parts = rel.split("/")
+    plain(parts[-1], what)
+    fd = walk(root, parts[:-1], guard, what)
+    try:
+        hook(kind, rel)
+        try:
+            os.mkdir(parts[-1], 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        dfd = open_sub(fd, parts[-1], what)
+        if dfd is None:
+            die("%s disappeared while writing" % what)
+        try:
+            os.fchmod(dfd, mode)
+        finally:
+            os.close(dfd)
+    finally:
+        os.close(fd)
+
+
+cmd = sys.argv[1]
+if cmd == "id":
+    fd = open_root(sys.argv[2])
+    print(ident(os.fstat(fd)))
+    sys.exit(0)
+if cmd != "flush":
+    die("fs_tool: unknown command")
+root_path, root_id, guard, kind, queue = sys.argv[2:7]
+guard = None if guard == "-" else guard
+root = open_root(root_path)
+if ident(os.fstat(root)) != root_id:
+    die("%s is not the folder it was when this run started; not writing there" % root_path)
+if guard and not clear_above(root, guard):
+    die("%s is in the target; a proposal is never written there" % root_path)
+with open(queue, encoding="utf-8") as f:
+    for line in f.read().split("\n"):
+        if not line:
+            continue
+        fields = line.split("\t")
+        op = fields[0]
+        if not (len(fields) == 4 or (op == "put" and len(fields) == 5)):
+            die("fs_tool: bad queue line")
+        mode, rel, arg = fields[1:4]
+        if op == "put":
+            put(root, rel, arg, int(mode, 8), guard, kind, fields[4] if len(fields) == 5 else None)
+        elif op == "link":
+            link(root, rel, arg, guard, kind)
+        elif op == "remove":
+            remove(root, rel, guard, kind)
+        elif op == "rmdir":
+            rmdir(root, rel, guard, kind)
+        elif op == "mkdir":
+            mkdir(root, rel, int(mode, 8), guard, kind)
+        else:
+            die("fs_tool: bad queue line")
+PY
+}
+
+# test_hook NAME: runs FACTORY_INSTALL_TEST_HOOK_CMD when FACTORY_INSTALL_TEST_HOOK is NAME. For the tests only: they
+# swap folders at named points to prove that a swap after the checks cannot redirect a write.
+test_hook() {
+  [ "${FACTORY_INSTALL_TEST_HOOK:-}" = "$1" ] || return 0
+  sh -c "${FACTORY_INSTALL_TEST_HOOK_CMD:-}" hook "$1" || true
+}
+
+# queue_write QUEUE SRC REL MODE: a copy of SRC (it may be rewritten later in the run), written at flush_writes.
+queue_write() {
+  case $3 in *"	"* | *"$newline"*) die "unsupported path: $3" ;; esac
+  QN=$((QN + 1))
+  cp "$2" "$WORK/queued.$QN" || die "cannot stage $3"
+  printf 'put\t%s\t%s\t%s\n' "$4" "$3" "$WORK/queued.$QN" >> "$1"
+}
+
+# put_file SRC REL [x]: write SRC to REL in the target, never through a symlink (see above).
+put_file() {
+  safe_dest "$2" final
+  if [ -n "${3:-}" ]; then queue_write "$WORK/target.queue" "$1" "$2" 755
+  else queue_write "$WORK/target.queue" "$1" "$2" 644; fi
+}
+
+# queue_remove REL [rmdir]: REL (a file or symlink; with rmdir, a folder when it is empty) goes at flush_writes.
+queue_remove() {
+  printf '%s\t-\t%s\t-\n' "${2:-remove}" "$1" >> "$WORK/target.queue"
+}
+
+# flush_writes: the queued writes, the proposals' and then the target's (a pass has only one of the two).
+flush_writes() {
+  if [ -s "$WORK/proposals.queue" ]; then
+    fs_tool flush "$PROPOSALS" "$PROPOSALS_ID" "$TARGET_ID" proposal "$WORK/proposals.queue" || exit 1
+  fi
+  if [ -s "$WORK/target.queue" ]; then
+    fs_tool flush "$TARGET" "$TARGET_ID" - target "$WORK/target.queue" || exit 1
+  fi
+}
+
+# install_file SRC DEST(relative to the target) core|project [exec]
+#   project: written only when missing. A project file that is a symlink (a CLAUDE.md pointing to AGENTS.md is common)
+#   is never written, so it is kept. core: written when missing, left and reported when it differs, refused when it is
+#   a symlink; its hash as the core ships it goes to the manifest for core.lock either way.
+install_file() {
+  _if_src=$1 _if_rel=$2 _if_own=$3 _if_x=${4:-}
+  _if_dst=$TARGET/$_if_rel
+  if [ "$_if_own" = project ] && [ -L "$_if_dst" ]; then
+    safe_dest "$_if_rel"
+    report kept "$_if_rel" "a symlink; never written through"
+    return 0
+  fi
+  if [ "$_if_own" = core ] && [ -n "$UPDATE_FROM" ] && update_file "$_if_src" "$_if_rel" "$_if_x"; then return 0; fi
+  safe_dest "$_if_rel" final
+  [ "$_if_own" != core ] || printf '%s  %s\n' "$(hash_file "$_if_src")" "$_if_rel" >> "$MANIFEST"
+  if [ -e "$_if_dst" ]; then
+    if cmp -s "$_if_src" "$_if_dst"; then report unchanged "$_if_rel"
+    elif [ "$_if_own" = project ]; then report kept "$_if_rel" "the project's file; never overwritten"
+    else
+      report differs "$_if_rel" "not the core's version; left as it is"; CONFLICTS=$((CONFLICTS + 1))
+      [ -z "$PROPOSALS" ] || propose "$_if_rel" "$_if_src" "the core's version of this file"
+    fi
+  else
+    [ "$DRY" = 1 ] || put_file "$_if_src" "$_if_rel" "$_if_x"
+    report added "$_if_rel"
+  fi
+}
+
+# ci_answers: reads CI_PR_VERIFY, PR_CHECKS and NIGHTLY_CHECKS as values.md describes them, with Python's JSON parser,
+# and prints "pr_empty 0|1" (ci.pr has neither verify nor a check: no factory-ci.yml) and "nightly 0|1" (ci.nightly
+# has a check: write factory-nightly.yml). Emptiness is decided on the parsed value, so `[ ]`, or `[` and `]` on two
+# lines, is empty. Anything outside the documented shapes is refused before anything is written: CI_PR_VERIFY is
+# exactly true or false; PR_CHECKS is a list of objects with a non-empty string "name" and "run" and an optional
+# "when" (null or a list of non-empty strings), no other key and no key twice; NIGHTLY_CHECKS the same without "when".
+ci_answers() {
+  python3 - "$VALUES" <<'PY'
+import json, os, sys
+
+vals = sys.argv[1]
+
+
+def fail(msg):
+    print("factory-install: values: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def read(name):
+    path = os.path.join(vals, name)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.read().rstrip("\n")
+
+
+def no_dupes(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("a key appears twice")
+    return dict(pairs)
+
+
+def text(item, key, name, i):
+    v = item.get(key)
+    if not isinstance(v, str) or not v.strip():
+        fail("%s[%d].%s must be a non-empty string" % (name, i, key))
+
+
+def checks(name, allowed):
+    raw = read(name)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw, object_pairs_hook=no_dupes)
+    except ValueError as e:
+        fail("%s is not valid JSON (%s)" % (name, e))
+    if not isinstance(data, list):
+        fail("%s must be a JSON list of checks, not %s" % (name, type(data).__name__))
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            fail("%s[%d] must be an object" % (name, i))
+        extra = sorted(set(item) - allowed)
+        if extra:
+            fail("%s[%d] has keys this core does not know: %s" % (name, i, ", ".join(extra)))
+        text(item, "name", name, i)
+        text(item, "run", name, i)
+        if "when" in allowed and item.get("when") is not None:
+            w = item["when"]
+            if not isinstance(w, list) or not all(isinstance(g, str) and g.strip() for g in w):
+                fail("%s[%d].when must be null or a list of non-empty strings" % (name, i))
+    return data
+
+
+verify = read("CI_PR_VERIFY")
+if verify is None:
+    verify = "true"
+if verify not in ("true", "false"):
+    fail("CI_PR_VERIFY is true or false, not %r" % verify)
+pr = checks("PR_CHECKS", {"name", "run", "when"}) or []
+nightly = checks("NIGHTLY_CHECKS", {"name", "run"})
+print("pr_empty %d" % (verify == "false" and not pr))
+print("nightly %d" % bool(nightly))
+PY
+}
+
+# --- brownfield: a repo that already has rules, CI or agent setup -------------------------------------------------------
+# These functions only read the target, write through put_file, or write proposals outside the target; factory-update
+# can call them too.
+
+# md_tool sections CUR TPL OUT | md_tool diff FROM|- TO LABEL
+#   sections: prints "missing <title>" for each section of the rendered AGENTS.md template TPL whose heading CUR does
+#     not have, writes CUR with those sections appended (after a marker comment) to OUT, and prints "marker" when CUR
+#     already holds the marker (sections were appended once before). The template's `## ` sections are the units,
+#     except `## Rules`, whose `### ` subsections are. CUR is read as Markdown: ATX and setext headings, at any level,
+#     outside fenced code blocks; titles compare case-insensitively with white space collapsed. A heading this misses
+#     only makes a section be offered twice, visibly, in the diff.
+#   diff: a unified diff from FROM (- for a new file) to TO, with a/LABEL and b/LABEL as names.
+#   imports FILE: exit 0 when FILE imports AGENTS.md the way Claude Code reads it: an `@AGENTS.md` or `@./AGENTS.md`
+#     token between white space or line ends, outside fenced code blocks and inline code spans.
+md_tool() {
+  python3 - "$@" <<'PY'
+import difflib, re, sys
+
+MARK = "<!-- factory-init: the sections below come from the factory's AGENTS.md template."
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)$")
+ATX = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+SETEXT = re.compile(r" {0,3}(=+|-+)[ \t]*$")
+
+
+def read(path):
+    with open(path, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def norm(title):
+    return " ".join(title.split()).casefold()
+
+
+def headings(text):
+    found, fence, prev = set(), None, ""
+    for line in text.split("\n"):
+        line = line.rstrip("\r")
+        m = FENCE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            prev = ""
+            continue
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence, prev = m.group(1), ""
+            continue
+        h = ATX.match(line)
+        if h:
+            found.add(norm(h.group(2) or ""))
+            prev = ""
+            continue
+        if SETEXT.match(line) and prev.strip() and not prev.startswith(("    ", "\t")):
+            found.add(norm(prev))
+            prev = ""
+            continue
+        prev = line
+    return found
+
+
+def split(lines, prefix):
+    """Lines before the first heading starting with prefix, and (title, lines) per such heading."""
+    head, parts = [], []
+    for line in lines:
+        if line.startswith(prefix):
+            parts.append((line[len(prefix):].strip(), [line]))
+        elif parts:
+            parts[-1][1].append(line)
+        else:
+            head.append(line)
+    return head, parts
+
+
+def block(lines):
+    while lines and not lines[-1].strip():
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def sections(cur_p, tpl_p, out_p):
+    cur, tpl = read(cur_p), read(tpl_p)
+    have = headings(cur)
+    if MARK in cur:
+        print("marker")
+    _, parts = split(tpl.split("\n"), "## ")
+    blocks = []
+    for title, lines in parts:
+        if norm(title) != "rules":
+            if norm(title) not in have:
+                print("missing " + title)
+                blocks.append(block(lines))
+            continue
+        intro, subs = split(lines[1:], "### ")
+        miss = [(t, l) for t, l in subs if norm(t) not in have]
+        for t, _ in miss:
+            print("missing Rules › " + t)
+        if not miss:
+            continue
+        if "rules" in have:
+            heading = ["## Rules from the factory", ""]
+        else:
+            heading = [lines[0]] + intro
+        blocks.append(block(heading + [line for _, l in miss for line in block(l).split("\n") + [""]]))
+    if not blocks:
+        return
+    if cur and not cur.endswith("\n"):
+        cur += "\n"
+    out = (cur + "\n" + MARK + " The rules above are the project's own; where the two disagree, the project's"
+           " rules win until a person reconciles them. -->\n\n" + "\n\n".join(blocks) + "\n")
+    with open(out_p, "w", encoding="utf-8", newline="") as f:
+        f.write(out)
+
+
+IMPORT = re.compile(r"(?:^|\s)@(?:\./)?AGENTS\.md(?=\s|$)")
+
+
+def imports(path):
+    fence = None
+    for line in read(path).split("\n"):
+        line = line.rstrip("\r")
+        m = FENCE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            continue
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+            continue
+        if IMPORT.search(re.sub(r"(`+).*?\1", " ", line)):
+            return True
+    return False
+
+
+def diff(from_p, to_p, label):
+    a = [] if from_p == "-" else read(from_p).splitlines(True)
+    b = read(to_p).splitlines(True)
+    fix = lambda ls: [l if l.endswith("\n") else l + "\n\\ No newline at end of file\n" for l in ls]
+    sys.stdout.writelines(difflib.unified_diff(fix(a), fix(b), "/dev/null" if from_p == "-" else "a/" + label,
+                                               "b/" + label))
+
+
+if sys.argv[1] == "sections":
+    sections(*sys.argv[2:5])
+elif sys.argv[1] == "diff":
+    diff(*sys.argv[2:5])
+elif sys.argv[1] == "imports":
+    sys.exit(0 if imports(sys.argv[2]) else 1)
+else:
+    sys.exit("md_tool: unknown command")
+PY
+}
+
+# proposals_outside: the proposals folder is neither the target nor inside it (both are physical paths here).
+proposals_outside() {
+  case $PROPOSALS/ in "$TARGET"/*) die "the proposals folder must be outside the target: $PROPOSALS" ;; esac
+}
+
+# safe_prop REL: the proposals folder's counterpart of safe_dest. Refuse a proposal path whose folders inside the
+# proposals folder include a symlink or a file, or whose final name is a symlink or a folder: a write could land
+# elsewhere, even in the target. Checked in the silent dry pass for every proposal, and again before each write.
+safe_prop() {
+  _sp_p=$1 _sp_at=$PROPOSALS
+  [ ! -L "$PROPOSALS" ] || die "the proposals folder is a symlink; not writing through it"
+  while :; do
+    case $_sp_p in */*) _sp_c=${_sp_p%%/*}; _sp_p=${_sp_p#*/} ;; *) break ;; esac
+    case $_sp_c in '' | . | ..) die "bad proposal path: $1" ;; esac
+    _sp_at=$_sp_at/$_sp_c
+    [ ! -L "$_sp_at" ] || die "proposal $1: $_sp_at is a symlink; not writing through it (nothing was written)"
+    [ ! -e "$_sp_at" ] || [ -d "$_sp_at" ] || die "proposal $1: $_sp_at is not a folder"
+  done
+  case $_sp_p in '' | . | ..) die "bad proposal path: $1" ;; esac
+  [ ! -L "$PROPOSALS/$1" ] || die "proposal $1 is a symlink in the proposals folder; not writing through it (nothing was written)"
+  [ ! -d "$PROPOSALS/$1" ] || die "proposal $1 is a folder in the proposals folder, not a file"
+}
+
+# put_prop SRC REL: write a proposal the way put_file writes into the target: checked by name now, written relative to
+# the proposals folder's descriptor at flush_writes, never in the target.
+put_prop() {
+  safe_prop "$2"
+  queue_write "$WORK/proposals.queue" "$1" "$2" 644
+}
+
+# propose REL FILE NOTE: a change a person decides on. Nothing is written in the target; with --proposals, FILE is
+# copied to <proposals>/REL and its diff against the target's REL (or against nothing) to <proposals>/REL.diff.
+propose() {
+  if [ -n "$PROPOSALS" ]; then
+    safe_prop "$1"; safe_prop "$1.diff"
+    if [ "$PROPOSE_WRITE" = 1 ]; then
+      _pp_from=-
+      if [ -f "$TARGET/$1" ] && [ ! -L "$TARGET/$1" ]; then _pp_from=$TARGET/$1; fi
+      md_tool diff "$_pp_from" "$2" "$1" > "$WORK/proposal.diff" || die "could not make the diff for $1"
+      put_prop "$2" "$1"
+      put_prop "$WORK/proposal.diff" "$1.diff"
+    fi
+    report proposed "$1" "$3; the file and its diff are $1 and $1.diff in the proposals folder"
+  else
+    report proposed "$1" "$3; --proposals DIR writes the file and its diff"
+  fi
+}
+
+# The lock entries ("<path>" per line) of an existing .factory/core.lock, read as `check` reads it: only lines of the
+# strict form "<64 hex>  <path>" count.
+locked_paths() {
+  [ -f "$TARGET/.factory/core.lock" ] && [ ! -L "$TARGET/.factory/core.lock" ] || return 0
+  grep -E '^[0-9a-f]{64}  [^/[:space:]][^[:space:]]*$' "$TARGET/.factory/core.lock" | cut -c67- || true
+}
+
+# What was in the target before this run wrote anything: project skills and agents, workflows, .factory/.
+brownfield_snapshot() {
+  locked_paths > "$WORK/locked"
+  : > "$WORK/pre-skills"; : > "$WORK/pre-agents"; : > "$WORK/pre-workflows"
+  for _bs in "$TARGET"/.claude/skills/* "$TARGET"/.claude/skills/.[!.]*; do
+    { [ -e "$_bs" ] || [ -L "$_bs" ]; } && basename "$_bs" >> "$WORK/pre-skills"
+  done
+  for _bs in "$TARGET"/.claude/agents/*; do
+    { [ -e "$_bs" ] || [ -L "$_bs" ]; } && basename "$_bs" >> "$WORK/pre-agents"
+  done
+  # The project's own CI: workflow files not named factory-* and not recorded in the lock.
+  if [ -d "$TARGET/.github/workflows" ] && [ ! -L "$TARGET/.github/workflows" ]; then
+    for _bs in "$TARGET"/.github/workflows/*.yml "$TARGET"/.github/workflows/*.yaml; do
+      [ -f "$_bs" ] || continue
+      _bs_n=$(basename "$_bs")
+      case $_bs_n in factory-*) continue ;; esac
+      grep -qxF ".github/workflows/$_bs_n" "$WORK/locked" || printf '%s\n' "$_bs_n" >> "$WORK/pre-workflows"
+    done
+  fi
+  PRE_FACTORY=
+  if [ -d "$TARGET/.factory" ] && [ ! -L "$TARGET/.factory" ] && [ ! -f "$TARGET/.factory/core.lock" ]; then
+    PRE_FACTORY=$(cd "$TARGET/.factory" && find . ! -name . -prune -print | sed 's#^\./##' | LC_ALL=C sort | awk 'NF { printf "%s%s", sep, $0; sep = ", " }')
+  fi
+  PRE_AGENTS=0 PRE_CLAUDE=0
+  if [ -e "$TARGET/AGENTS.md" ] || [ -L "$TARGET/AGENTS.md" ]; then PRE_AGENTS=1; fi
+  if [ -e "$TARGET/CLAUDE.md" ] || [ -L "$TARGET/CLAUDE.md" ]; then PRE_CLAUDE=1; fi
+}
+
+# AGENTS.md is a symlink that resolves to CLAUDE.md (the rules live in CLAUDE.md), however the link is spelled:
+# relative, absolute, through other links, or in another case on a case-insensitive file system. Decided by the file
+# system (samefile) when both exist, else by the resolved paths, compared case-insensitively so a doubt keeps
+# CLAUDE.md from being written as a pointer to itself.
+agents_links_claude() {
+  [ -L "$TARGET/AGENTS.md" ] || return 1
+  python3 - "$TARGET/AGENTS.md" "$TARGET/CLAUDE.md" <<'PY'
+import os, sys
+a, c = sys.argv[1:3]
+if os.path.exists(a) and os.path.exists(c):
+    sys.exit(0 if os.path.samefile(a, c) else 1)
+sys.exit(0 if os.path.realpath(a).casefold() == os.path.realpath(c).casefold() else 1)
+PY
+}
+
+# rules_merge RENDERED_AGENTS: the project's rules file keeps every line; the factory's missing sections, and the
+# `@AGENTS.md` pointer in a CLAUDE.md that has content of its own, are appended (RULES_MERGE=add) or proposed. A
+# second run finds them and changes nothing; once added, anything removed later is only proposed again.
+rules_merge() {
+  _rm_rel=
+  if agents_links_claude; then
+    if [ -f "$TARGET/CLAUDE.md" ] && [ ! -L "$TARGET/CLAUDE.md" ]; then _rm_rel=CLAUDE.md; fi
+  elif [ "$PRE_AGENTS" = 1 ] && [ -f "$TARGET/AGENTS.md" ] && [ ! -L "$TARGET/AGENTS.md" ]; then
+    _rm_rel=AGENTS.md
+  fi
+  if [ -n "$_rm_rel" ]; then
+    rm -f "$WORK/rules.merged"
+    md_tool sections "$TARGET/$_rm_rel" "$1" "$WORK/rules.merged" > "$WORK/rules.out" || die "could not read $_rm_rel"
+    _rm_miss=$(sed -n 's/^missing //p' "$WORK/rules.out" | awk 'NF { printf "%s%s", sep, $0; sep = "; " }')
+    if [ -n "$_rm_miss" ]; then
+      if [ "$RULES_MERGE" = add ] && ! grep -qx marker "$WORK/rules.out"; then
+        safe_dest "$_rm_rel" final
+        [ "$DRY" = 1 ] || put_file "$WORK/rules.merged" "$_rm_rel"
+        report merged "$_rm_rel" "the factory's sections added at the end: $_rm_miss; every line above is unchanged"
+      elif [ "$RULES_MERGE" = add ]; then
+        propose "$_rm_rel" "$WORK/rules.merged" "the factory's sections $_rm_miss (added once before and removed since, so only proposed)"
+      else
+        propose "$_rm_rel" "$WORK/rules.merged" "the factory's sections $_rm_miss, appended; every line above unchanged"
+      fi
+    fi
+  fi
+  # The pointer: a CLAUDE.md of the project's own, when the rules are in AGENTS.md.
+  [ "$PRE_CLAUDE" = 1 ] && [ "$_rm_rel" != CLAUDE.md ] || return 0
+  [ -f "$TARGET/CLAUDE.md" ] && [ ! -L "$TARGET/CLAUDE.md" ] || return 0
+  ! md_tool imports "$TARGET/CLAUDE.md" || return 0
+  cp "$TARGET/CLAUDE.md" "$WORK/claude.merged"
+  [ -z "$(tail -c 1 "$WORK/claude.merged")" ] || echo >> "$WORK/claude.merged"
+  {
+    echo
+    echo '<!-- factory-init: the pointer to the rules for agents. -->'
+    echo 'The rules for agents are in [AGENTS.md](AGENTS.md); Claude Code reads them through the line below.'
+    echo
+    echo '@AGENTS.md'
+  } >> "$WORK/claude.merged"
+  if [ "$RULES_MERGE" = add ] && ! grep -qF '<!-- factory-init: the pointer to the rules for agents. -->' "$TARGET/CLAUDE.md"; then
+    safe_dest CLAUDE.md final
+    [ "$DRY" = 1 ] || put_file "$WORK/claude.merged" CLAUDE.md
+    report merged CLAUDE.md "the pointer @AGENTS.md added at the end; every line above is unchanged"
+  else
+    propose CLAUDE.md "$WORK/claude.merged" "the pointer @AGENTS.md, appended, so Claude Code reads AGENTS.md"
+  fi
+}
+
+# Names the core owns: every factory-* skill and agent, and every skill folder this core installs. One that the
+# project has and the lock does not record (and that is not exactly the core's copy) stops the install before
+# anything is written: the core would mix its files into the project's, and factory-update would replace them.
+reserved_names() {
+  _rs_bad=
+  while IFS= read -r _rs_n; do
+    _rs_lc=$(printf '%s' "$_rs_n" | tr '[:upper:]' '[:lower:]')
+    _rs_ships=0
+    ! grep -qF "|.claude/skills/$_rs_n/" "$WORK/map" || _rs_ships=1
+    case $_rs_lc in factory-*) ;; *) [ "$_rs_ships" = 1 ] || continue ;; esac
+    _P=".claude/skills/$_rs_n/" awk 'index($0, ENVIRON["_P"]) == 1 { f = 1 } END { exit !f }' "$WORK/locked" && continue
+    if [ "$_rs_ships" = 1 ] && [ -d "$TARGET/.claude/skills/$_rs_n" ] && [ ! -L "$TARGET/.claude/skills/$_rs_n" ] \
+      && same_as_core ".claude/skills/$_rs_n"; then continue; fi
+    _rs_bad="$_rs_bad$newline  .claude/skills/$_rs_n"
+  done < "$WORK/pre-skills"
+  while IFS= read -r _rs_n; do
+    _rs_lc=$(printf '%s' "$_rs_n" | tr '[:upper:]' '[:lower:]')
+    case $_rs_lc in factory-*) ;; *) continue ;; esac
+    grep -qxF ".claude/agents/$_rs_n" "$WORK/locked" && continue
+    if [ -f "$TARGET/.claude/agents/$_rs_n" ] && [ ! -L "$TARGET/.claude/agents/$_rs_n" ] \
+      && same_as_core ".claude/agents/$_rs_n"; then continue; fi
+    _rs_bad="$_rs_bad$newline  .claude/agents/$_rs_n"
+  done < "$WORK/pre-agents"
+  [ -n "$_rs_bad" ] || return 0
+  printf '%s\n' "$prog: these skills or agents are the project's (no .factory/core.lock records them), but their names belong to the core:$_rs_bad" >&2
+  printf '%s\n' "$prog: factory-* skills and agents, and the skills this core installs, are written by factory-init and replaced by factory-update, so the project's files there would be mixed with the core's or lost. Rename them (keep the content; for example, drop the factory- prefix and update what refers to them), then run again." >&2
+  exit 1
+}
+
+# same_as_core REL: REL (a file, or a folder of files) in the target is exactly what the core installs there.
+same_as_core() {
+  if [ -f "$TARGET/$1" ]; then
+    _sc_src=$(awk -F '|' -v d="$1" '$2 == d { print $1; exit }' "$WORK/map")
+    [ -n "$_sc_src" ] && cmp -s "$SOURCE/$_sc_src" "$TARGET/$1"
+    return
+  fi
+  (cd "$TARGET/$1" && find . ! -type d -print) > "$WORK/same" || return 1
+  while IFS= read -r _sc_f; do
+    _sc_f=$1/${_sc_f#./}
+    [ -f "$TARGET/$_sc_f" ] && [ ! -L "$TARGET/$_sc_f" ] || return 1
+    _sc_src=$(awk -F '|' -v d="$_sc_f" '$2 == d { print $1; exit }' "$WORK/map")
+    [ -n "$_sc_src" ] && cmp -s "$SOURCE/$_sc_src" "$TARGET/$_sc_f" || return 1
+  done < "$WORK/same"
+}
+
+# ci_file SRC REL: a factory CI workflow. Installed as a core file, unless CI_WORKFLOWS is propose and the repo does
+# not have it yet: then it is rendered and pin-checked all the same, but only proposed, and the lock leaves it out.
+ci_file() {
+  if [ "$CI_WORKFLOWS" = propose ] && [ ! -e "$TARGET/$2" ] && [ ! -L "$TARGET/$2" ]; then
+    safe_dest "$2" final
+    propose "$2" "$1" "the factory's CI, rendered and pin-checked, not installed: $CI_WHY"
+  else
+    install_file "$1" "$2" core
+  fi
+}
+
+# Workflows this install did not write: listed as kept, never replaced.
+project_workflows() {
+  [ -d "$TARGET/.github/workflows" ] && [ ! -L "$TARGET/.github/workflows" ] || return 0
+  _pw_verify=$(val VERIFY)
+  cut -c67- "$MANIFEST" > "$WORK/written"
+  for _pw_f in "$TARGET"/.github/workflows/*.yml "$TARGET"/.github/workflows/*.yaml; do
+    [ -f "$_pw_f" ] || continue
+    _pw_rel=.github/workflows/$(basename "$_pw_f")
+    # The verify note below is a hint for the person in the PR, not a guard: it decides nothing.
+    ! grep -qxF "$_pw_rel" "$WORK/written" || continue
+    ! grep -qxF "$_pw_rel" "$WORK/gone" || continue
+    case $(basename "$_pw_f") in
+      factory-*) _pw_note="named factory-*, but not written by this install (an earlier core, or a check now off); left as it is" ;;
+      *)
+        _pw_note="the project's workflow; never replaced"
+        if grep -qF -- "$_pw_verify" "$_pw_f"; then
+          _pw_note="$_pw_note; it mentions the verify command, so with the factory's CI a PR would run it twice"
+        fi ;;
+    esac
+    report kept "$_pw_rel" "$_pw_note"
+  done
+}
+
+# --- update mode (--update-from): factory-update's version change ----------------------------------------------------
+# update_lock: the lock is a regular file whose every line is in the strict form `check` reads, with exactly one
+# version: line, and that line is the --update-from version. Anything else is refused before anything is written.
+update_lock() {
+  printf '%s' "$UPDATE_FROM" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' || die "--update-from is not a semver version: $UPDATE_FROM"
+  [ "$UPDATE_FROM" != "$VERSION" ] || die "--update-from $UPDATE_FROM is the source's own version: there is no version change"
+  _ul=$TARGET/.factory/core.lock
+  [ -f "$_ul" ] && [ ! -L "$_ul" ] || die "--update-from needs .factory/core.lock (a regular file) in the target"
+  ! grep -Evq '^(#.*|version: [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?|upstream: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[0-9a-f]{64}  [^/[:space:]][^[:space:]]*)$' "$_ul" \
+    || die ".factory/core.lock has a line that is not a comment, version:, upstream: or a file entry; a person fixes it"
+  [ "$(grep -c '^version: ' "$_ul")" = 1 ] || die ".factory/core.lock must hold exactly one version: line"
+  _ul_v=$(sed -n 's/^version: //p' "$_ul")
+  if [ "$_ul_v" != "$UPDATE_FROM" ]; then
+    printf '%s\n' "$prog: .factory/core.lock records core $_ul_v, not the --update-from version $UPDATE_FROM" >&2
+    exit 4
+  fi
+}
+
+# update_plan: the old lock's entries ($WORK/old: "<sha256> <path>"), every one that is not the old core's copy
+# ($WORK/edited: "<path><TAB>edited|missing|a symlink") and the person's decisions ($WORK/keep, $WORK/discard). A
+# decision must name an edited core file, only an edited file (not a missing one or a symlink) can be kept, and
+# every edited file needs one: otherwise nothing is written.
+update_plan() {
+  grep -E '^[0-9a-f]{64}  ' "$TARGET/.factory/core.lock" | LC_ALL=C sort -k2 > "$WORK/old" || true
+  : > "$WORK/edited"; : > "$WORK/keep"; : > "$WORK/discard"
+  printf '%s' "$DECISIONS" > "$WORK/decisions"
+  while IFS='	' read -r _up_w _up_p; do printf '%s\n' "$_up_p" >> "$WORK/$_up_w"; done < "$WORK/decisions"
+  while read -r _up_h _up_p; do
+    case /$_up_p/ in */../* | */./* | *//*) die "unsafe path in .factory/core.lock: $_up_p" ;; esac
+    safe_dest "$_up_p"
+    if [ -L "$TARGET/$_up_p" ]; then _up_k='a symlink'
+    elif [ ! -e "$TARGET/$_up_p" ]; then _up_k=missing
+    elif [ ! -f "$TARGET/$_up_p" ]; then die "$_up_p (a core file) is not a file; a person fixes it first"
+    elif [ "$(hash_file "$TARGET/$_up_p")" = "$_up_h" ]; then continue
+    else _up_k=edited; fi
+    printf '%s\t%s\n' "$_up_p" "$_up_k" >> "$WORK/edited"
+  done < "$WORK/old"
+  _up_both=$(grep -xF -f "$WORK/discard" "$WORK/keep" || true)
+  if [ -n "$_up_both" ]; then printf '%s\n' "$prog: both --keep and --discard for: $(words "$_up_both")" >&2; exit 2; fi
+  cut -f1 "$WORK/edited" > "$WORK/edited.paths"
+  _up_bad=$(cat "$WORK/keep" "$WORK/discard" | grep -vxF -f "$WORK/edited.paths" || true)
+  if [ -n "$_up_bad" ]; then
+    printf '%s\n' "$prog: --keep/--discard name files that are not edited core files: $(words "$_up_bad")" >&2; exit 2
+  fi
+  # FILENAME, not NR == FNR: an empty first file must not turn the second into the list.
+  _up_bad=$(awk -F '\t' 'FILENAME == ARGV[1] { k[$0] = 1; next } ($1 in k) && $2 != "edited" { print $1 }' "$WORK/keep" "$WORK/edited")
+  if [ -n "$_up_bad" ]; then
+    printf '%s\n' "$prog: only an edited file can be kept; a missing file or a symlink can only be discarded: $(words "$_up_bad")" >&2; exit 2
+  fi
+  cat "$WORK/keep" "$WORK/discard" > "$WORK/decided"
+  _up_bad=$(awk -F '\t' 'FILENAME == ARGV[1] { d[$0] = 1; next } !($1 in d) { print $1 " (" $2 ")" }' "$WORK/decided" "$WORK/edited")
+  [ -z "$_up_bad" ] || die "edited core files need a decision (--keep or --discard), so nothing was written:$newline  $(printf '%s\n' "$_up_bad" | awk 'NF { printf "%s%s", sep, $0; sep = "\n  " }')"
+}
+
+# update_state REL: how REL stands against the old lock: "" (the old core's copy), edited, missing, "a symlink"; and
+# update_decision REL: keep, discard or "".
+# Paths reach awk through the environment, never -v: awk -v would turn a backslash in a file name into an escape.
+update_state() { _P=$1 awk -F '\t' '$1 == ENVIRON["_P"] { print $2; exit }' "$WORK/edited"; }
+update_decision() {
+  if grep -qxF -- "$1" "$WORK/keep"; then echo keep
+  elif grep -qxF -- "$1" "$WORK/discard"; then echo discard; fi
+}
+
+# update_file SRC REL [x]: a core file the old lock records, in update mode (returns 1 for any other file, which is
+# installed as usual). The old core's copy is replaced; an edit is kept or replaced as the person decided.
+update_file() {
+  _uf_h=$(_P=$2 awk '{ h = $1; p = substr($0, 67) } p == ENVIRON["_P"] { print h; exit }' "$WORK/old")   # "<64 hex>  <path>"
+  [ -n "$_uf_h" ] || return 1
+  _uf_k=$(update_state "$2")
+  _uf_m=644; [ -z "$3" ] || _uf_m=755
+  printf '%s  %s\n' "$(hash_file "$1")" "$2" >> "$MANIFEST"
+  if [ "$_uf_k" = 'a symlink' ]; then
+    [ "$(update_decision "$2")" = discard ] || die "$2: a symlinked core file can only be discarded (--discard)"
+    safe_dest "$2"   # the link goes, never what it points to
+    [ "$DRY" = 1 ] || { queue_remove "$2"; queue_write "$WORK/target.queue" "$1" "$2" "$_uf_m"; }
+    report replaced "$2" "a symlink, discarded: the link is removed, never what it points to; the core's file is written there"
+    return 0
+  fi
+  safe_dest "$2" final
+  if [ "$_uf_k" = missing ]; then
+    [ "$(update_decision "$2")" = discard ] || die "$2: a missing core file can only be discarded (--discard)"
+    [ "$DRY" = 1 ] || put_file "$1" "$2" "$3"
+    report added "$2" "missing, discarded: the core's file is written again"
+  elif cmp -s "$1" "$TARGET/$2"; then
+    report unchanged "$2"
+  elif [ -z "$_uf_k" ]; then
+    [ "$DRY" = 1 ] || put_file "$1" "$2" "$3"
+    report replaced "$2" "the old core's copy; the new core's version is written"
+  elif [ "$(update_decision "$2")" = keep ]; then
+    report differs "$2" "a local edit, kept by decision; not the core's version, left as it is"; CONFLICTS=$((CONFLICTS + 1))
+    [ -z "$PROPOSALS" ] || propose "$2" "$1" "the core's version of this file"
+  elif [ "$(update_decision "$2")" = discard ]; then
+    [ "$DRY" = 1 ] || put_file "$1" "$2" "$3"
+    report replaced "$2" "a local edit, discarded: the new core's version is written"
+  else
+    die "$2: an edited core file without a decision (--keep or --discard)"
+  fi
+}
+
+# update_removals: the old lock's files the new core no longer ships are removed (an edit kept by decision stays, as
+# the project's file now), and then the folders they leave empty, deepest first. Listed in $WORK/gone.
+update_removals() {
+  cut -c67- "$MANIFEST" | LC_ALL=C sort -u > "$WORK/shipped"
+  while read -r _ur_h _ur_p; do
+    ! grep -qxF -- "$_ur_p" "$WORK/shipped" || continue
+    _ur_k=$(update_state "$_ur_p")
+    [ "$_ur_k" != missing ] || continue
+    if [ -n "$_ur_k" ]; then
+      case $(update_decision "$_ur_p") in
+        keep) report kept "$_ur_p" "a local edit, kept by decision; the new core no longer ships it, so it is the project's file now"; continue ;;
+        discard) ;;
+        *) die "$_ur_p: an edited core file without a decision (--keep or --discard)" ;;
+      esac
+    fi
+    safe_dest "$_ur_p"
+    [ "$DRY" = 1 ] || queue_remove "$_ur_p"
+    printf '%s\n' "$_ur_p" >> "$WORK/gone"
+    case $_ur_k in
+      '') report removed "$_ur_p" "the new core no longer ships it" ;;
+      edited) report removed "$_ur_p" "the new core no longer ships it; a local edit, discarded" ;;
+      *) report removed "$_ur_p" "the new core no longer ships it; a symlink, discarded (never what it points to)" ;;
+    esac
+  done < "$WORK/old"
+  [ "$DRY" = 0 ] || return 0
+  awk '{ p = $0; while (sub(/\/[^\/]*$/, "", p)) print p }' "$WORK/gone" | LC_ALL=C sort -u \
+    | awk -F / '{ print NF "\t" $0 }' | LC_ALL=C sort -k1,1nr -k2 | cut -f2- > "$WORK/gone.dirs"
+  while IFS= read -r _ur_d; do queue_remove "$_ur_d" rmdir; done < "$WORK/gone.dirs"
+}
+
+# --- apply ------------------------------------------------------------------------------------------------------------
+read_version() {
+  _rv_pj=$SOURCE/.claude-plugin/plugin.json
+  [ -f "$_rv_pj" ] || die "no .claude-plugin/plugin.json in the source $SOURCE (in a clone of the factory repo, --source is <clone>/plugin; for an installed plugin, its install folder)"
+  _rv_v=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_rv_pj" | head -n 1)
+  printf '%s' "$_rv_v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' || die "no semver \"version\" in $_rv_pj"
+  printf '%s' "$_rv_v"
+}
+
+# "src|dest" lines for every file of a source folder, tests and caches left out.
+emit_tree() { # emit_tree <folder relative to the source> <destination prefix>
+  [ -d "$SOURCE/$1" ] || return 0
+  (cd -P "$SOURCE/$1" && find . -type f ! -name '*.test.*' ! -name '.DS_Store' ! -name '*.pyc' \
+    ! -path '*/tests/*' ! -path '*/__pycache__/*' | LC_ALL=C sort) > "$WORK/tree"
+  while IFS= read -r _et_f; do
+    _et_f=${_et_f#./}
+    case $_et_f in *[[:space:]\|]*) die "unsupported file name in the core: $1/$_et_f" ;; esac
+    printf '%s|%s\n' "$1/$_et_f" "$2/$_et_f"
+  done < "$WORK/tree"
+}
+
+core_map() {
+  [ -d "$SOURCE/core/skills" ] || die "no core/skills in the source $SOURCE"
+  for _cm_d in "$SOURCE"/core/skills/*/; do
+    _cm_n=$(basename "$_cm_d"); emit_tree "core/skills/$_cm_n" ".claude/skills/$_cm_n"
+  done
+  for _cm_a in "$SOURCE"/core/agents/*.md; do
+    [ -f "$_cm_a" ] || continue
+    _cm_n=$(basename "$_cm_a"); case $_cm_n in factory-*) ;; *) _cm_n=factory-$_cm_n ;; esac
+    printf '%s|%s\n' "core/agents/$(basename "$_cm_a")" ".claude/agents/$_cm_n"
+  done
+  emit_tree core/bin .factory/bin
+  emit_tree core/hooks .factory/hooks
+  emit_tree core/reference .factory/reference
+  [ ! -f "$SOURCE/core/defaults.yaml" ] || echo 'core/defaults.yaml|.factory/defaults.yaml'
+  [ ! -f "$SOURCE/core/factory.schema.json" ] || echo 'core/factory.schema.json|.factory/factory.schema.json'
+  # The label template, so factory-doctor's labels check works in a project without the factory source.
+  [ ! -f "$SOURCE/core/templates/labels.yaml" ] || echo 'core/templates/labels.yaml|.factory/templates/labels.yaml'
+  # The ticket template: factory-tickets writes issue bodies from it, and the merge gate reads its contract heading.
+  [ ! -f "$SOURCE/core/templates/ticket.md" ] || echo 'core/templates/ticket.md|.factory/templates/ticket.md'
+  [ ! -f "$SOURCE/core/templates/worktree-setup.sh" ] || echo 'core/templates/worktree-setup.sh|.factory/bin/worktree-setup.sh'
+  emit_tree runtime .factory/runtime
+  for _cm_r in $RECIPES; do emit_tree "recipes/$_cm_r" ".factory/recipes/$_cm_r"; done
+  for _cm_p in $PACKS; do emit_tree "packs/$_cm_p/skills" .claude/skills; done
+}
+
+# A values folder for one render: the answers, plus the overrides given as NAME=VALUE (NAME.drop=1 drops lines).
+mkvals() { # mkvals <dir> [<extra dir>] [NAME=VALUE]...
+  _mv_d=$1; shift
+  rm -rf "$_mv_d"; mkdir -p "$_mv_d"
+  find "$VALUES" -maxdepth 1 -type f -exec cp {} "$_mv_d/" \;
+  if [ $# -gt 0 ]; then
+    [ -z "$1" ] || [ ! -d "$1" ] || find "$1" -maxdepth 1 -type f -exec cp {} "$_mv_d/" \;
+    shift
+  fi
+  for _mv_kv in "$@"; do printf '%s' "${_mv_kv#*=}" > "$_mv_d/${_mv_kv%%=*}"; done
+}
+
+# The lines of $1 as one line of words separated by spaces.
+words() { printf '%s\n' "$1" | awk 'NF { printf "%s%s", sep, $0; sep = " " }'; }
+
+# "a b" -> "`a`, `b`"
+as_code_list() {
+  _cl_o=
+  while IFS= read -r _cl_i; do
+    [ -n "$_cl_i" ] || continue
+    _cl_o="${_cl_o:+$_cl_o, }\`$_cl_i\`"
+  done
+  printf '%s' "$_cl_o"
+}
+
+path_value() { # an answered path, as inline code; "none yet" when absent
+  if _pv_p=$(val "$1") && [ -n "$_pv_p" ]; then
+    # shellcheck disable=SC2016 # literal backticks: inline code in Markdown
+    case $_pv_p in '`'*) printf '%s' "$_pv_p" ;; *) printf '`%s`' "$_pv_p" ;; esac
+  else printf 'none yet'; fi
+}
+
+existing_pr_template() {
+  for _pt_t in .github/pull_request_template.md .github/PULL_REQUEST_TEMPLATE.md pull_request_template.md \
+    PULL_REQUEST_TEMPLATE.md docs/pull_request_template.md docs/PULL_REQUEST_TEMPLATE.md .github/PULL_REQUEST_TEMPLATE; do
+    if [ -e "$TARGET/$_pt_t" ]; then printf '%s' "$_pt_t"; return 0; fi
+  done
+  return 1
+}
+
+# The templates entries of a recipe.yaml: "from|to|for" lines.
+recipe_templates() {
+  awk '
+    /^templates:/ { on = 1; next }
+    /^[^[:space:]#]/ { on = 0 }
+    on && /^[[:space:]]*-[[:space:]]*\{/ {
+      line = $0; f = ""; t = ""; e = ""
+      if (match(line, /from:[[:space:]]*[^,}]+/)) f = substr(line, RSTART, RLENGTH)
+      if (match(line, /to:[[:space:]]*[^,}]+/)) t = substr(line, RSTART, RLENGTH)
+      if (match(line, /for:[[:space:]]*[^,}]+/)) e = substr(line, RSTART, RLENGTH)
+      sub(/^from:[[:space:]]*/, "", f); sub(/^to:[[:space:]]*/, "", t); sub(/^for:[[:space:]]*/, "", e)
+      gsub(/^["'\'']|["'\'']?[[:space:]]*$/, "", f); gsub(/^["'\'']|["'\'']?[[:space:]]*$/, "", t)
+      gsub(/^["'\'']|["'\'']?[[:space:]]*$/, "", e)
+      if (f == "" || t == "") { print "BAD " $0; next }
+      print f "|" t "|" e
+    }' "$1"
+}
+
+sandbox() {
+  _ct=$SOURCE/core/templates/claude-settings.json
+  _xt=$SOURCE/core/templates/codex-config.toml
+  if [ ! -f "$_ct" ] && [ ! -f "$_xt" ]; then
+    report skipped .claude/settings.json "this core version has no sandbox templates"
+    return 0
+  fi
+  command -v python3 > /dev/null 2>&1 || die "python3 is needed to merge the sandbox settings"
+  # The TOML merge must parse its result, so it needs tomllib (Python 3.11+); FACTORY_INSTALL_TOML_PYTHON overrides
+  # the search (empty: none), for tests.
+  if [ "${FACTORY_INSTALL_TOML_PYTHON+set}" = set ]; then _tpy=$FACTORY_INSTALL_TOML_PYTHON
+  else
+    _tpy=
+    for _c in python3 python3.14 python3.13 python3.12 python3.11; do
+      if command -v "$_c" > /dev/null 2>&1 && "$_c" -c 'import tomllib' 2> /dev/null; then _tpy=$_c; break; fi
+    done
+  fi
+  for _pair in "$_ct|.claude/settings.json|json" "$_xt|.codex/config.toml|toml"; do
+    _t=${_pair%%|*}; _rest=${_pair#*|}; _rel=${_rest%%|*}; _kind=${_rest#*|}
+    [ -f "$_t" ] || continue
+    safe_dest "$_rel" final
+    _py=python3
+    if [ "$_kind" = toml ]; then
+      if [ -z "$_tpy" ]; then
+        report differs "$_rel" "no Python 3.11+ here to check a TOML merge; a person writes it from the core's codex-config.toml"
+        CONFLICTS=$((CONFLICTS + 1)); continue
+      fi
+      _py=$_tpy
+    fi
+    : > "$WORK/merge.out"
+    _mrc=0
+    rm -f "$WORK/merge.file"
+    "$_py" - "$_kind" "$_t" "$TARGET/$_rel" "$VALUES/SANDBOX_DOMAINS" "$VALUES/SANDBOX_WRITE" "$DRY" "$WORK/merge.file" \
+      > "$WORK/merge.out" <<'PY' || _mrc=$?
+
+import json, os, re, sys
+
+kind, tpl, target, domains_f, write_f, dry, out_path = sys.argv[1:8]
+dry = dry == "1"
+
+def fail(msg):
+    print("error: " + msg)
+    sys.exit(1)
+
+def read_list(path):
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [l.strip() for l in f if l.strip()]
+
+domains = read_list(domains_f)
+writes = read_list(write_f)
+for d in domains:
+    if not re.fullmatch(r"(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+", d):
+        fail("not a host name: %r" % d)
+for w in writes:
+    if not re.fullmatch(r"(~/|/)[^\n\"\\]*", w) or ".." in w.split("/"):
+        fail("not an absolute or ~/ folder: %r" % w)
+
+def write(text):
+    """The result goes to a work file; the shell writes it into the target relative to folder descriptors."""
+    if dry:
+        return
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+def refuse(msg):
+    """Leave the file as it is; a person merges it (exit 3 to the shell)."""
+    print("refused " + msg)
+    sys.exit(3)
+
+if os.path.islink(target):
+    fail("%s is a symlink; not writing through it" % target)
+
+if kind == "json":
+    with open(tpl, encoding="utf-8") as f:
+        t = json.load(f)
+
+    def expand(node):
+        if isinstance(node, dict):
+            return {k: expand(v) for k, v in node.items()}
+        if isinstance(node, list):
+            out = []
+            for x in node:
+                if x == "__FACTORY_SANDBOX_DOMAINS__":
+                    out += domains
+                elif x == "__FACTORY_SANDBOX_WRITE__":
+                    out += writes
+                else:
+                    out.append(expand(x))
+            return out
+        if isinstance(node, str) and "__FACTORY_" in node:
+            fail("unknown placeholder in the template: " + node)
+        return node
+
+    t = expand(t)
+    # Security switches: the factory's value wins over a weaker project value (core/templates/sandbox.md).
+    security = {
+        ("sandbox", "enabled"),
+        ("sandbox", "failIfUnavailable"),
+        ("sandbox", "allowUnsandboxedCommands"),
+        ("permissions", "blockWritesOutsideWorkingDirectories"),
+    }
+    notes = []
+
+    def merge_hooks(c, v, name):
+        """hooks.<event>: the factory's groups. A group that runs only the factory's hook commands is the factory's
+        own, from an earlier core: it is replaced by the core's current group (a security switch), so a changed
+        matcher or timeout never leaves the hook wired twice. Every other group is the project's and stays."""
+        for g in v:
+            if g in c:
+                continue
+            cmds = {h.get("command") for h in g.get("hooks", []) if isinstance(h, dict)}
+            own = [i for i, x in enumerate(c) if isinstance(x, dict) and isinstance(x.get("hooks"), list) and x["hooks"]
+                   and all(isinstance(h, dict) and h.get("command") in cmds for h in x["hooks"])]
+            if own:
+                notes.append("replaced %s: %s -> %s (the factory's hook entry; the core's current one wins)"
+                             % (name, json.dumps(c[own[0]]), json.dumps(g)))
+                c[own[0]] = json.loads(json.dumps(g))
+            else:
+                c.append(json.loads(json.dumps(g)))
+
+    def merge(cur, new, path):
+        for k, v in new.items():
+            p = path + (k,)
+            name = ".".join(p)
+            if k not in cur:
+                cur[k] = json.loads(json.dumps(v))
+                continue
+            c = cur[k]
+            if len(p) == 2 and p[0] == "hooks" and isinstance(c, list) and isinstance(v, list):
+                merge_hooks(c, v, name)
+            elif isinstance(c, dict) and isinstance(v, dict):
+                merge(c, v, p)
+            elif isinstance(c, list) and isinstance(v, list):
+                for x in v:
+                    if x not in c:
+                        c.append(x)
+            elif isinstance(c, (dict, list)) or isinstance(v, (dict, list)):
+                fail("%s has another type than the factory's; a person merges it" % name)
+            elif c != v:
+                if p in security:
+                    notes.append("replaced %s: %s -> %s (a security switch; the factory's value wins)"
+                                 % (name, json.dumps(c), json.dumps(v)))
+                    cur[k] = v
+                else:
+                    notes.append("kept %s: %s (the factory's default is %s)" % (name, json.dumps(c), json.dumps(v)))
+
+    if os.path.exists(target):
+        with open(target, encoding="utf-8") as f:
+            try:
+                cur = json.load(f)
+            except ValueError as e:
+                fail("not valid JSON (%s); a person fixes it first" % e)
+        if not isinstance(cur, dict):
+            fail("not a JSON object")
+        before = json.dumps(cur, sort_keys=True)
+        merge(cur, t, ())
+        if json.dumps(cur, sort_keys=True) == before:
+            print("unchanged")
+        else:
+            write(json.dumps(cur, indent=2, ensure_ascii=False) + "\n")
+            print("merged")
+    else:
+        write(json.dumps(t, indent=2, ensure_ascii=False) + "\n")
+        print("added")
+    for n in notes:
+        print("note " + n)
+    sys.exit(0)
+
+# kind == "toml". Needs tomllib (Python 3.11+): the shell only runs this part with an interpreter that has it.
+# The merge inserts the template's missing lines (top-level keys before the first table, keys at the end of their
+# table, missing tables at the end), replaces a weaker security switch, and then proves the result: it must parse,
+# and parse to exactly the project's settings plus the template's missing keys. Any shape that does not (dotted keys,
+# inline tables, a table defined another way) is refused, and the file is left for a person.
+import tomllib
+
+with open(tpl, encoding="utf-8") as f:
+    tlines = []
+    for line in f.read().splitlines():
+        if line.strip() == "# __FACTORY_SANDBOX_DOMAINS__":
+            indent = line[: len(line) - len(line.lstrip())]
+            tlines += ['%s"%s" = "allow"' % (indent, d) for d in domains]
+        elif "__FACTORY_" in line:
+            fail("unknown placeholder in the template: " + line.strip())
+        else:
+            tlines.append(line)
+rendered = "\n".join(tlines) + "\n"
+try:
+    tdata = tomllib.loads(rendered)
+except tomllib.TOMLDecodeError as e:
+    fail("the rendered template is not valid TOML (%s)" % e)
+
+security = {("sandbox_mode",), ("approval_policy",)}
+
+def expected(cur, new, path=()):
+    out = dict(cur)
+    for k, v in new.items():
+        p = path + (k,)
+        if k not in out:
+            out[k] = v
+        elif isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = expected(out[k], v, p)
+        elif isinstance(out[k], dict) or isinstance(v, dict):
+            refuse("%s: the project's value and the factory's are of different kinds; a person merges it" % ".".join(p))
+        elif p in security:
+            out[k] = v
+    return out
+
+if not os.path.exists(target):
+    write(rendered)
+    print("added")
+    sys.exit(0)
+
+with open(target, encoding="utf-8") as f:
+    cur_text = f.read()
+try:
+    cdata = tomllib.loads(cur_text)
+except tomllib.TOMLDecodeError as e:
+    fail("not valid TOML (%s); a person fixes it first" % e)
+want = expected(cdata, tdata)
+if want == cdata:
+    print("unchanged")
+    sys.exit(0)
+
+def norm_key(k):
+    k = k.strip()
+    if len(k) >= 2 and k[0] == k[-1] and k[0] in "\"'":
+        k = k[1:-1]
+    return k
+
+def entries(lines):
+    """(table, key) -> line index, table -> index of its header, and the order of the tables."""
+    table, keys, headers, order = "", {}, {"": -1}, [""]
+    in_multi = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if in_multi:
+            if in_multi in s:
+                in_multi = None
+            continue
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("["):
+            table = s.split("]", 1)[0].strip("[").strip()
+            headers[table] = i
+            order.append(table)
+            continue
+        if "=" in s:
+            k, v = s.split("=", 1)
+            keys[(table, norm_key(k))] = i
+            v = v.strip()
+            for q in ('"""', "'''"):
+                if v.startswith(q) and v.count(q) == 1:
+                    in_multi = q
+            if v.startswith("[") and v.count("[") > v.count("]"):
+                in_multi = "]"
+    return keys, headers, order
+
+cur = cur_text.splitlines()
+ckeys, cheaders, _ = entries(cur)
+tkeys, _, torder = entries(tlines)
+notes, missing = [], {}
+for (table, key), ti in sorted(tkeys.items(), key=lambda kv: kv[1]):
+    tline = tlines[ti].strip()
+    if (table, key) in ckeys:
+        ci = ckeys[(table, key)]
+        if table == "" and (key,) in security and cdata.get(key) != tdata.get(key):
+            notes.append("replaced %s: %s -> %s (a security switch; the factory's value wins)"
+                         % (key, json.dumps(cdata.get(key)), json.dumps(tdata.get(key))))
+            cur[ci] = tline
+        continue
+    missing.setdefault(table, []).append(tline)
+
+def section_end(lines, table, headers):
+    """Index after the last non-blank line of a table's section."""
+    start = headers[table] + 1
+    end = len(lines)
+    for t, i in headers.items():
+        if start <= i < end and t != table:
+            end = i
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return end
+
+inserts, appended = [], []
+for table in torder:
+    if table not in missing:
+        continue
+    if table in cheaders:
+        if table:
+            idx = section_end(cur, table, cheaders)
+        else:
+            idx = min([i for t, i in cheaders.items() if t] + [len(cur)])
+            while idx > 0 and not cur[idx - 1].strip():
+                idx -= 1
+        inserts.append((idx, missing[table]))
+    else:
+        appended += [""] + ["[%s]" % table] + missing[table]
+for idx, block in sorted(inserts, key=lambda x: -x[0]):
+    cur[idx:idx] = block
+cur += appended
+merged = "\n".join(cur) + "\n"
+try:
+    mdata = tomllib.loads(merged)
+except tomllib.TOMLDecodeError as e:
+    refuse("the merge would not be valid TOML (%s): the file defines a factory table or key in a form this merge does "
+           "not edit (dotted keys, an inline table); a person adds the factory's settings by hand" % e)
+if mdata != want:
+    refuse("the merge would not keep exactly the project's settings plus the factory's; a person adds them by hand")
+write(merged)
+print("merged")
+for n in notes:
+    print("note " + n)
+PY
+    case $_mrc in
+      0) ;;
+      3) report differs "$_rel" "$(sed -n 's/^refused //p' "$WORK/merge.out")"; CONFLICTS=$((CONFLICTS + 1)); continue ;;
+      *) cat "$WORK/merge.out" >&2; die "could not merge $_rel" ;;
+    esac
+    _act=$(head -n 1 "$WORK/merge.out")
+    if [ "$DRY" = 0 ] && [ -f "$WORK/merge.file" ]; then put_file "$WORK/merge.file" "$_rel"; fi
+    report "$_act" "$_rel"
+    sed -n 's/^note //p' "$WORK/merge.out" | while IFS= read -r _n; do
+      printf '      %s\n' "$_n"; [ -z "$REPORT" ] || printf '      %s\n' "$_n" >> "$REPORT"
+    done
+  done
+}
+
+# Two passes: a silent dry pass renders and checks everything first, so an error never leaves a half-done install.
+apply() {
+  [ -n "$SOURCE" ] && [ -n "$TARGET" ] && [ -n "$VALUES" ] || usage
+  [ -z "$DECISIONS" ] || [ -n "$UPDATE_FROM" ] || usage
+  SOURCE=$(abs_dir "$SOURCE"); TARGET=$(abs_dir "$TARGET"); VALUES=$(abs_dir "$VALUES")
+  command -v python3 > /dev/null 2>&1 || die "python3 (standard library only) is needed"
+  TARGET_ID=$(fs_tool id "$TARGET") || exit 1
+  PROPOSALS_ID=-
+  if [ -n "$PROPOSALS" ]; then
+    # Resolved physically through its parent before it is made, so a folder inside the target, or one whose parent
+    # resolves into it, is refused without being created; the folder itself must not be a symlink.
+    case $(basename "$PROPOSALS") in . | .. | /) die "bad proposals folder: $PROPOSALS" ;; esac
+    PROPOSALS=$(abs_dir "$(dirname "$PROPOSALS")")/$(basename "$PROPOSALS")
+    proposals_outside
+    [ ! -L "$PROPOSALS" ] || die "the proposals folder is a symlink: $PROPOSALS"
+    [ ! -e "$PROPOSALS" ] || [ -d "$PROPOSALS" ] || die "the proposals folder is not a folder: $PROPOSALS"
+    mkdir -p "$PROPOSALS" 2> /dev/null || die "cannot make the proposals folder $PROPOSALS"
+    PROPOSALS=$(abs_dir "$PROPOSALS")
+    proposals_outside
+    PROPOSALS_ID=$(fs_tool id "$PROPOSALS") || exit 1
+  fi
+  # A silent dry pass first renders and checks everything, the proposals' paths included (without writing them), so
+  # an error never leaves a half-done install and no proposal is written through a symlink. It runs before a
+  # --dry-run too when there are proposals to write.
+  if [ "$DRY" = 0 ] || [ -n "$PROPOSALS" ]; then
+    _err=$(mktemp "${TMPDIR:-/tmp}/factory-install.XXXXXX")
+    _rc=0
+    (DRY=1 REPORT='' PROPOSE_WRITE=0 && apply_run) > /dev/null 2> "$_err" || _rc=$?
+    case $_rc in
+      0 | 3) rm -f "$_err" ;;
+      *) cat "$_err" >&2; rm -f "$_err"; printf '%s\n' "$prog: nothing was written" >&2; exit "$_rc" ;;
+    esac
+  fi
+  test_hook after-preflight
+  # Proposals are written in a silent pass of their own before anything is written in the target: a proposal refused
+  # then (a folder swapped since the checks) leaves the target exactly as it was.
+  if [ "$DRY" = 0 ] && [ -n "$PROPOSALS" ]; then
+    _err=$(mktemp "${TMPDIR:-/tmp}/factory-install.XXXXXX")
+    _rc=0
+    (DRY=1 REPORT='' PROPOSE_WRITE=1 && apply_run) > /dev/null 2> "$_err" || _rc=$?
+    case $_rc in
+      0 | 3) rm -f "$_err" ;;
+      *) cat "$_err" >&2; rm -f "$_err"; printf '%s\n' "$prog: nothing was written in the target" >&2; exit "$_rc" ;;
+    esac
+    PROPOSE_WRITE=0
+  fi
+  apply_run
+}
+
+apply_run() {
+  [ -z "$REPORT" ] || : > "$REPORT"
+  command -v python3 > /dev/null 2>&1 || die "python3 (standard library only) is needed to check the rendered workflows"
+  VERSION=$(read_version)
+  T=$SOURCE/core/templates
+  [ -d "$T" ] || die "no core/templates in the source $SOURCE"
+
+  # --update-from reads the pin from a strict, documented subset (a positive rule, not a list of bad spellings): at
+  # the top level of factory.yaml every line is blank, a comment, a leading "---", or a plain key (letters, digits,
+  # "_", "-", "." before the colon); nested lines are indented with spaces. So a quoted, escaped or tagged key, an
+  # explicit ? key, a flow map or list, a tab, or text of a multi-line string at the start of a line is refused, and
+  # exactly one top-level key is `factory`, a plain `factory: X.Y.Z` equal to the source's version. Anything else is
+  # refused before a write: a pin this cannot read would stay behind while the core and the lock move on.
+  if [ -n "$UPDATE_FROM" ]; then
+    [ -f "$TARGET/factory.yaml" ] || die "--update-from needs the target's factory.yaml with its factory: pin"
+    _odd=$(awk 'NR == 1 && $0 == "---" { next }
+                /^$/ || /^#/ || /^ / { next }
+                !/^[A-Za-z_][A-Za-z0-9_.-]*:([ ]|$)/ { print NR; exit }' "$TARGET/factory.yaml")
+    [ -z "$_odd" ] || die "factory.yaml line $_odd is not a plain top-level key, so the factory: pin cannot be read safely (quoted, escaped or tagged keys, ? keys, flow maps, tabs and multi-line text at the start of a line are not read); nothing was written"
+    _pins=$(grep -c '^factory:' "$TARGET/factory.yaml" || true)
+    [ "$_pins" = 1 ] || die "factory.yaml needs exactly one factory: pin at the start of a line (found $_pins), so nothing was written"
+    _have=$(sed -n -E 's/^factory:[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*(#.*)?$/\1/p' "$TARGET/factory.yaml")
+    [ -n "$_have" ] || die "factory.yaml's factory: pin is not a plain X.Y.Z, so nothing was written"
+  fi
+  # Another pinned version is factory-update's job, not init's.
+  if [ -f "$TARGET/factory.yaml" ]; then
+    _have=$(sed -n 's/^factory:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$TARGET/factory.yaml" | head -n 1)
+    if [ -n "$_have" ] && [ "$_have" != "$VERSION" ]; then
+      if [ -n "$UPDATE_FROM" ]; then
+        printf '%s\n' "$prog: factory.yaml pins core $_have; with --update-from, factory.yaml pins the source's version $VERSION first (factory-update sets it)" >&2
+      else
+        printf '%s\n' "$prog: this repo pins core $_have and the source is $VERSION: use factory-update, not factory-init" >&2
+      fi
+      exit 4
+    fi
+  fi
+  # --update-from: the lock must record exactly that version (factory-update has pinned the new one already).
+  if [ -n "$UPDATE_FROM" ]; then
+    update_lock
+  elif [ -f "$TARGET/.factory/core.lock" ]; then
+    _have=$(sed -n 's/^version:[[:space:]]*//p' "$TARGET/.factory/core.lock" | head -n 1)
+    if [ -n "$_have" ] && [ "$_have" != "$VERSION" ]; then
+      printf '%s\n' "$prog: .factory/core.lock records core $_have and the source is $VERSION: use factory-update" >&2
+      exit 4
+    fi
+  fi
+
+  # Answers.
+  REPO_V=$(val REPO) || die "values: REPO is required"
+  valid_repo "$REPO_V" || die "values: REPO is not owner/name: $REPO_V"
+  LANGS=$(val LANGUAGES) || die "values: LANGUAGES is required"
+  LANGS=$(printf '%s' "$LANGS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+  [ -n "$LANGS" ] || die "values: LANGUAGES is empty"
+  for _l in $LANGS; do
+    printf '%s' "$_l" | grep -Eq '^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$' || die "values: not a BCP 47 tag: $_l"
+  done
+  # The factory repo this core comes from, so lessons and updates know where to go. A re-run keeps the lock's.
+  if UPSTREAM=$(val UPSTREAM 2> /dev/null) && [ -n "$UPSTREAM" ]; then :
+  elif [ -f "$TARGET/.factory/core.lock" ]; then UPSTREAM=$(sed -n 's/^upstream:[[:space:]]*//p' "$TARGET/.factory/core.lock" | head -n 1)
+  else UPSTREAM=; fi
+  [ -n "$UPSTREAM" ] || die "values: UPSTREAM (the factory repo, owner/name) is required"
+  valid_repo "$UPSTREAM" || die "values: UPSTREAM is not owner/name: $UPSTREAM"
+  MODE=$(val MODE 2> /dev/null || echo solo)
+  case $MODE in solo | team) ;; *) die "values: MODE is solo or team, not $MODE" ;; esac
+  val VERIFY > /dev/null || die "values: VERIFY is required"
+  [ -n "$(val VERIFY)" ] || die "values: VERIFY is empty"
+  for _k in CODE_LANGUAGE UNCONFIRMED_MARKER; do
+    { _x=$(val $_k) && [ -n "$_x" ]; } || die "values: $_k is required"
+  done
+  ROLES=
+  if [ -d "$VALUES/roles" ]; then
+    for _d in "$VALUES"/roles/*/; do
+      [ -d "$_d" ] || continue
+      _r=$(basename "$_d"); valid_slug "$_r" || die "values: bad role name: $_r"
+      [ -n "$(val_lines OWNS "$_d")" ] || die "values: roles/$_r/OWNS is required"
+      ROLES="$ROLES $_r"
+    done
+  fi
+  [ "$MODE" = solo ] || [ -n "$ROLES" ] || die "values: team mode needs at least one role"
+  _ci=$(ci_answers) || exit 1
+  CI_PR_EMPTY=$(printf '%s\n' "$_ci" | sed -n 's/^pr_empty //p')
+  CI_NIGHTLY=$(printf '%s\n' "$_ci" | sed -n 's/^nightly //p')
+  RULES_MERGE=$(val RULES_MERGE 2> /dev/null || echo propose)
+  case $RULES_MERGE in add | propose) ;; *) die "values: RULES_MERGE is add or propose, not $RULES_MERGE" ;; esac
+  CI_WORKFLOWS=$(val CI_WORKFLOWS 2> /dev/null || true)
+  case $CI_WORKFLOWS in '' | install | propose) ;; *) die "values: CI_WORKFLOWS is install or propose, not $CI_WORKFLOWS" ;; esac
+  PACKS=$(val_lines PACKS)
+  for _p in $PACKS; do
+    valid_slug "$_p" || die "values: bad pack name: $_p"
+    [ -d "$SOURCE/packs/$_p/skills" ] || die "pack $_p is not in this core version"
+  done
+  TARGETS='' RECIPES=''
+  if [ -d "$VALUES/deploy" ]; then
+    for _d in "$VALUES"/deploy/*/; do
+      [ -d "$_d" ] || continue
+      _t=$(basename "$_d"); valid_slug "$_t" || die "values: bad deploy target name: $_t"
+      _r=$(cat "$_d/RECIPE" 2> /dev/null) || die "values: deploy/$_t/RECIPE is required"
+      valid_slug "$_r" || die "values: bad recipe name: $_r"
+      [ -f "$SOURCE/recipes/$_r/recipe.yaml" ] || die "recipe $_r is not in this core version"
+      TARGETS="$TARGETS $_t"
+      case " $RECIPES " in *" $_r "*) ;; *) RECIPES="$RECIPES $_r" ;; esac
+    done
+  fi
+
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/factory-install.XXXXXX")
+  trap 'rm -rf "$WORK"' EXIT
+  MANIFEST=$WORK/manifest
+  : > "$MANIFEST"
+  : > "$WORK/target.queue"; : > "$WORK/proposals.queue"; : > "$WORK/gone"; QN=0
+  V=$WORK/v
+  brownfield_snapshot
+  [ -z "$UPDATE_FROM" ] || update_plan
+  # The factory's CI next to the project's own would run the same checks twice: proposed unless the person asks.
+  if [ -z "$CI_WORKFLOWS" ]; then
+    if [ -s "$WORK/pre-workflows" ]; then
+      CI_WORKFLOWS=propose
+      CI_WHY="the repo has its own CI ($(awk 'NF { printf "%s%s", sep, $0; sep = ", " }' "$WORK/pre-workflows")); CI_WORKFLOWS=install installs it"
+    else CI_WORKFLOWS=install; fi
+  else CI_WHY="CI_WORKFLOWS is propose"; fi
+
+  # 1. Overlay files the project owns: written once, never overwritten.
+  _setup_drop=
+  val SETUP > /dev/null 2>&1 || _setup_drop=SETUP.drop=1
+  mkvals "$V" '' "VERSION=$VERSION" "REPO=$REPO_V" "LANGUAGES=$(printf '%s\n' "$LANGS" | paste -sd, - | sed 's/,/, /g')" \
+    "MODE=$MODE" ${_setup_drop:+"$_setup_drop"}
+  render "$T/factory.yaml" "$WORK/factory.yaml" "$V" || die "could not render factory.yaml"
+  # A strict subset, not a YAML reading: only a top-level line starting `factory:` marks the factory's file. Any other
+  # spelling is reported for a person (exit 3), never taken as the factory's; the file is kept either way.
+  if [ -f "$TARGET/factory.yaml" ] && [ ! -L "$TARGET/factory.yaml" ] && ! grep -q '^factory:' "$TARGET/factory.yaml"; then
+    report kept factory.yaml "it has no factory: line, so it may be another tool's file; a person decides"
+    CONFLICTS=$((CONFLICTS + 1))
+  else
+    install_file "$WORK/factory.yaml" factory.yaml project
+  fi
+
+  _pn=$(val PROJECT_NAME 2> /dev/null || printf '%s' "${REPO_V#*/}")
+  # The string catalogue: its lines in AGENTS.md and the review checklist are kept only when the repo has one; without
+  # one, the "consistent with the existing copy" lines are kept instead.
+  _cat=$(val_lines STRING_CATALOGUE | as_code_list)
+  if [ -n "$_cat" ]; then _cv1="CATALOGUE=$_cat" _cv2=IF_CATALOGUE= _cv3=IF_NO_CATALOGUE.drop=1
+  else _cv1=CATALOGUE.drop=1 _cv2=IF_CATALOGUE.drop=1 _cv3=IF_NO_CATALOGUE=; fi
+  mkvals "$V" '' "PROJECT_NAME=$_pn" "USER_LANGUAGES=$(printf '%s\n' "$LANGS" | as_code_list)" \
+    "PLAN_PATH=$(path_value PLAN_PATH)" "DECISIONS_PATH=$(path_value DECISIONS_PATH)" \
+    "SPIKES_PATH=$(path_value SPIKES_PATH)" "$_cv1" "$_cv2" "$_cv3"
+  render "$T/AGENTS.md" "$WORK/AGENTS.md" "$V" text || die "could not render AGENTS.md"
+  render "$T/review-checklist.md" "$WORK/review-checklist.md" "$V" text || die "could not render the review checklist"
+  install_file "$WORK/AGENTS.md" AGENTS.md project
+  if [ "$PRE_CLAUDE" = 0 ] && agents_links_claude; then
+    report kept CLAUDE.md "missing, and AGENTS.md is a symlink to it: the factory's CLAUDE.md would point back at itself; a person writes the rules there"
+    CONFLICTS=$((CONFLICTS + 1))
+  else
+    install_file "$T/CLAUDE.md" CLAUDE.md project
+  fi
+  rules_merge "$WORK/AGENTS.md"
+
+  for _r in $ROLES; do
+    _skills=$(val_lines SKILLS "$VALUES/roles/$_r" | as_code_list)
+    mkvals "$V" '' "ROLE=$_r" "ROLE_OWNS=$(val_lines OWNS "$VALUES/roles/$_r" | as_code_list)" \
+      "ROLE_SKILLS=${_skills:-none}"
+    render "$T/role.md" "$WORK/role.md" "$V" text || die "could not render the role file for $_r"
+    install_file "$WORK/role.md" ".factory/roles/$_r.md" project
+  done
+  install_file "$WORK/review-checklist.md" .factory/review-checklist.md project
+  if _pt=$(existing_pr_template); then
+    if [ "$_pt" = .github/pull_request_template.md ]; then install_file "$T/pull_request_template.md" "$_pt" project
+    else report kept "$_pt" "the project's PR template; the factory's is not added next to it"; fi
+  else
+    install_file "$T/pull_request_template.md" .github/pull_request_template.md project
+  fi
+
+  # 2. CI workflows: core files, rendered from the answers.
+  _setup=$(val SETUP 2> /dev/null || true)
+  mkvals "$V" '' "SETUP=$_setup" "TEST_WORKERS=$(val TEST_WORKERS 2> /dev/null || echo 2)" \
+    "CI_PR_VERIFY=$(val CI_PR_VERIFY 2> /dev/null || echo true)" "PR_CHECKS=$(val PR_CHECKS 2> /dev/null || echo '[]')"
+  # An empty ci.pr (no verify, no checks) needs no workflow: even its job that only selects checks costs minutes.
+  if [ "$CI_PR_EMPTY" = 1 ]; then
+    report skipped .github/workflows/factory-ci.yml "ci.pr is empty, so no workflow runs on a pull request"
+  else
+    render "$T/workflows/factory-ci.yml" "$WORK/factory-ci.yml" "$V" || die "could not render factory-ci.yml"
+    ci_file "$WORK/factory-ci.yml" .github/workflows/factory-ci.yml
+  fi
+  if [ "$CI_NIGHTLY" = 1 ]; then
+    render "$T/workflows/factory-nightly.yml" "$WORK/factory-nightly.yml" "$V" || die "could not render factory-nightly.yml"
+    ci_file "$WORK/factory-nightly.yml" .github/workflows/factory-nightly.yml
+  fi
+
+  # 3. The core itself.
+  core_map > "$WORK/map"
+  while IFS='|' read -r _s _d; do
+    if [ -x "$SOURCE/$_s" ]; then install_file "$SOURCE/$_s" "$_d" core x
+    else install_file "$SOURCE/$_s" "$_d" core; fi
+  done < "$WORK/map"
+  reserved_names
+  if [ -n "$PRE_FACTORY" ]; then
+    report kept .factory/ "there before this install, without a core.lock (it holds $PRE_FACTORY): left as it is, next to the core's files; a person checks it is not another tool's folder"
+    CONFLICTS=$((CONFLICTS + 1))
+  fi
+
+  # 4. Deploy recipes: their templates, rendered per target and environment.
+  for _t in $TARGETS; do
+    _r=$(cat "$VALUES/deploy/$_t/RECIPE")
+    _envs=$(val_lines ENVIRONMENTS "$VALUES/deploy/$_t")
+    [ -n "$_envs" ] || die "values: deploy/$_t/ENVIRONMENTS is required"
+    mkvals "$V" "$VALUES/deploy/$_t/values" "TARGET=$_t" "SETUP=$_setup" "RECIPE_DIR=.factory/recipes/$_r"
+    recipe_templates "$SOURCE/recipes/$_r/recipe.yaml" > "$WORK/rt"
+    ! grep -q '^BAD ' "$WORK/rt" || die "recipes/$_r/recipe.yaml: a templates entry has no from or to"
+    while IFS='|' read -r _from _to _for; do
+      case " $(words "$_envs") " in *" $_for "*) ;; *) [ -z "$_for" ] || continue ;; esac
+      printf '%s\n' "$_to" > "$WORK/to.tpl"
+      render "$WORK/to.tpl" "$WORK/to.out" "$V" text || die "recipes/$_r: could not render the path $_to"
+      _dest=$(cat "$WORK/to.out")
+      case $_dest in /* | *..* | '') die "recipes/$_r: bad destination $_dest" ;; esac
+      case $_from in /* | *..*) die "recipes/$_r: bad template $_from" ;; esac
+      case $_dest in *.yml | *.yaml) _m=yaml ;; *) _m=text ;; esac
+      render "$SOURCE/recipes/$_r/$_from" "$WORK/recipe.out" "$V" "$_m" || die "recipes/$_r: could not render $_from for $_t"
+      install_file "$WORK/recipe.out" "$_dest" core
+    done < "$WORK/rt"
+  done
+
+  [ -z "$UPDATE_FROM" ] || update_removals
+  project_workflows
+
+  # 5. .agents/skills points to .claude/skills, so Codex finds the same skills.
+  safe_dest .agents/skills
+  if [ -L "$TARGET/.agents/skills" ]; then
+    if [ "$(readlink "$TARGET/.agents/skills")" = ../.claude/skills ]; then report unchanged .agents/skills
+    else report kept .agents/skills "a symlink to $(readlink "$TARGET/.agents/skills"), not ../.claude/skills"; CONFLICTS=$((CONFLICTS + 1)); fi
+  elif [ -e "$TARGET/.agents/skills" ]; then
+    report kept .agents/skills "a real folder; it should point to ../.claude/skills"; CONFLICTS=$((CONFLICTS + 1))
+  else
+    [ "$DRY" = 1 ] || printf 'link\t-\t.agents/skills\t../.claude/skills\n' >> "$WORK/target.queue"
+    report linked .agents/skills "-> ../.claude/skills"
+  fi
+
+  # 6. Hooks, sandbox and permissions: merged with what is there (merge_hooks: the factory's hook entries).
+  sandbox
+
+  # 7. The lock: the core version and every core file's hash as the core ships it.
+  {
+    echo '# The factory core installed in this repo: its version, the factory repo it comes from (where updates come'
+    echo '# from and general lessons go), and the sha256 of every core file as the core ships it. Written by'
+    echo '# factory-init and factory-update; never edit it by hand. factory doctor compares the files with it, so a hand'
+    echo '# edit to a core file shows up.'
+    echo "version: $VERSION"
+    echo "upstream: $UPSTREAM"
+    LC_ALL=C sort -k2 -u "$MANIFEST"
+  } > "$WORK/core.lock"
+  safe_dest .factory/core.lock final
+  if [ -f "$TARGET/.factory/core.lock" ] && cmp -s "$WORK/core.lock" "$TARGET/.factory/core.lock"; then
+    report unchanged .factory/core.lock
+  else
+    _a=added; [ ! -f "$TARGET/.factory/core.lock" ] || _a=updated
+    [ "$DRY" = 1 ] || put_file "$WORK/core.lock" .factory/core.lock
+    report "$_a" .factory/core.lock "core $VERSION from $UPSTREAM, $(wc -l < "$MANIFEST" | tr -d ' ') files"
+  fi
+
+  flush_writes
+
+  if [ "$CONFLICTS" -gt 0 ]; then
+    printf '%s\n' "$prog: done, but $CONFLICTS path(s) differ from the core or need a person (lines marked differs or kept with a reason)" >&2
+    exit 3
+  fi
+}
+
+# --- labels -----------------------------------------------------------------------------------------------------------
+cr=$(printf '\r')
+# subst STR FROM TO: every FROM in STR replaced by TO, in $_sb_r (no command substitution, so trailing newlines stay).
+subst() {
+  _sb_s=$1 _sb_r=
+  while :; do
+    case $_sb_s in
+      *"$2"*) _sb_r=$_sb_r${_sb_s%%"$2"*}$3; _sb_s=${_sb_s#*"$2"} ;;
+      *) _sb_r=$_sb_r$_sb_s; break ;;
+    esac
+  done
+}
+# A label's description as gh's @tsv gives it (\\, \t, \n, \r escaped) back to its own text, in $_ld_r.
+label_desc_decode() {
+  _ld_s=$1 _ld_r=
+  while :; do
+    case $_ld_s in
+      *'\'?*)
+        _ld_r=$_ld_r${_ld_s%%'\'*}; _ld_s=${_ld_s#*'\'}
+        case $_ld_s in
+          t*) _ld_r="$_ld_r	" ;;
+          n*) _ld_r="$_ld_r$newline" ;;
+          r*) _ld_r="$_ld_r$cr" ;;
+          '\'*) _ld_r="$_ld_r\\" ;;
+          *) _ld_r="$_ld_r\\${_ld_s%"${_ld_s#?}"}" ;;
+        esac
+        _ld_s=${_ld_s#?} ;;
+      *) _ld_r=$_ld_r$_ld_s; break ;;
+    esac
+  done
+}
+# The one encoding of a description in a report line (and so in the update PR): between double quotes, with \ first,
+# then ", tab, newline and carriage return escaped as \\, \", \t, \n, \r. Reversible, and always one line.
+label_desc_quote() {
+  subst "$1" '\' '\\'; subst "$_sb_r" '"' '\"'; subst "$_sb_r" '	' '\t'; subst "$_sb_r" "$newline" '\n'
+  subst "$_sb_r" "$cr" '\r'
+  _lq_r="\"$_sb_r\""
+}
+
+labels() {
+  [ -n "$SOURCE" ] && [ -n "$REPO" ] && [ -n "$VALUES" ] || usage
+  valid_repo "$REPO" || die "not owner/name: $REPO"
+  SOURCE=$(abs_dir "$SOURCE"); VALUES=$(abs_dir "$VALUES")
+  _ly=$SOURCE/core/templates/labels.yaml
+  [ -f "$_ly" ] || die "no core/templates/labels.yaml in the source"
+  _roles=
+  if [ -d "$VALUES/roles" ]; then
+    for _d in "$VALUES"/roles/*/; do [ -d "$_d" ] || continue; _r=$(basename "$_d"); valid_slug "$_r" || die "bad role: $_r"; _roles="$_roles $_r"; done
+  fi
+  if [ -f "$VALUES/HUNTER_AREAS" ]; then _areas=$(val_lines HUNTER_AREAS); else _areas=$_roles; fi
+  for _a in $_areas; do valid_slug "$_a" || die "bad hunter area: $_a"; done
+  _prev=$(val_lines PREVIEW_LABELS)
+  for _p in $_prev; do printf '%s' "$_p" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9:_.-]*$' || die "bad preview label: $_p"; done
+  W=$(mktemp -d "${TMPDIR:-/tmp}/factory-install.XXXXXX")
+  trap 'rm -rf "$W"' EXIT
+
+  # name<TAB>color<TAB>description, expanded from the overlay, first of each name (case-insensitive) wins.
+  awk -v roles="$_roles" -v areas="$(words "$_areas")" -v previews="$(words "$_prev")" '
+    function field(line, key,   m) {
+      if (!match(line, key ": \"[^\"]*\"")) return "\001"
+      m = substr(line, RSTART, RLENGTH); sub("^" key ": \"", "", m); sub("\"$", "", m); return m
+    }
+    function emit(n, c, d) { if (!(tolower(n) in seen)) { seen[tolower(n)] = 1; print n "\t" c "\t" d } }
+    function expand(list, ph, n, c, d,   k, items, nn, dd) {
+      k = split(list, items, " ")
+      for (i = 1; i <= k; i++) {
+        if (items[i] == "") continue
+        if (ph == "__FACTORY_HUNTER_AREA__" && items[i] == "process") continue
+        nn = n; dd = d; gsub(ph, items[i], nn); gsub(ph, items[i], dd); emit(nn, c, dd)
+      }
+    }
+    /^labels:/ { sec = "l"; next }
+    /^per_role:/ { sec = "r"; next }
+    /^per_hunter_area:/ { sec = "a"; next }
+    /^per_preview_label:/ { sec = "p"; next }
+    /^[^[:space:]#]/ { sec = "" }
+    sec != "" && /^[[:space:]]*-[[:space:]]*\{/ {
+      n = field($0, "name"); c = field($0, "color"); d = field($0, "description")
+      if (n == "\001" || c == "\001" || d == "\001" || c !~ /^[0-9A-Fa-f]{6}$/) { print "BAD\t" $0; bad = 1; next }
+      if (sec == "l") emit(n, c, d)
+      else if (sec == "r") expand(roles, "__FACTORY_ROLE__", n, c, d)
+      else if (sec == "a") expand(areas, "__FACTORY_HUNTER_AREA__", n, c, d)
+      else if (sec == "p") expand(previews, "__FACTORY_PREVIEW_LABEL__", n, c, d)
+    }' "$_ly" > "$W/want"
+  ! grep -q '^BAD' "$W/want" || die "labels.yaml has a line this script cannot read: $(grep '^BAD' "$W/want" | head -n 1)"
+  ! grep -q '__FACTORY_' "$W/want" || die "a label still holds a placeholder"
+  [ -s "$W/want" ] || die "no labels read from labels.yaml"
+  # Every --use-factory name must be one of the factory's labels (case-insensitive, as GitHub compares them).
+  printf '%s' "$USE_FACTORY" > "$W/use"
+  _unknown=$(awk -F '\t' 'NR == FNR { w[tolower($1)] = 1; next } $0 != "" && !(tolower($0) in w) { print; exit }' "$W/want" "$W/use")
+  [ -z "$_unknown" ] || die "--use-factory $_unknown: not one of the factory's labels"
+
+  gh label list --repo "$REPO" --limit 1000 --json name,color,description \
+    --jq '.[] | [.name, .color, .description] | @tsv' > "$W/have" || die "could not list the labels of $REPO"
+
+  _n=0 _same=0
+  while IFS='	' read -r _name _color _desc; do
+    _n=$((_n + 1))
+    _cur=$(awk -F '\t' -v n="$_name" 'tolower($1) == tolower(n) { print $2 "\t" $3; exit }' "$W/have")
+    if [ -z "$_cur" ]; then
+      [ "$DRY" = 1 ] || gh label create "$_name" --repo "$REPO" --color "$_color" --description "$_desc" > /dev/null \
+        || die "could not create the label $_name"
+      report created "label $_name"
+    else
+      _cc=${_cur%%	*}
+      label_desc_decode "${_cur#*	}"; _cd=$_ld_r
+      if [ "$(printf '%s' "$_cc" | tr 'A-F' 'a-f')" = "$(printf '%s' "$_color" | tr 'A-F' 'a-f')" ] && [ "$_cd" = "$_desc" ]; then
+        _same=$((_same + 1))
+      elif [ "$KEEP_LABELS" = 1 ] && ! awk -v n="$_name" 'tolower($0) == tolower(n) { f = 1 } END { exit !f }' "$W/use"; then
+        label_desc_quote "$_cd"; _qo=$_lq_r; label_desc_quote "$_desc"; _qn=$_lq_r
+        report kept "label $_name" "the project's colour or description; the project's is $_cc, $_qo; the factory's is $_color, $_qn"
+      else
+        [ "$DRY" = 1 ] || gh label edit "$_name" --repo "$REPO" --color "$_color" --description "$_desc" > /dev/null \
+          || die "could not update the label $_name"
+        label_desc_quote "$_cd"; _qo=$_lq_r; label_desc_quote "$_desc"; _qn=$_lq_r
+        report updated "label $_name" "colour or description; was $_cc, $_qo; now $_color, $_qn"
+      fi
+    fi
+  done < "$W/want"
+  report unchanged "$_same of $_n labels"
+}
+
+# --- status issue -----------------------------------------------------------------------------------------------------
+status_issue() {
+  [ -n "$REPO" ] || usage
+  valid_repo "$REPO" || die "not owner/name: $REPO"
+  W=$(mktemp -d "${TMPDIR:-/tmp}/factory-install.XXXXXX")
+  trap 'rm -rf "$W"' EXIT
+  # Every state: a closed status issue still holds the board's records, so it is never replaced by a second one.
+  gh issue list --repo "$REPO" --label factory:status --state all --limit 100 --json number,state \
+    --jq '.[] | "\(.number) \(.state)"' > "$W/found" || die "could not look for the status issue in $REPO"
+  ! grep -Evq '^[0-9]+ (OPEN|CLOSED)$' "$W/found" || die "unexpected answer while looking for the status issue"
+  _open=$(awk '$2 == "OPEN" { print $1 }' "$W/found")
+  _closed=$(awk '$2 == "CLOSED" { print $1 }' "$W/found")
+  _count=$(printf '%s' "$_open" | grep -c '^[0-9]' || true)
+  case $ADOPT in '' | *[!0-9]*) [ -z "$ADOPT" ] || die "--adopt takes an issue number, not $ADOPT" ;; esac
+  case $NOT_STATUS in *[!0-9,]*) die "--not-status takes issue numbers, not ${NOT_STATUS#,}" ;; esac
+  if [ "$_count" -eq 1 ]; then
+    [ -z "$ADOPT" ] || [ "$ADOPT" = "$_open" ] || die "#$_open already carries factory:status; it stays the status issue, #$ADOPT is not adopted"
+    report unchanged "status issue #$_open" "its body is never rewritten"
+    return 0
+  fi
+  if [ "$_count" -gt 1 ]; then
+    report differs "status issue" "$_count open issues carry factory:status: $(words "$_open"); a person keeps one"
+    exit 3
+  fi
+  # No open issue carries the label. An open issue that looks like a status board is never doubled: a person says
+  # whether it is the board (--adopt) or not (--not-status).
+  # shellcheck disable=SC2016 # a jq program, not shell
+  gh issue list --repo "$REPO" --state open --limit 1000 --json number,title \
+    --jq '.[] | "\(.number)\t\(.title | gsub("[\t\r\n]"; " "))"' > "$W/open" || die "could not list the open issues of $REPO"
+  ! grep -Evq '^[0-9]+	' "$W/open" || die "unexpected answer while listing the open issues"
+  if [ -n "$ADOPT" ]; then
+    awk -F '\t' -v n="$ADOPT" '$1 == n { f = 1 } END { exit !f }' "$W/open" || die "#$ADOPT is not an open issue of $REPO"
+    if [ "$DRY" = 0 ]; then
+      gh issue edit "$ADOPT" --repo "$REPO" --add-label factory:status > /dev/null || die "could not label #$ADOPT"
+    fi
+    report updated "status issue #$ADOPT" "labelled factory:status; its title and body are left as they are"
+    if [ "$DRY" = 1 ]; then report updated "status issue #$ADOPT" "pinned"
+    elif gh issue pin "$ADOPT" --repo "$REPO" > /dev/null 2>&1; then report updated "status issue #$ADOPT" "pinned"
+    else printf '%s\n' "$prog: could not pin issue #$ADOPT; pin it by hand" >&2; fi
+    return 0
+  fi
+  status_lookalikes "$W/open" "$NOT_STATUS," > "$W/like"
+  if [ -s "$W/like" ]; then
+    report differs "status issue" "open issues that look like a status board: $(awk -F '\t' '{ printf "%s#%s \"%s\"", sep, $1, $2; sep = ", " }' "$W/like"); a person decides: --adopt N makes one the board, --not-status N says it is not one; no new one is made"
+    exit 3
+  fi
+  if [ -n "$_closed" ]; then
+    report differs "status issue" "only closed issues carry factory:status: $(words "$_closed"); a person reopens one or decides; no new one is made"
+    exit 3
+  fi
+  # The fixed note: the lead never rewrites it (decision 30); status updates are comments.
+  cat > "$W/body" <<'EOF'
+This issue is the factory's status board. **The latest status is the newest comment headed "Status" by the lead**;
+older ones are collapsed. Comment here to reach the lead.
+EOF
+  if [ "$DRY" = 1 ]; then report created "status issue" "Factory status, labelled factory:status, pinned"; return 0; fi
+  _url=$(gh issue create --repo "$REPO" --title "Factory status" --label factory:status --body-file "$W/body") \
+    || die "could not create the status issue"
+  _num=$(printf '%s\n' "$_url" | sed -n 's#.*/issues/\([0-9][0-9]*\)$#\1#p' | tail -n 1)
+  [ -n "$_num" ] || die "created the status issue but could not read its number from: $_url"
+  report created "status issue #$_num"
+  if gh issue pin "$_num" --repo "$REPO" > /dev/null 2>&1; then report updated "status issue #$_num" "pinned"
+  else printf '%s\n' "$prog: could not pin issue #$_num; pin it by hand" >&2; fi
+}
+
+# status_lookalikes FILE SKIP: the "<number><TAB><title>" lines of FILE whose title looks like a status board, minus the
+# numbers in SKIP (",1,2,"). A title looks like one when, lower-cased and split into words of letters and digits, it is
+# just "status", or holds "status" and one of factory, board, build, project, agent, agents, lead, dashboard, tracker.
+# A false match only means a person is asked.
+status_lookalikes() {
+  awk -F '\t' -v skip=",$2" '
+    {
+      n = $1; t = tolower(substr($0, length(n) + 2)); gsub(/[^a-z0-9]+/, " ", t); t = " " t " "
+      if (index(skip, "," n ",")) next
+      if (!index(t, " status ")) next
+      if (t == " status " || t ~ / (factory|board|build|project|agent|agents|lead|dashboard|tracker) /) print n "\t" substr($0, length(n) + 2)
+    }' "$1"
+}
+
+# --- pin --------------------------------------------------------------------------------------------------------------
+pin() {
+  _repo=$1 _tag=$2
+  valid_repo "$_repo" || die "not owner/repo: $_repo"
+  printf '%s' "$_tag" | grep -Eq '^[A-Za-z0-9_.+-]+$' || die "not a tag: $_tag"
+  _o=$(gh api "repos/$_repo/git/ref/tags/$_tag" --jq '.object.type + " " + .object.sha') || die "no tag $_tag in $_repo"
+  _i=0
+  while [ "${_o%% *}" = tag ] && [ $_i -lt 3 ]; do # an annotated tag points at a tag object first
+    _o=$(gh api "repos/$_repo/git/tags/${_o#* }" --jq '.object.type + " " + .object.sha') || die "could not read tag $_tag"
+    _i=$((_i + 1))
+  done
+  [ "${_o%% *}" = commit ] || die "$_repo $_tag does not resolve to a commit"
+  _sha=${_o#* }
+  printf '%s' "$_sha" | grep -Eq '^[0-9a-f]{40}$' || die "not a full commit SHA: $_sha"
+  printf '%s@%s # %s\n' "$_repo" "$_sha" "$_tag"
+}
+
+# --- check ------------------------------------------------------------------------------------------------------------
+check() {
+  [ -n "$TARGET" ] || usage
+  TARGET=$(abs_dir "$TARGET")
+  _lock=$TARGET/.factory/core.lock
+  [ -f "$_lock" ] || die "no .factory/core.lock in $TARGET"
+  _rc=0 _ok=0
+  W=$(mktemp -d "${TMPDIR:-/tmp}/factory-install.XXXXXX")
+  trap 'rm -rf "$W"' EXIT
+  # Every line of the lock is a comment, version:, upstream: or "<sha256>  <relative path>"; anything else is refused.
+  if grep -Ev '^(#.*|version: [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?|upstream: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[0-9a-f]{64}  [^/[:space:]][^[:space:]]*)$' "$_lock" > "$W/bad"; then
+    sed 's/^/malformed lock line  /' "$W/bad"; _rc=3
+  fi
+  grep -E '^[0-9a-f]{64}  ' "$_lock" > "$W/entries" || true
+  while read -r _h _p; do
+    case /$_p/ in */../* | */./* | *//*) echo "unsafe path in the lock  $_p"; _rc=3; continue ;; esac
+    if [ -L "$TARGET/$_p" ]; then echo "edited  $_p (a symlink)"; _rc=3
+    elif [ ! -f "$TARGET/$_p" ]; then echo "missing  $_p"; _rc=3
+    elif [ "$(hash_file "$TARGET/$_p")" != "$_h" ]; then echo "edited  $_p"; _rc=3
+    else _ok=$((_ok + 1)); fi
+  done < "$W/entries"
+  for _f in factory.yaml AGENTS.md CLAUDE.md .github/pull_request_template.md .factory/review-checklist.md \
+    .claude/settings.json .codex/config.toml; do
+    [ -f "$TARGET/$_f" ] || continue
+    ! grep -q '__FACTORY_[A-Z0-9_]*__' "$TARGET/$_f" || { echo "placeholder  $_f"; _rc=3; }
+  done
+  for _f in "$TARGET"/.factory/roles/*.md "$TARGET"/.github/workflows/factory-*.yml; do
+    [ -f "$_f" ] || continue
+    ! grep -q '__FACTORY_[A-Z0-9_]*__' "$_f" || { echo "placeholder  ${_f#"$TARGET"/}"; _rc=3; }
+  done
+  _up=$(sed -n 's/^upstream:[[:space:]]*//p' "$_lock")
+  if [ "$(printf '%s\n' "$_up" | grep -c .)" != 1 ] || ! valid_repo "$_up"; then
+    echo "no upstream  .factory/core.lock must name the factory repo once, as owner/name"; _rc=3; _up=''
+  fi
+  [ "$(grep -c '^version: ' "$_lock")" = 1 ] || { echo "no version  .factory/core.lock must hold one version: line"; _rc=3; }
+  echo "ok  $_ok core files match .factory/core.lock ($(sed -n 's/^version:[[:space:]]*//p' "$_lock") from ${_up:-?})"
+  return $_rc
+}
+
+case $cmd in
+  apply) apply ;;
+  labels) labels ;;
+  status-issue) status_issue ;;
+  pin) pin "$1" "$2" ;;
+  check) check ;;
+  fs-tool)
+    command -v python3 > /dev/null 2>&1 || die "python3 (standard library only) is needed"
+    fs_tool "$@" ;;
+esac

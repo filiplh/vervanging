@@ -1,0 +1,159 @@
+# Factory CI: the checks on a pull request. Written by factory-init from factory.yaml (`commands`, `ci.pr`,
+# `ci.skip_paths`) and rewritten by factory-update; don't edit it by hand, change factory.yaml instead.
+#
+# Sized for a shared minute budget (machine settings › ci.minutes_per_month, GitHub Free: 2,000 a month for all
+# private repos of the account, about 65 a day):
+# - A ready PR runs `verify`, then each other check in `ci.pr` whose `when` globs match a file the PR changes (ordered,
+#   last match wins; no `when` means every change). The checks start only after verify passed, so a red verify costs
+#   nothing more. Each job is named after its check, so `factory gate` can match it.
+# - Draft PRs get a run whose jobs all skip: no billed minutes. Marking the PR ready for review starts the real checks.
+# - A newer push to the same PR cancels the older run.
+# - A PR that touches only `ci.skip_paths` starts no run at all (the `paths` filter below).
+# - Nothing runs on a push to the default branch: the merge gate already tested the exact merge result. The heavy
+#   suite runs nightly instead, in factory-nightly.yml.
+#
+# CI is a second check, not the only one. When GitHub Actions refuses or never starts the jobs (billing, a spending
+# limit, minutes used up; the run's annotation says so), the merge gate falls back to local evidence for the current
+# head: one PR comment with the head SHA, the exact commands and the results, written by `factory verify`. A job that
+# ran and failed is never overridden by local evidence. The full rules: docs/factory-yaml.md › Merge gate rules.
+#
+# Every action is pinned by its full commit SHA with the release in a comment, toolchain steps included
+# (the factory core's templates README › Pinned actions).
+name: Factory CI
+
+on:
+  pull_request:
+    # `ready_for_review`: a draft marked ready gets its real run.
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit bash adds -o pipefail.
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  FACTORY_TEST_WORKERS: '2'
+  SETUP: ''
+  CI_PR_VERIFY: 'true'   # 'true' when ci.pr lists verify
+
+jobs:
+  verify:
+    # Named `verify` when ci.pr lists it; otherwise this job only picks the checks.
+    name: ${{ 'true' == 'true' && 'verify' || 'select checks' }}
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      checks: ${{ steps.select.outputs.checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # GitHub's merge commit (base tip + PR head); depth 2 brings its first parent, the base tip, so the diff
+          # below is exactly what the PR changes.
+          fetch-depth: 2
+
+      - name: Which checks does this PR need?
+        id: select
+        env:
+          # ci.pr without verify: [{"name": ..., "run": ..., "when": [...] or null}, ...]
+          CHECKS: '[]'
+        run: |
+          # -z: NUL-separated raw paths, never C-quoted, so non-ASCII names and names with newlines match as they are.
+          # --no-renames: a rename lists both the old and the new path, so moving a file out of a `when` area counts.
+          git diff -z --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.bin"
+          python3 - "$RUNNER_TEMP/changed.bin" <<'PY'
+          import json, os, re, sys
+
+          def to_regex(pattern):
+              # `*` stays within one folder name, `**` spans folders, the pattern matches the whole path.
+              out, i = "", 0
+              while i < len(pattern):
+                  if pattern.startswith("**/", i):
+                      out, i = out + "(?:.*/)?", i + 3
+                  elif pattern.startswith("**", i):
+                      out, i = out + ".*", i + 2
+                  elif pattern[i] == "*":
+                      out, i = out + "[^/]*", i + 1
+                  elif pattern[i] == "?":
+                      out, i = out + "[^/]", i + 1
+                  else:
+                      out, i = out + re.escape(pattern[i]), i + 1
+              return re.compile(out + r"\Z", re.DOTALL)
+
+          def selected(path, patterns):
+              # Ordered globs: the last pattern that matches decides; a `!` pattern deselects.
+              result = False
+              for p in patterns:
+                  negate = p.startswith("!")
+                  if to_regex(p[1:] if negate else p).match(path):
+                      result = not negate
+              return result
+
+          with open(sys.argv[1], "rb") as f:
+              changed = [os.fsdecode(p) for p in f.read().split(b"\0") if p]
+          needed = []
+          for check in json.loads(os.environ["CHECKS"]):
+              when = check.get("when")
+              hit = next((f for f in changed if when is None or selected(f, when)), None)
+              if hit is not None:
+                  needed.append({"name": check["name"], "run": check["run"]})
+                  print(f"{check['name']}: needed ({'every change' if when is None else repr(hit)})")
+              else:
+                  print(f"{check['name']}: not needed, no changed file matches its `when`")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("checks=" + json.dumps(needed) + "\n")
+          PY
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Setup
+        if: env.SETUP != '' && env.CI_PR_VERIFY == 'true'
+        run: sh -c "$SETUP"
+
+      - name: verify
+        if: env.CI_PR_VERIFY == 'true'
+        env:
+          VERIFY: 'node --test'
+        run: |
+          echo "FACTORY_TEST_WORKERS=$FACTORY_TEST_WORKERS sh -c $VERIFY"
+          sh -c "$VERIFY"
+
+  checks:
+    name: ${{ matrix.check.name }}
+    needs: verify
+    if: needs.verify.result == 'success' && needs.verify.outputs.checks != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.verify.outputs.checks) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Setup
+        if: env.SETUP != ''
+        run: sh -c "$SETUP"
+
+      - name: ${{ matrix.check.name }}
+        env:
+          RUN: ${{ matrix.check.run }}
+        run: |
+          echo "FACTORY_TEST_WORKERS=$FACTORY_TEST_WORKERS sh -c $RUN"
+          sh -c "$RUN"

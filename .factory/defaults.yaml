@@ -1,0 +1,151 @@
+# Core defaults: the value of every factory.yaml key when a project leaves it out.
+# Keys and merge rules: docs/factory-yaml.md in the factory repo. This file is the one source of the "Default"
+# column there. Sections are added by the issue that needs them; this file is append-only per section.
+#
+# The sections follow the order of docs/factory-yaml.md. A key that must be set in factory.yaml (no default) is
+# written as "<required>", so the file lists every key; "none" is null. `project.name` is derived (null here): the
+# part of `project.repo` after the slash.
+
+factory: "<required>"
+
+project:
+  repo: "<required>"
+  name: null
+  languages: "<required>"
+
+# Solo mode runs one issue at a time without a lead; team mode runs a lead with parallel specialists.
+mode: solo
+
+# Commands. `verify` is required and has no default; `setup` and `serve` default to none. Per check
+# (commands.checks.<name>): `when` defaults to every change, `heavy` to false, `gate` to true, and `setup` (a command
+# that prepares the CI runner for that check, never run locally) to none; those entry defaults are under
+# `entry_defaults` below.
+commands:
+  setup: null
+  verify: "<required>"
+  serve: null
+  checks: {}
+
+# The tier `factory-tickets` gives each kind of work. A project adds or changes single kinds (maps merge per key).
+work_kinds:
+  data-model: deep
+  storage-migrations: deep
+  security: deep
+  algorithms: deep
+  hard-ui: deep
+  feature: standard
+  spike: standard
+  data-tables: light
+  docs: light
+  config: light
+  ci-fix: light
+
+roles: {}
+
+# Model and effort per tier and role. The rules that go with these tables are in reference/model-policy.md.
+# A project may override single entries in its factory.yaml (maps merge per key; `escalation` is a list and replaces
+# the whole ladder). Model spec: <provider>/<model id>[/<effort>].
+#
+# Fixed in the core, so not keys:
+# - the validator and fix rounds run on the issue's tier (its `build` model); trivial fixes may be made by the lead;
+# - a helper that makes decisions runs on its parent's model;
+# - a reviewer's model always differs from the model whose work it reviews, and a first review of standard or deep
+#   work runs on another provider than the builder;
+# - escalation goes one step up the ladder and never back down on that issue;
+# - usage limits lower concurrency, never the tier;
+# - escalation-only settings, never a default here or in a project: the efforts `xhigh`, `max`, `ultra` and
+#   `ultrathink` on any provider, and the model claude-fable-5-2 at any effort.
+models:
+  tiers:
+    deep:     { build: claude/claude-opus-5-5/high,   review: codex/gpt-6.1-sol/high }
+    standard: { build: claude/claude-opus-5-5/medium, review: codex/gpt-6.1-sol/high }
+    light:    { build: claude/claude-sonnet-5-5/high, review: claude/claude-opus-5-5/medium }
+  reviews:                                    # reviews other than a tier's first review (model policy › Reviews)
+    re_review:                                # the first entry whose model differs from the fixer's
+      - claude/claude-sonnet-5-5/high         # the fixer was Opus: the lead, a standard or deep builder
+      - claude/claude-opus-5-5/medium         # the fixer was Sonnet: a light builder
+      - codex/gpt-6.1-sol/high                # both made changes in the round
+    docs_only:                                # a docs-only PR: the first entry whose model differs from the builder's
+      - claude/claude-opus-5-5/medium
+      - claude/claude-sonnet-5-5/high
+      - codex/gpt-6.1-sol/medium
+    cross_check: codex/gpt-6.1-sol/high       # when a Claude review asks for one, on the same head
+  agents:
+    lead: claude/claude-opus-5-5/high
+    grill: claude/claude-opus-5-5/high
+    plan: claude/claude-opus-5-5/high
+    tickets: claude/claude-opus-5-5/high
+    hunter: claude/claude-opus-5-5/medium
+    process_hunter: claude/claude-opus-5-5/high
+    domain_hunter: claude/claude-opus-5-5/high
+    architecture_review: claude/claude-opus-5-5/high
+  helpers:
+    search: claude/claude-haiku-5-5           # search and lookups
+    read: claude/claude-sonnet-5-5/low        # reading and summarising; up to medium when needed
+  escalation:                                 # one step up at a time, from the issue's current build model; the step onto claude-fable-5-2 needs the owner's OK
+    - claude/claude-sonnet-5-5/high
+    - claude/claude-opus-5-5/medium
+    - claude/claude-opus-5-5/high
+    - claude/claude-opus-5-5/xhigh
+    - claude/claude-fable-5-2/high
+
+# What GitHub Actions runs on a ready PR, and on main once a night; changes that touch only skip_paths start no run.
+# `external` names workflows the project runs itself, beside or instead of the factory's: the merge gate and the lead
+# read their listed jobs as checks on a PR and as the state of the default branch.
+ci:
+  pr: [verify]
+  nightly: []
+  skip_paths: []
+  external: []                                # [{workflow: <name>, jobs: [<job>, …], covered_by: [<check>, …]}]
+
+# Licences a dependency may have without a human gate (a project that sets `allow` gives the whole list); dev_only
+# licences are allowed for build and dev tools that do not ship.
+licences:
+  allow: [MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD]
+  dev_only: []
+
+human_gates: []
+deploy: {}
+packs: []
+
+# The key flows the lead records for the acceptance demo at the end of each milestone. Unset, the lead takes the flows
+# from the milestone's acceptance contracts.
+demo:
+  flows: []                                   # [{name: <name>, surface: ui | http | command, steps: [<step>, …]}]
+
+# Not factory.yaml keys: the defaults inside one entry of a map the project fills (a check, a role, a deploy target or
+# one of its environments, `serve`). The key is the path of the entry, with `<name>` standing for any one name; the
+# value holds the keys the entry gets when it leaves them out, and "<required>" marks one it must set.
+entry_defaults:
+  "commands.serve": { run: "<required>", ready: "/" }
+  "commands.checks.<name>": { run: "<required>", when: null, heavy: false, gate: true, setup: null }
+  "roles.<name>": { owns: "<required>", skills: [] }
+  "deploy.<target>": { recipe: "<required>", with: {}, environments: "<required>" }
+  "deploy.<target>.environments.<env>": { when: manual, approve: first, url: null }
+
+# Machine settings: the value of every ~/.factory/machine.yaml key when the file or the key is missing. Caps that all
+# projects on the machine share together (decision 27); keys, types and ranges are under "Machine settings" in
+# docs/factory-yaml.md. Not factory.yaml keys: a project's factory.yaml cannot set them. The section mirrors the
+# file's layout, so a new machine key is one more line here (and its range in factory-doctor's machine check).
+machine:
+  limits:
+    builders: 4          # implementation agents running at once, across all projects
+    reviewers: 2         # review agents running at once, across all projects
+    heavy: 1             # heavy runs at once (checks with heavy: true, renders), across all projects
+    test_workers: 2      # worker cap passed to test runners as FACTORY_TEST_WORKERS
+  ci:
+    minutes_per_month: 2000   # GitHub Actions minutes of the account that owns the private repos
+  doctor:
+    min_free_gb: 20      # factory-doctor's free-disk threshold
+  # Allowance pacing (docs/factory-yaml.md › Machine settings › usage). Maps keyed by provider; a provider of the
+  # model policy left out of reserve_pct or week_units makes factory-usage answer "cannot tell" for it.
+  usage:
+    reserve_pct: { claude: 20, codex: 20 }      # share of each weekly allowance kept for P0s, waiting gates and the owner
+    week_units: { claude: 50, codex: 50 }       # weighted run-hours one weekly allowance holds: calibrate against the app
+    week_reset: {}                              # per provider, "<day> HH:MM" UTC; a provider left out: the last 7 days
+    weights:                                    # one hour of a run counts model weight × effort weight; left out: 1
+      effort: { minimal: 0.5, low: 0.6, medium: 1, high: 1.5, xhigh: 2, max: 3, ultra: 3, ultrathink: 3 }
+      model: { claude-haiku-5-5: 0.2, claude-sonnet-5-5: 0.6, claude-opus-5-5: 1, claude-fable-5-2: 2, gpt-6.1-sol: 1 }
+  # Shift windows (docs/factory-yaml.md › Shifts): night, quiet and busy, each "HH:MM-HH:MM" in the machine's local
+  # time. No default: left out, there are no shifts.
+  shifts: {}

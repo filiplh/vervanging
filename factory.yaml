@@ -1,0 +1,63 @@
+# factory.yaml: this project's settings for the agentic software factory.
+#
+# Set only what differs from the core defaults. A key you leave out takes its core default, from the core's
+# defaults.yaml (copied into this repo with the rest of the core). Maps merge per key; lists and scalars replace the
+# whole default. Unknown keys are an error. No secrets, ever: no token, key, password or private hostname.
+#
+# Every key, its type and its default: docs/factory-yaml.md in the factory repo.
+# Changing this file is a human gate (H4): agents propose, a person approves.
+
+factory: 0.45.0        # the core version this repo is pinned to; factory-update bumps it in a PR
+
+project:
+  repo: filiplh/vervanging            # owner/name
+  # name: defaults to the part of `repo` after the slash
+  languages: [nl]  # BCP 47 tags of user-facing text; the first is the main language
+
+mode: solo              # solo (the default: one issue at a time, no lead) or team
+
+commands:
+  # The one command every change must pass. Pass the worker cap on to the test runner, for example
+  # `<runner> --workers=${FACTORY_TEST_WORKERS:-2}`; the factory sets FACTORY_TEST_WORKERS from the machine settings.
+  verify: 'node --test'
+  serve:                            # lets hunters and the validator start the app black-box
+    run: 'python3 -m http.server "$PORT" --directory public'
+  # checks:                         # checks beyond verify that only some changes need
+  #   <name>:                       # lower case with _; `verify` is reserved
+  #     run: '<command>'
+  #     when: ["<glob>", "!<glob>"] # ordered, last match wins; leave out to need it for every change
+  #     heavy: false                # true: runs under the machine's shared heavy lock
+  #     gate: true                  # false: never blocks a merge, runs only nightly
+
+# work_kinds:                       # merged onto the core table; add the hard parts of this product
+#   <kind>: deep | standard | light
+
+# roles:                            # team mode needs at least one; each gets .factory/roles/<name>.md and agent:<name>
+#   <name>:
+#     owns: ["<glob>"]
+#     skills: [<project skill>]
+
+# models: leave out; the core tables apply. Override single entries only with a reason.
+
+# ci:
+#   pr: [verify]                    # what GitHub Actions runs on a ready PR, each check only when its `when` matches
+#   nightly: []                     # what runs on the default branch at 02:00 UTC, skipped when nothing changed
+#   skip_paths: []                  # changes that touch only these paths start no CI run
+
+# licences:                         # a list replaces the whole core default list
+#   allow: [MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD]
+#   dev_only: []
+
+# human_gates:                      # added to the core gates, never instead of them; plain sentences
+#   - <a situation where an agent must stop and ask>
+
+deploy:                             # one entry per thing that gets deployed; each recipe documents its `with` keys
+  app:
+    recipe: cloudflare-workers
+    with:
+      worker: vervanging
+      node_version_file: .node-version
+    environments:
+      production: { when: manual, approve: first, url: 'https://vervanging.filip-lhommelet.workers.dev' }
+
+# packs: []                         # optional packs, off by default

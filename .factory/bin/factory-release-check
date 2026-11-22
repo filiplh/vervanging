@@ -1,0 +1,1315 @@
+#!/usr/bin/env python3
+"""Release checks, versions and release notes for a range of commits on the default branch (deploy contract, rules 2, 4,
+5 and 7).
+
+The one copy every recipe calls, whatever its platform: installed in a project at .factory/bin/factory-release-check,
+and run in the checkout being released, where it reads the range with git. The copy that runs is never that
+checkout's own (deploy contract, rule 2, "Which checker proves it"): the recipe reads it from git out of a commit an
+earlier release proved (the live commit; for a first release, the released commit's first parent; for a rollback,
+the live commit, or the restored one only when the live one is unknown) into a folder of its own, and runs
+`python3 -I <that path>`: isolated, so no module of the checkout can load into it. So nothing here may rely on the
+file's own location or on a module beside it, and its command line and output lines stay compatible across one
+release. It needs git and, for --prove and --holds, `gh api`.
+
+  factory-release-check check --from <sha or ''> --to <sha> [--migrations '<json globs>']
+                              [--repo owner/name --branch <default branch> [--prove] [--holds]
+                               [--ignore-check <name>]... [--remote <name>]] [--target <name>]
+      Prints one line per finding, nothing when the release may go out on its own:
+        not-gated: <sha7> <why>        the commit cannot be shown to have passed the gate (only with --prove)
+        breaking: <sha7> <subject>     a commit in the range marks a breaking change (see text_is_breaking)
+        migration: <path>              a path changed by any commit in the range and selected by the migration globs
+        hold: #<pr> <text>             an H7 release hold recorded on a pull request merged in the range (--holds)
+      With --target, one more line, always the last, which is not a finding:
+        version: <X.Y.Z> bump=<major|minor|patch|first|none> previous=<X.Y.Z|none> tag=<tag>
+      the version a release of --to gets (see VERSIONS below), and the tag that records it on --to.
+      With an empty --from (the live commit is unknown) only the --to commit is checked. Exits 2 when --from is not
+      an ancestor of --to, and 3 when the clone is shallow (the range would be cut short). Text from commits, paths
+      and comments is printed with control characters escaped, so it can never forge another line. A review carried
+      over clean merges needs the pull request's own commits, which a squash merge leaves off the default branch:
+      when they are missing, they are fetched from --remote (default origin) as refs/pull/<number>/head, with `gh`
+      as the credential helper.
+
+  factory-release-check version --target <name> --at <sha>
+      The version recorded on that commit (the highest, when it has several), or nothing: a rollback names the
+      version it returns to with it.
+
+  factory-release-check notes --from <sha or ''> --to <sha> [--changelog <path>] [--title <text>]
+                              [--version <X.Y.Z> [--date <YYYY-MM-DD>]]
+      Release notes in Markdown: the changelog file's added lines when one is given and changed, otherwise one line
+      per first-parent commit (the merged pull requests). With --version they are headed `## <X.Y.Z> (<date>)`
+      (the date defaults to today, UTC), and the next line names the range: deploy contract rule 5's entry.
+
+VERSIONS (deploy contract, rules 4 and 5). Every release of a target gets a semantic version, computed by `check
+--target` from the same Range, in the same run, as its findings, so the two can never disagree:
+  - the previous version is the highest one ever recorded for the target (a version tag, see version_tag()), so a
+    number is never given twice, even after a rollback; with none recorded yet, the release gets FIRST_VERSION;
+  - the bump is major when the run printed any breaking: finding (a commit of the range, or a pull request's title),
+    or when the range cannot be shown (no --from) and a previous version exists; minor when any commit of the range
+    has a `feat` type (FEAT_MARK, read in loose() text like the breaking mark); otherwise patch. An empty range keeps
+    the previous version (bump=none).
+  - a version is recorded by the recipe after a passing smoke check, as the tag `factory/<target>/v<X.Y.Z>` on the
+    released commit: under the factory's own prefix, and per target, so it never clashes with a project's own tags
+    (`v1.2.3`, `1.2.3`, `<package>@1.2.3`), and two targets of one project keep their own numbers. Recipes create it
+    as a lightweight tag, which `git describe` skips unless asked (--tags).
+
+Two invariants carry every check.
+
+ONE NORMALISED VIEW. Every check of a range reads the same two things, built once (class Range):
+  - the messages of every commit in the range (not only the first-parent line), each as one normalised text
+    (loose()): every kind of line break is a line break (CR, LF, CRLF, VT, FF, NEL, U+2028, U+2029 and any other
+    control character), compatibility forms and accents are folded, invisible characters dropped, common Cyrillic
+    and Greek look-alikes of Latin letters mapped;
+  - the complete set of changed paths: every non-merge commit against its parent and every merge commit, nested or
+    not, against its first parent, read NUL-delimited from git.
+
+TIME-ORDERED PROOF. A record proves something only if it was in force when it was relied on, and nothing has
+contradicted it since (in_force()):
+  - the gate record G in force at the merge: the latest gate record written no later than the merge; it must be for
+    the final head H and say result=pass, and no gate marker of any kind may be later than it;
+  - the review in force at G: the latest review record written before G; it must have verdict=merge and no open
+    P0-P2 or human gate, and every review marker later than it must say the same. It must be of H, or of an older
+    head R that H reaches by clean merges of the default branch alone (carried_review()): every first-parent commit
+    from R to H a merge of a commit of the default branch whose tree is git's own conflict-free merge of its
+    parents, recomputed here, or differs from git's merge (conflicted there or clean) only in a version file's
+    version, raised above both parents' (version_only_merge()). The first commit after R alone may instead be a
+    commit on R that changes nothing but a version file's version, raised above R's and the default branch's
+    (version_only_commit());
+  - for checks=local, the evidence G cites: written before G, result=pass, and for H: with tree=, the tree it names
+    is H's tree (the checks ran on exactly that content, on whichever commit); without, its head is H. Every later
+    evidence marker must say the same;
+  - check runs and commit statuses on H, per check: the latest attempt finished before G decides, and no later
+    attempt may have failed.
+Proof and doubt are read differently on purpose. A record that proves is read strictly: the comment's first line (or
+the line right after a first-line `#` heading), exactly `<!-- factory:<gate|evidence|review|validation> key=value ... -->`, in
+a comment never edited, by a User account whose repository permission is write, maintain or admin. A marker that
+contradicts is read loosely: anywhere in any comment, by anyone, edited or not, quoted or not; when in doubt it
+counts. So a release refuses or holds whenever anything is unclear. Only a mention of the tag in prose, with no record
+field after it (before the next tag) and no HTML comment around it, is not a marker (counts_as_marker()). The
+validation record (the validator's result) is read here the same way, by factory gate's rule 4; --prove does not read
+it, since the gate record in force at the merge stands for every rule of the gate.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+LINE_BREAK = re.compile(r"\r\n|\r|\n")                    # CommonMark line endings, for strict records only
+ATX_HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
+RECORD = re.compile(r"<!-- factory:(gate|evidence|review|validation)((?: [a-z0-9_]+=[0-9A-Za-z._:/-]+)+) -->")
+RECORD_KEYS = {                                            # the exact key sets each kind may have
+    "gate": ({"head", "base", "result", "checks", "evidence"},),
+    "evidence": ({"head", "tree", "result"}, {"head", "result"}),      # tree= names the tree the checks ran on
+    "review": ({"head", "verdict", "p0", "p1", "p2", "p3", "human", "release_hold"},),
+    "validation": ({"head", "verdict", "contract", "passed", "failed", "unchecked", "holdouts"},),
+}
+COUNT = re.compile(r"[0-9]+")                              # ASCII digits only: int() would accept other scripts
+# A version-only merge (carried_review): the one file whose `version` line may differ from git's own merge, as
+# factory-install and factory-update name the core version's file, at the root or in any folder.
+VERSION_FILE = ".claude-plugin/plugin.json"
+VERSION_LINE = re.compile(rb'([ \t]*"version"[ \t]*:[ \t]*")([^"\\\r\n]*)("[ \t]*,?[ \t]*)')   # one whole line
+SEMVER = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")       # X.Y.Z, compared number by number
+# Release versions (VERSIONS above): the first one a target gets, and the target names a version tag may carry (one
+# path component of a git ref, as factory-init names targets).
+FIRST_VERSION = "1.0.0"
+TARGET_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
+
+# Loose patterns: always applied to loose() text, where the only line break is "\n".
+BREAKING_MARK = re.compile(r"[\w)\]]\s*(?:\\?!\s*)+(?:\([^)\n]*\))?\s*:")   # `type!:`, `type(scope)!:`, `type!(scope):`
+BREAKING_PHRASE = re.compile(r"\bbreaking(?:[\s_-]*changes?\b|\s*:)", re.IGNORECASE)
+# A `feat` type, as BREAKING_MARK reads `type!:`: anywhere on any line, with or without a scope or `!`.
+FEAT_MARK = re.compile(r"\bfeat\s*(?:\([^)\n]*\))?\s*(?:\\?!\s*)*(?:\([^)\n]*\))?\s*:", re.IGNORECASE)
+REVERTS_COMMIT = re.compile(r"\breverts?\s+commit\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
+REVERT_WORD = re.compile(r"\b(?:revert|reapply)", re.IGNORECASE)
+HOLD_LINE = re.compile(r"release[\s_-]*hold\s*:\s*H\s*7\b[^\n]*", re.IGNORECASE)
+# A tag in any spelling. A tag alone is only a mention: Trust.markers() counts it as a marker when it opens an HTML
+# comment or a record field follows it (counts_as_marker), and reads its fields from it up to the next tag of its own
+# group (fields_of). factory's holds_marker refuses any mention.
+LOOSE_MARKER = re.compile(r"factory\s*:\s*(gate|evidence|review|validation)\b", re.IGNORECASE)
+# The groups of kinds whose tags end each other's spans. A tag of another group never ends a span: a kind added later
+# goes in a group of its own, so its tags can never cut short the span of an older kind's marker and hide a field that
+# contradicts it, or a hold (a shorter span reads fewer fields, and may lose the field that makes a tag a marker).
+SPAN_GROUPS = (("gate", "evidence", "review"), ("validation",))
+# A field: a whole-word key, `=`, and in group 2 its value. The value sits in a lookahead, so a field inside another
+# field's value (`x= p1=1`, `p1=\nhead=...`) is found as a field of its own too. Only the first 80 characters of a
+# value are read (every clean value is shorter), so reading stays linear; group 3 is set when the value goes on.
+LOOSE_FIELD = re.compile(r"(?<![a-z0-9_])([a-z0-9_]+)\s*=(?=\s*([^\s>]{0,80})([^\s>]?))")
+# A record field (`head=`, `p1 =`, ...): a key any kind of record has, as a whole word, then `=`.
+RECORD_FIELD = re.compile(r"(?<![a-z0-9_])(?:%s)\s*=" % "|".join(sorted({k for sets in RECORD_KEYS.values()
+                                                                     for keys in sets for k in keys})), re.IGNORECASE)
+COMMENT_OPEN = ("<!--", "&lt;!--")                               # an HTML comment opener, raw or escaped
+
+# Characters that read as a Latin letter, `!` or `:` to a person (Cyrillic, Greek and a few others), for loose().
+LOOK_ALIKES = str.maketrans({
+    # Cyrillic small and capital letters
+    "\u0430": "a", "\u0432": "b", "\u0435": "e", "\u043a": "k", "\u043c": "m", "\u043d": "h", "\u043e": "o",
+    "\u0440": "p", "\u0441": "c", "\u0442": "t", "\u0443": "y", "\u0445": "x", "\u0456": "i", "\u0458": "j",
+    "\u0455": "s", "\u04bb": "h", "\u0501": "d", "\u051b": "q", "\u051d": "w", "\u044c": "b", "\u0433": "r",
+    "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M", "\u041d": "H", "\u041e": "O",
+    "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0423": "Y", "\u0425": "X", "\u0406": "I", "\u0408": "J",
+    "\u0405": "S", "\u0500": "D", "\u051a": "Q", "\u051c": "W", "\u050c": "G",
+    # Greek capital and small letters
+    "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H", "\u0399": "I", "\u039a": "K",
+    "\u039c": "M", "\u039d": "N", "\u039f": "O", "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X",
+    "\u03b1": "a", "\u03b5": "e", "\u03b9": "i", "\u03ba": "k", "\u03bd": "v", "\u03bf": "o", "\u03c1": "p",
+    "\u03c4": "t", "\u03c5": "u", "\u03c7": "x",
+    # Other Latin look-alikes
+    "\u0261": "g", "\u0131": "i",
+    # Exclamation marks and colons
+    "\u01c3": "!", "\u2757": "!", "\u2755": "!", "\ua71d": "!",
+    "\ua789": ":", "\u02d0": ":", "\u2236": ":", "\u05c3": ":", "\u02f8": ":", "\u0589": ":", "\u205a": ":",
+})
+
+WRITE_PERMISSIONS = {"admin", "write"}          # GitHub's legacy `permission`: maintain reads as write, triage as read
+WRITE_ROLES = {"admin", "maintain", "write"}
+PASSED = {"success", "skipped", "neutral"}
+STATUS_STATES = {"success", "pending", "failure", "error"}
+MAX_PAGES = 50
+LOOKUP_TRIES = 5        # asks for the pull request of a commit this often when GitHub still says there is none ...
+LOOKUP_WAIT = 7         # ... waiting this many seconds between asks (4 waits: about 30 seconds in all)
+lookup_waits_left = 0   # the waits this run may still spend, shared by every commit of the range (reset in main)
+FOREVER = datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
+GIT_ENV = dict(os.environ, GIT_NO_REPLACE_OBJECTS="1", LC_ALL="C")
+
+
+class GhError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+class Unverifiable(Exception):
+    """A link of the chain could not be checked: the release refuses, as when it fails."""
+
+
+# --- one normalised view of text -------------------------------------------------------------------------------------
+
+def is_line_break(ch):
+    """Every character that ends a line for some reader: all control characters but tab and NUL (CR, LF, VT, FF,
+    NEL, the separators FS/GS/RS...), and the Unicode line and paragraph separators."""
+    return ch not in "\t\0" and unicodedata.category(ch) in ("Cc", "Zl", "Zp")
+
+
+def lines_of(text):
+    """The lines of a text under every kind of line break, otherwise unchanged (for display)."""
+    text = (text or "").replace("\r\n", "\n").replace("\0", "")
+    return "".join("\n" if is_line_break(ch) else ch for ch in text).split("\n")
+
+
+def loose(text):
+    """The one normalised view for everything that holds: a text as a person reads it. Every line break is "\n";
+    compatibility forms are folded (full-width letters, no-break spaces) and accents and other combining marks
+    removed; invisible format characters and NUL are dropped (so text stored two bytes per character still reads);
+    common look-alikes of Latin letters, `!` and `:` are mapped."""
+    out = []
+    for ch in unicodedata.normalize("NFKD", (text or "").replace("\r\n", "\n").replace("\0", "")):
+        category = unicodedata.category(ch)
+        if is_line_break(ch):
+            out.append("\n")
+        elif category not in ("Cf", "Mn", "Mc", "Me"):
+            out.append(ch)
+    return unicodedata.normalize("NFKC", "".join(out)).translate(LOOK_ALIKES)
+
+
+def escape(text):
+    """Text safe to print as part of one output line: control, format and unpaired surrogate characters escaped.
+    The text may be quoted later in a comment on a pull request, so anything in it that reads as a record marker is
+    broken up: printed text can never become a marker itself."""
+    out = []
+    for ch in re.sub(r"(?i)(factory\s*):", r"\1[:]", str(text)):
+        if ch.isprintable() and unicodedata.category(ch) not in ("Cf", "Cs"):
+            out.append(ch)
+        else:
+            out.append(f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}")
+    return "".join(out)
+
+
+def text_is_breaking(text):
+    """Whether a message marks a breaking change, read loosely: `type!:` anywhere on any line (a squash commit lists
+    the pull request's commits in its body, a merge lists them after their SHAs), or the words "breaking change"
+    or "breaking:" anywhere, with or without a colon. A revert or reapply of such a title quotes it, so it matches
+    too. Negative sentences ("no breaking changes") match as well: a false hold, on purpose."""
+    text = loose(text)
+    return bool(BREAKING_MARK.search(text) or BREAKING_PHRASE.search(text))
+
+
+# --- git -------------------------------------------------------------------------------------------------------------
+
+def git_bytes(*args):
+    return subprocess.run(["git", *args], check=True, capture_output=True, env=GIT_ENV).stdout
+
+
+def git(*args):
+    return git_bytes(*args).decode("utf-8", "replace")
+
+
+def resolve(ref):
+    """The full SHA of a commit, or None."""
+    if not ref:
+        return None
+    proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref + "^{commit}"], capture_output=True,
+                          env=GIT_ENV)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode().strip() or None
+
+
+def is_ancestor(older, newer):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", older, newer], env=GIT_ENV).returncode == 0
+
+
+def require_full_history():
+    if git("rev-parse", "--is-shallow-repository").strip() != "false":
+        print("factory-release-check: the clone is shallow, so the range would be cut short; fetch the whole history",
+              file=sys.stderr)
+        sys.exit(3)
+
+
+def rev_list(*args):
+    return git("rev-list", "--reverse", *args).split()
+
+
+def message(sha):
+    """The raw commit message, read from the commit object itself (no format string a message could break)."""
+    _, _, text = git_bytes("cat-file", "commit", sha).partition(b"\n\n")
+    return text.decode("utf-8", "replace")
+
+
+def subject_of(sha):
+    return next((line for line in lines_of(message(sha)) if line.strip()), "")
+
+
+def has_commit(sha):
+    return subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True,
+                          env=GIT_ENV).returncode == 0
+
+
+def parents_of(sha):
+    return git("rev-list", "--parents", "-n", "1", sha).split()[1:]
+
+
+def tree_of(sha):
+    return git("rev-parse", f"{sha}^{{tree}}").strip()
+
+
+def clean_merge_tree(first, second):
+    """The tree of git's own merge of two commits (`git merge-tree --write-tree`, the default strategy), or None when
+    the merge has conflicts. Anything else git says refuses: the merge could not be recomputed."""
+    proc = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", first, second], capture_output=True,
+                          env=GIT_ENV)
+    if proc.returncode == 1:
+        return None
+    tree = proc.stdout.decode("utf-8", "replace").split("\n", 1)[0]
+    if proc.returncode != 0 or not FULL_SHA.fullmatch(tree):
+        raise Unverifiable(f"git could not recompute the merge of {first[:7]} and {second[:7]}")
+    return tree
+
+
+def version_of(blob):
+    """(the index of its one `version` line, that line's value) in a version file's bytes, or None: no such line, or
+    more than one. A value that is a valid version must also be the JSON document's own top-level "version"."""
+    lines = blob.splitlines(keepends=True)                  # bytes: lines end only at CR, LF or CRLF
+    found = [(i, m.group(2).decode("ascii", "replace")) for i, line in enumerate(lines)
+             for m in [VERSION_LINE.fullmatch(line.rstrip(b"\r\n"))] if m]
+    if len(found) != 1:
+        return None
+    if SEMVER.fullmatch(found[0][1]):
+        try:
+            doc = json.loads(blob)
+        except ValueError:
+            return None
+        if not isinstance(doc, dict) or doc.get("version") != found[0][1]:
+            return None
+    return found[0]
+
+
+def with_version(blob, index, value):
+    """The bytes with the value on line `index` (its `version` line) replaced, every other byte kept."""
+    lines = blob.splitlines(keepends=True)
+    body = lines[index].rstrip(b"\r\n")
+    m = VERSION_LINE.fullmatch(body)
+    lines[index] = m.group(1) + value.encode("ascii") + m.group(3) + lines[index][len(body):]
+    return b"".join(lines)
+
+
+def higher(a, b):
+    return tuple(map(int, a.split("."))) > tuple(map(int, b.split(".")))
+
+
+def is_version_file(path):
+    return path == VERSION_FILE or path.endswith("/" + VERSION_FILE)
+
+
+def regular_blob(treeish, path):
+    """The bytes of `path` in a commit or tree when it is a regular file (mode 100644), else None."""
+    listed = git_bytes("ls-tree", "-z", treeish, "--", path).split(b"\0")[0]
+    info, _, name = listed.partition(b"\t")
+    parts = info.split(b" ")
+    if name.decode("utf-8", "surrogateescape") != path or len(parts) != 3 or parts[:2] != [b"100644", b"blob"]:
+        return None
+    return git_bytes("cat-file", "blob", parts[2].decode("ascii", "replace"))
+
+
+def version_only_merge(first, second, merged):
+    """None when the merge commit `merged` of `first` and `second` is git's own merge of them except for the version
+    of one version file (VERSION_FILE), else why not (deploy contract, rule 2, link 5). Git's merge either
+    - conflicts in exactly one path, that file, as a conflict of content (three stages, regular files), and the file
+      is exactly git's conflict-free merge of the three sides once each side's version line carries the resolved
+      value; or
+    - is clean, and the file is exactly git's merged file with its version line carrying the resolved value.
+    Either way the merge commit differs from git's merge in that path alone, still a regular file, and its version
+    is a valid X.Y.Z, higher than both parents' versions: every other byte of every file is git's. A merge commit
+    whose tree is git's own clean merge is not version-only (see clean_merge_tree())."""
+    proc = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", "-z", first, second],
+                          capture_output=True, env=GIT_ENV)
+    fields = proc.stdout.split(b"\0")
+    tree = fields[0].decode("utf-8", "replace")
+    if proc.returncode not in (0, 1) or not FULL_SHA.fullmatch(tree):
+        raise Unverifiable(f"git could not recompute the merge of {first[:7]} and {second[:7]}")
+    conflicted = proc.returncode == 1
+    if conflicted:
+        stages = {}
+        for entry in filter(None, fields[1:]):
+            info, _, path = entry.partition(b"\t")
+            parts = info.decode("utf-8", "replace").split(" ")
+            if len(parts) != 3 or not path:
+                raise Unverifiable(f"git listed the conflicts of {first[:7]} and {second[:7]} in a form it does not "
+                                   f"know")
+            mode, oid, stage = parts
+            stages.setdefault(path.decode("utf-8", "surrogateescape"), {})[stage] = (mode, oid)
+        if len(stages) != 1:
+            return "its merge has more than one conflicted path"
+        (path, sides), = stages.items()
+        if not is_version_file(path):
+            return "its conflict is not in a version file"
+        if set(sides) != {"1", "2", "3"} or any(mode != "100644" for mode, _ in sides.values()):
+            return "its conflict in the version file is not one of content"
+        if diff_names(tree, merged) != {path}:
+            return "it changes more than the version file"
+        base, ours, theirs = (git_bytes("cat-file", "blob", sides[stage][1]) for stage in "123")
+    else:
+        changed = diff_names(tree, merged)
+        if not changed:
+            return "it is git's own clean merge, not a version-only one"
+        if len(changed) != 1:
+            return "it changes more than the version file"
+        path, = changed
+        if not is_version_file(path):
+            return "its edit is not in a version file"
+        base, ours, theirs = (regular_blob(rev, path) for rev in (tree, first, second))   # base: git's merged file
+        if None in (base, ours, theirs):
+            return "its version file is not a regular file on both sides of the merge"
+    result = regular_blob(merged, path)
+    if result is None:
+        return "its version file is not a regular file"
+    found = [version_of(blob) for blob in (base, ours, theirs, result)]
+    if None in found:
+        return "a side of the merge has no single version line that its JSON agrees with"
+    resolved = found[3][1]
+    if not all(SEMVER.fullmatch(value) for _, value in found[1:]):
+        return "its version, or a parent's, is not X.Y.Z"
+    if not conflicted and with_version(base, found[0][0], resolved) != result:
+        return "its version file has an edit besides the version"
+    if not (higher(resolved, found[1][1]) and higher(resolved, found[2][1])):
+        return f"its version {resolved} is not higher than both parents' ({found[1][1]}, {found[2][1]})"
+    if not conflicted:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        names = []
+        for name, blob, (index, _) in zip(("base", "ours", "theirs"), (base, ours, theirs), found):
+            names.append(os.path.join(tmp, name))
+            with open(names[-1], "wb") as out:
+                out.write(with_version(blob, index, resolved))
+        redone = subprocess.run(["git", "merge-file", "-p", names[1], names[0], names[2]], capture_output=True,
+                                env=GIT_ENV)
+    if redone.returncode != 0 or redone.stdout != result:
+        return "its version file has a second conflict or an edit besides the version"
+    return None
+
+
+def version_only_commit(sha, base):
+    """None when the commit `sha` changes only the version of one version file (VERSION_FILE), raised above both its
+    parent's version and the default branch's, else why not (deploy contract, rule 2, link 5). The commit has one
+    parent and changes one path, a version file, a regular file on both sides, whose bytes are its parent's with the
+    `version` line carrying the new value: every other byte, and every other file, is the parent's. The new version
+    is a valid X.Y.Z, higher than the parent's and than the file's version on every merge base of the parent and
+    `base` (the default branch as far as the parent contains it). An empty commit is not version-only."""
+    parents = parents_of(sha)
+    if len(parents) != 1:
+        return "it is not a commit with one parent"
+    parent, = parents
+    changed = diff_names(parent, sha)
+    if len(changed) != 1:
+        return "it changes more than the version file" if changed else "it changes nothing"
+    path, = changed
+    if not is_version_file(path):
+        return "its edit is not in a version file"
+    before, after = regular_blob(parent, path), regular_blob(sha, path)
+    if None in (before, after):
+        return "its version file is not a regular file before and after it"
+    proc = subprocess.run(["git", "merge-base", "--all", parent, base], capture_output=True, env=GIT_ENV)
+    bases = proc.stdout.decode("utf-8", "replace").split()
+    if proc.returncode != 0 or not bases or not all(FULL_SHA.fullmatch(b) for b in bases):
+        return "it shares no history with the default branch"
+    mains = [regular_blob(b, path) for b in bases]
+    if None in mains:
+        return "the default branch has no such version file as a regular file"
+    found = [version_of(blob) for blob in (before, after, *mains)]
+    if None in found:
+        return "a side has no single version line that its JSON agrees with"
+    resolved = found[1][1]
+    if not all(SEMVER.fullmatch(value) for _, value in found):
+        return "its version, its parent's or the default branch's, is not X.Y.Z"
+    if with_version(before, found[0][0], resolved) != after:
+        return "its version file has an edit besides the version"
+    below = [value for _, value in found[:1] + found[2:] if not higher(resolved, value)]
+    if below:
+        return f"its version {resolved} is not higher than its parent's ({found[0][1]}) and the default " \
+               f"branch's ({', '.join(value for _, value in found[2:])})"
+    return None
+
+
+def fetch_pull_head(remote, number, head):
+    """Make sure the pull request's head and its history are in the clone: a squash merge leaves them off the default
+    branch. Fetched from `remote` as refs/pull/<number>/head into a private ref, with `gh` as the only credential
+    helper (the checkout keeps no credentials) and no prompt. Objects are named by their hash, so where they came
+    from does not matter: only `head` itself is used. True only when the fetch succeeded and `head` is in the clone
+    afterwards: a fetch that fails, even after it imported some objects, proves nothing."""
+    if has_commit(head):
+        return True
+    done = subprocess.run(["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+                           "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote,
+                           f"+refs/pull/{number}/head:refs/factory-release-check/pull/{number}"],
+                          capture_output=True, env=dict(GIT_ENV, GIT_TERMINAL_PROMPT="0"))
+    return done.returncode == 0 and has_commit(head)
+
+
+def carried_review(reviewed, head, base):
+    """None when a review of `reviewed` stands for `head` (merge gate, rule 3; deploy contract, rule 2, link 5),
+    else why not. It does only when every first-parent commit from `reviewed` to `head` is a merge of exactly two
+    parents whose second parent is a commit of the default branch (an ancestor of `base`, the gated base) and whose
+    tree is git's own conflict-free merge of its parents, recomputed here: a conflict resolution or any edit made in
+    the merge changes that tree. The one exception is a version-only merge (version_only_merge()): the merge differs
+    from git's, conflicted there or clean, only in a version file's version, raised above both parents'.
+    The first commit after `reviewed` alone may instead be a version-only commit (version_only_commit()): one parent,
+    `reviewed`, and nothing changed but a version file's version, raised above its parent's and the default branch's.
+    Any other commit (a fix, a lead commit, a second version commit, a version commit after a merge, a rebase that
+    rewrote the reviewed head) needs a review of `head`."""
+    if not FULL_SHA.fullmatch(reviewed or "") or not has_commit(reviewed) or not is_ancestor(reviewed, head):
+        return "is not an ancestor of the gated head (a rebase or a force-push rewrote it)"
+    line = git("rev-list", "--first-parent", f"{reviewed}..{head}").split()            # newest first
+    if not line or parents_of(line[-1])[:1] != [reviewed]:
+        return "is not on the gated head's first-parent line"
+    for sha in line:
+        parents = parents_of(sha)
+        if sha == line[-1] and len(parents) == 1:
+            why = version_only_commit(sha, base)
+            if why:
+                return f"is followed by {sha[:7]}, which is not a merge of the default branch, nor a " \
+                       f"version-only commit ({why})"
+            continue
+        if len(parents) != 2:
+            return f"is followed by {sha[:7]}, which is not a merge of the default branch"
+        if not is_ancestor(parents[1], base):
+            return f"is followed by {sha[:7]}, which merges a commit that is not on the default branch"
+        if clean_merge_tree(*parents) != tree_of(sha):
+            why = version_only_merge(*parents, sha)
+            if why:
+                return f"is followed by {sha[:7]}, a merge with a conflict resolution or an edit of its own ({why})"
+    return None
+
+
+def diff_names(*revs):
+    raw = git_bytes("diff-tree", "-z", "-r", "--no-commit-id", "--name-only", "--no-renames", *revs)
+    return {p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p}
+
+
+class Range:
+    """The one view of a release or rollback range that every check reads: its commits, their normalised messages
+    and the complete set of paths they changed. With no start (the live commit is unknown) it is the end commit
+    alone, and the paths are unknown."""
+
+    def __init__(self, start, end):
+        self.start, self.end = start, end
+        self.commits = rev_list(f"{start}..{end}") if start else [end]              # every commit, any parent
+        self.line = rev_list("--first-parent", f"{start}..{end}") if start else [end]
+        self._breaking = {}
+
+    def paths(self):
+        """Every path any commit of the range touched, read NUL-delimited (git's display quoting never applies), not
+        only the endpoint diff: a migration added and later removed still ran against stored data. Each non-merge
+        commit against its parent; each merge commit, on the first-parent line or nested in a merged branch, octopus
+        or not, against its first parent (what the merge brought in, with anything edited in the merge itself).
+        Renames count as both paths."""
+        paths = set()
+        for sha in self.commits:
+            parents = git("rev-list", "--parents", "-n", "1", sha).split()[1:]
+            paths |= diff_names(parents[0], sha) if parents else diff_names("--root", sha)
+        return sorted(paths)
+
+    def is_breaking(self, sha, depth=0):
+        """A commit whose message marks a breaking change, or one that says it reverts such a commit, followed to
+        depth 8. A reverted commit that cannot be read counts as breaking: refuse to guess."""
+        if sha not in self._breaking:
+            text = loose(message(sha))
+            found = text_is_breaking(text)
+            if not found and REVERT_WORD.search(text):
+                for ref in REVERTS_COMMIT.findall(text):
+                    target = resolve(ref)
+                    if target is None or depth >= 8 or self.is_breaking(target, depth + 1):
+                        found = True
+                        break
+            self._breaking[sha] = found
+        return self._breaking[sha]
+
+
+# --- versions --------------------------------------------------------------------------------------------------------
+
+def version_tag(target, version):
+    """The tag that records a release's version on the released commit (VERSIONS above)."""
+    return f"factory/{target}/v{version}"
+
+
+def recorded_versions(target, at=None):
+    """Every version recorded for the target (on the commit `at` only, when given), from the tags' names alone: a
+    name that is not exactly a version tag of this target is no version."""
+    shape = re.compile(re.escape("refs/tags/" + version_tag(target, "")) + "(" + SEMVER.pattern + ")")
+    args = ["for-each-ref", "--format=%(refname)"] + ([f"--points-at={at}"] if at else [])
+    names = git(*args, f"refs/tags/factory/{target}/").splitlines()
+    return [m.group(1) for m in map(shape.fullmatch, names) if m]
+
+
+def highest(versions):
+    return max(versions, key=lambda v: tuple(map(int, v.split("."))), default=None)
+
+
+def next_version(previous, bump):
+    """The version after `previous` for a bump of major, minor, patch or none."""
+    major, minor, patch = map(int, previous.split("."))
+    return {"major": f"{major + 1}.0.0", "minor": f"{major}.{minor + 1}.0", "patch": f"{major}.{minor}.{patch + 1}",
+            "none": previous}[bump]
+
+
+def release_version(view, target, breaking):
+    """(version, bump, previous) of a release of the Range `view`, given whether the same run printed a breaking:
+    finding. The bump reads the same normalised messages as the breaking check (VERSIONS above)."""
+    previous = highest(recorded_versions(target))
+    if previous is None:
+        return FIRST_VERSION, "first", None
+    if breaking or not view.start:
+        bump = "major"
+    elif not view.commits:
+        bump = "none"
+    elif any(FEAT_MARK.search(loose(message(sha))) for sha in view.commits):
+        bump = "minor"
+    else:
+        bump = "patch"
+    return next_version(previous, bump), bump, previous
+
+
+def target_name(value):
+    if not TARGET_NAME.fullmatch(value or ""):
+        sys.exit(f"factory-release-check: {escape(value)!r} is not a target name (lowercase letters, digits, - and _)")
+    return value
+
+
+# --- globs -----------------------------------------------------------------------------------------------------------
+
+def glob_to_regex(pattern):
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("/**", i) and i + 3 == len(pattern):
+            out, i = out + "(?:/.*)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out, re.DOTALL)
+
+
+def selected(path, patterns, fold=False):
+    """The factory glob-list rule: the last matching pattern decides; `!` deselects. With `fold`, path and patterns
+    are compared in one Unicode form and case, and a `\\` in a path reads as `/` (migration holds: a differently
+    encoded or cased name may still be applied as a migration, for example from a checkout on another system)."""
+    def norm(text):
+        return unicodedata.normalize("NFC", unicodedata.normalize("NFC", text).casefold()) if fold else text
+    result = False
+    for pattern in patterns:
+        negate = pattern.startswith("!")
+        candidate = norm(path).replace("\\", "/") if fold else path
+        if glob_to_regex(norm(pattern[1:] if negate else pattern)).fullmatch(candidate):
+            result = not negate
+    return result
+
+
+# --- GitHub ----------------------------------------------------------------------------------------------------------
+
+def gh_json(path):
+    proc = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        status = re.search(r"HTTP (\d{3})", proc.stderr)
+        raise GhError(int(status.group(1)) if status else 0, proc.stderr.strip() or f"gh api {path} failed")
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as error:
+        raise GhError(0, f"gh api {path} returned no JSON") from error
+
+
+def gh_pages(path):
+    items = []
+    for page in range(1, MAX_PAGES + 1):
+        batch = gh_json(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
+        if not isinstance(batch, list):
+            raise Unverifiable(f"{path} did not return a list")
+        items += batch
+        if len(batch) < 100:
+            return items
+    raise Unverifiable(f"{path} has more than {MAX_PAGES} pages")
+
+
+def counted_pages(path, key, same=()):
+    """Every page of an object listing that states its own total_count. The count may change between pages: reading
+    goes on until the items reach the largest count any page stated, and a page that adds nothing before then refuses,
+    so a count that grew is never cut short. The keys in `same` must have one value on every page read (the combined
+    status's state), else it refuses."""
+    items, first, need = [], None, 0
+    for page in range(1, MAX_PAGES + 1):
+        data = gh_json(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
+        total = data.get("total_count") if isinstance(data, dict) else None
+        if not isinstance(total, int) or isinstance(total, bool):
+            raise Unverifiable(f"{path} did not say how many items it holds")
+        first = first or data
+        if any(data.get(k) != first.get(k) for k in same):
+            raise Unverifiable(f"{path} changed its {', '.join(same)} between pages")
+        need = max(need, total)
+        batch = data.get(key) or []
+        items += batch
+        if len(items) >= need:
+            return first, items
+        if not batch:
+            raise Unverifiable(f"{path} lists {need} items but returned {len(items)}")
+    raise Unverifiable(f"{path} has more than {MAX_PAGES} pages")
+
+
+def parse_time(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)
+
+
+def header_record(body):
+    """(kind, fields) of the comment's strict record, or None: the comment's first line, or the line right after a
+    first-line `#` heading, exactly the marker with the exact keys of its kind. Lines end only at CR, LF or CRLF, as
+    in Markdown; any other character on the line makes it no record."""
+    lines = LINE_BREAK.split(body or "")
+    i = 0
+    while i < len(lines) and not lines[i].strip(" \t"):
+        i += 1
+    if i < len(lines) and ATX_HEADING.match(lines[i]):
+        i += 1
+    if i >= len(lines):
+        return None
+    match = RECORD.fullmatch(lines[i].rstrip(" \t"))
+    if not match:
+        return None
+    kind, pairs = match.group(1), [item.split("=", 1) for item in match.group(2).split(" ") if item]
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)) or set(keys) not in RECORD_KEYS[kind]:
+        return None
+    return kind, dict(pairs)
+
+
+class Record:
+    """One marker in a comment, at the moment it was written (strict records) or last could have been (loose
+    markers: the later of the comment's creation and its last edit; an unreadable time counts as now)."""
+
+    def __init__(self, comment, fields, when):
+        self.comment, self.fields, self.when = comment, fields, when
+        cid = comment.get("id")
+        self.id = cid if isinstance(cid, int) and not isinstance(cid, bool) else None
+
+    def after(self, other):
+        """Whether this marker is later than `other`, a strict record. The same comment is never later than itself;
+        within one second the comment ids decide, and an unreadable id counts as later."""
+        if self.comment is other.comment:
+            return False
+        if self.when != other.when:
+            return self.when > other.when
+        return self.id is None or other.id is None or self.id > other.id
+
+    def get(self, key):
+        return self.fields.get(key)
+
+
+class Trust:
+    """Reads the records of one pull request: strictly for what proves, loosely for what contradicts.
+    Who may write a proving record: a User account with write, maintain or admin permission, in a comment never
+    edited. `author_association` is not enough: an organisation MEMBER may have read access only."""
+
+    def __init__(self, repo):
+        self.repo = repo
+        self.cache = {}
+
+    def writer(self, login):
+        if login not in self.cache:
+            try:
+                answer = gh_json(f"repos/{self.repo}/collaborators/{login}/permission")
+            except GhError as error:
+                if error.status != 404:          # 404: not a collaborator at all
+                    raise Unverifiable(f"could not read the repository permission of {escape(login)} "
+                                       f"(HTTP {error.status or '?'})") from error
+                answer = {}
+            answer = answer if isinstance(answer, dict) else {}
+            self.cache[login] = (answer.get("permission") in WRITE_PERMISSIONS
+                                 or answer.get("role_name") in WRITE_ROLES)
+        return self.cache[login]
+
+    def counts(self, comment):
+        user = comment.get("user") or {}
+        login = user.get("login")
+        if user.get("type") != "User" or not isinstance(login, str) or not login:
+            return False
+        cid = comment.get("id")
+        if not isinstance(cid, int) or isinstance(cid, bool):
+            return False
+        created = parse_time(comment.get("created_at"))
+        if created is None or comment.get("updated_at") != comment.get("created_at"):
+            return False                          # edited after it was written, or no time: not the original
+        return self.writer(login)
+
+    def records(self, comments, kind):
+        """The strict, trusted records of `kind`, oldest first."""
+        found = []
+        for comment in comments:
+            record = header_record(comment.get("body"))
+            if record and record[0] == kind and self.counts(comment):
+                found.append(Record(comment, record[1], parse_time(comment["created_at"])))
+        found.sort(key=lambda r: (r.when, r.id))
+        return found
+
+    @staticmethod
+    def markers(comments, kind):
+        """Every marker of `kind` anywhere in any comment, by anyone, read loosely: these never prove anything, they
+        can only contradict. Only the tags of `kind`'s group (SPAN_GROUPS) end a marker's span."""
+        group = next(g for g in SPAN_GROUPS if kind in g)
+        found = []
+        for comment in comments:
+            times = [parse_time(comment.get(key)) for key in ("created_at", "updated_at")]
+            when = max(times) if all(times) else FOREVER
+            text = loose(comment.get("body"))
+            tags = [tag for tag in LOOSE_MARKER.finditer(text) if tag.group(1).lower() in group]
+            for match, end in zip(tags, [tag.start() for tag in tags[1:]] + [len(text)]):
+                if match.group(1).lower() == kind and counts_as_marker(text, match, end):
+                    found.append(Record(comment, fields_of(text[match.end():end].lower()), when))
+        return found
+
+
+def fields_of(span):
+    """The fields of a marker, read from its whole span in loose(), lower-cased text: from its tag up to the next tag
+    of its group in its comment (or the comment's end), on every line of it. A key given more than one value there reads as all of
+    them, joined by a space; no value holds a space, so that equals no single value, and a dirty field anywhere in
+    the span is never hidden by a clean one before or after it. A value longer than LOOSE_FIELD reads ends in `>`,
+    which no value holds either, so a long dirty value never shortens to a clean one."""
+    fields = {}
+    for key, value, more in LOOSE_FIELD.findall(span):
+        fields.setdefault(key, {})[value + ">" if more else value] = None
+    return {key: " ".join(values) for key, values in fields.items()}
+
+
+def counts_as_marker(text, match, end):
+    """Whether a LOOSE_MARKER match in loose() `text` is a marker rather than a mention of the tag in prose. A tag with
+    a record field after it is a marker: a RECORD_FIELD anywhere between the tag and `end` (the next tag of its group,
+    or the end of the comment), whatever words, fences, quotes or punctuation come between. So is a tag that opens an HTML comment
+    (`<!--`, raw or escaped, then only spaces before it), fields or not: that is the marker's own form, not prose. Only
+    a tag with neither is a mention. Each tag is judged on its own comment, up to that next tag: text in another comment
+    or before the tag never changes the answer."""
+    start = match.start()
+    while start and text[start - 1].isspace():      # only the spaces right before this tag: linear over all tags
+        start -= 1
+    return text.endswith(COMMENT_OPEN, 0, start) or RECORD_FIELD.search(text, match.end(1), end) is not None
+
+
+def in_force(records, before):
+    """The latest strict record that `before` accepts (written early enough), or None."""
+    earlier = [record for record in records if before(record)]
+    return earlier[-1] if earlier else None
+
+
+def contradicted(markers, record, agrees):
+    """Whether any loose marker later than `record` fails to say the same thing."""
+    return any(marker.after(record) and not agrees(marker) for marker in markers)
+
+
+def merged_pr(repo, sha, branch):
+    """The pull request that was merged into `branch` as exactly `sha`, or None. Right after a merge GitHub's
+    commit-to-pull-request lookup lags and answers with an empty list: that one answer, and only that, is asked again
+    (LOOKUP_WAIT seconds apart, said on stderr). The waits are one budget per run (LOOKUP_TRIES - 1, shared by every
+    commit of the range): only the newest merge lags, and a commit that truly has no pull request is refused without
+    a wait once the budget is spent. A list with pull requests in it is final, and so is every error."""
+    global lookup_waits_left
+    path = f"repos/{repo}/commits/{sha}/pulls"
+    pulls = gh_pages(path)
+    said = False
+    while not pulls and lookup_waits_left > 0:
+        if not said:
+            print(f"factory-release-check: no pull request is listed for {sha[:7]} yet (GitHub can lag right after a "
+                  f"merge); asking again, {LOOKUP_WAIT}s apart, up to {lookup_waits_left} more time(s) in this run",
+                  file=sys.stderr)
+            said = True
+        lookup_waits_left -= 1
+        time.sleep(LOOKUP_WAIT)
+        pulls = gh_pages(path)
+    for pr in pulls:
+        if pr.get("merged_at") and pr.get("merge_commit_sha") == sha and (pr.get("base") or {}).get("ref") == branch:
+            return pr
+    return None
+
+
+class GhReads:
+    """The GitHub reads prove() makes, with `gh api`: the default, for agent-token mode off and for CI. factory gate
+    passes prove() another object with the same methods in agent-token mode on, which reads the same fields through
+    the broker's verbs (reference/github-access.md), checked and rebuilt there. A failed read raises GhError (or
+    Unverifiable, for a listing it cannot read whole) in both."""
+
+    def commit_tree(self, repo, sha):
+        """The tree SHA of commit `sha`, as GitHub has it."""
+        return gh_json(f"repos/{repo}/git/commits/{sha}")["tree"]["sha"]
+
+    def check_runs(self, repo, sha):
+        """Every check run attempt on `sha` (filter=all), all of them or Unverifiable."""
+        return counted_pages(f"repos/{repo}/commits/{sha}/check-runs?filter=all", "check_runs")[1]
+
+    def job_ran(self, repo, job):
+        """False when the Actions job `job` has no steps and no runner (the service never started it), else True."""
+        data = gh_json(f"repos/{repo}/actions/jobs/{job}")
+        return not (isinstance(data, dict) and not data.get("steps") and not data.get("runner_name")
+                    and not data.get("runner_id"))
+
+    def status_history(self, repo, sha):
+        """Every commit status ever set on `sha`."""
+        return gh_pages(f"repos/{repo}/commits/{sha}/statuses")
+
+    def combined_status(self, repo, sha):
+        """(the combined status of `sha`, every status in it), all of them or Unverifiable."""
+        return counted_pages(f"repos/{repo}/commits/{sha}/status", "statuses", same=("state",))
+
+    def fetch_pull_head(self, remote, number, head):
+        return fetch_pull_head(remote, number, head)
+
+
+GH_READS = GhReads()
+
+
+def never_started(repo, run, reads=GH_READS):
+    """A GitHub Actions job the service refused to start (billing, spending limit): failure, no runner, no steps. A
+    job that cannot be read is not shown never started."""
+    if (run.get("app") or {}).get("slug") != "github-actions" or run.get("conclusion") != "failure":
+        return False
+    try:
+        return not reads.job_ran(repo, run["id"])
+    except GhError:
+        return False
+
+
+def check_problems(repo, head, ignore, kind, gate_time, merged, reads=GH_READS):
+    """What on `head` stops the gate record's claim of `kind` (ci or local) from holding. Nothing is judged in
+    aggregate: every check (by app and name) and every status context is judged on its own, as it stood when the
+    gate record was written and at the merge, so one green item never stands in for another.
+
+    A check run attempt runs from `started_at` to `completed_at`; an unknown start counts as "before the gate".
+    For each check:
+      - the latest attempt finished by the gate is the one in force: it must have passed. A job the CI service
+        never started is acceptable under local evidence only; a job that ran and failed never is;
+      - a failure is only superseded by a re-run in the same check suite (the same workflow run). The same job name
+        in another run is not a re-run: its failure stands, so two workflows with one job name cannot mask each
+        other;
+      - no attempt may have been running when the gate record was written, or at the merge;
+      - no attempt may be unfinished now, and none may have failed since.
+    A check with no attempt started by the merge was not part of what was gated: it only counts if it fails.
+    A status has no start time. For each context:
+      - the latest status reported by the gate is the one in force: it must be `success`;
+      - a context first reported after the gate counts as having been running at the gate, unless its history
+        starts with `pending` (then it started there);
+      - it may not have been pending at the merge, and no status since the gate may be a failure or an error.
+    With `ci`, at least one check must have run and succeeded by the gate."""
+    problems, succeeded = [], 0
+    runs = reads.check_runs(repo, head)
+    checks = {}
+    for run in runs:
+        if run.get("name") in ignore and (run.get("app") or {}).get("slug") == "github-actions":
+            continue                              # the calling recipe's own deploy jobs, and only those
+        checks.setdefault(((run.get("app") or {}).get("slug"), run.get("name")), []).append(run)
+    for (_, raw_name), attempts in checks.items():
+        name, finished = escape(raw_name), []
+        for run in attempts:
+            start, end = parse_time(run.get("started_at")), parse_time(run.get("completed_at"))
+            if run.get("status") != "completed":
+                problems.append(f"{name} has not finished")
+                end = FOREVER
+            elif end is None:
+                raise Unverifiable(f"check {name} on {head[:7]} has no completion time")
+
+            def running_at(moment, start=start, end=end):
+                return (start is None or start <= moment) and end > moment
+            if running_at(gate_time):
+                problems.append(f"{name} was still running when the gate record was written")
+            elif running_at(merged):
+                problems.append(f"{name} was still running at the merge")
+            if end <= gate_time:
+                finished.append((end, run.get("id") or 0, run))
+            elif end is not FOREVER and run.get("conclusion") not in PASSED and not never_started(repo, run, reads):
+                problems.append(f"{name} {escape(run.get('conclusion'))} after the gate record")
+        if finished:
+            finished.sort(key=lambda item: item[:2])
+            per_suite = {}
+            for _, _, run in finished:
+                per_suite[(run.get("check_suite") or {}).get("id")] = run        # the latest of each suite
+            for run in per_suite.values():
+                if run.get("conclusion") not in PASSED and not never_started(repo, run, reads):
+                    problems.append(f"{name} {escape(run.get('conclusion'))}")
+            run = finished[-1][2]                                  # the attempt in force at the gate
+            if run.get("conclusion") in PASSED:
+                succeeded += run.get("conclusion") == "success"
+            elif kind == "ci" and never_started(repo, run, reads):
+                problems.append(f"{name} never started, so CI cannot be the evidence")
+    # Commit statuses: the history per context for the time order, the combined status for what holds now.
+    history = reads.status_history(repo, head)
+    contexts = {}
+    for status in history:
+        when = parse_time(status.get("created_at"))
+        if when is None:
+            raise Unverifiable(f"a commit status on {head[:7]} has no time")
+        contexts.setdefault(status.get("context"), []).append((when, status.get("id") or 0, status))
+    for raw_context, entries in contexts.items():
+        context = escape(raw_context)
+        entries.sort(key=lambda item: item[:2])
+        at_gate = [status for when, _, status in entries if when <= gate_time]
+        at_merge = [status for when, _, status in entries if when <= merged]
+        since = [status for when, _, status in entries if when > gate_time]
+        if at_gate:
+            if at_gate[-1].get("state") != "success":
+                problems.append(f"status {context} {escape(at_gate[-1].get('state'))}")
+        elif entries[0][2].get("state") != "pending":
+            problems.append(f"status {context} was first reported after the gate record, with no start to show "
+                            f"that it was not already running")
+        if at_merge and at_merge[-1].get("state") == "pending" and at_merge[-1] is not (at_gate or [None])[-1]:
+            problems.append(f"status {context} was pending at the merge")
+        for status in since:
+            if status.get("state") in ("failure", "error") or status.get("state") not in STATUS_STATES:
+                problems.append(f"status {context} {escape(status.get('state'))} after the gate record")
+    combined, statuses = reads.combined_status(repo, head)
+    state = combined.get("state")
+    if state not in STATUS_STATES:
+        raise Unverifiable(f"the combined status of {head[:7]} is unreadable ({escape(state)})")
+    if combined["total_count"] and state != "success":
+        problems.append(f"combined commit status {state}")
+    for status in statuses:
+        if status.get("state") != "success":
+            problems.append(f"status {escape(status.get('context'))} {escape(status.get('state'))}")
+        if status.get("context") not in contexts:
+            raise Unverifiable(f"the status history of {head[:7]} lacks {escape(status.get('context'))}")
+    if kind == "ci" and not succeeded and not problems:
+        problems.append("no check ran and succeeded before the gate record")
+    return list(dict.fromkeys(problems))
+
+
+def loose_sources(repo, pr):
+    """Everything else on a pull request where a contradicting marker or a hold line could sit: its description,
+    its formal reviews and its inline review comments, shaped like comments. They never hold a proving record. The
+    description has no usable time, so a marker in it always counts as later."""
+    number = pr["number"]
+    sources = [{"body": pr.get("body"), "user": {"type": "User"}}]
+    for review in gh_pages(f"repos/{repo}/pulls/{number}/reviews"):
+        sources.append({"body": review.get("body"), "user": review.get("user"),
+                        "created_at": review.get("submitted_at"), "updated_at": review.get("submitted_at")})
+    for inline in gh_pages(f"repos/{repo}/pulls/{number}/comments"):
+        sources.append({"body": inline.get("body"), "user": inline.get("user"),
+                        "created_at": inline.get("created_at"), "updated_at": inline.get("updated_at")})
+    return sources
+
+
+def prove(repo, sha, pr, comments, others, ignore_checks, trust, remote="origin", reads=GH_READS):
+    """None when the gate chain holds for this merge commit, else the reason it does not. Each record must have been
+    in force when it was relied on, and nothing later may contradict it (see the module docstring). Proving records
+    come only from `comments`; contradicting markers from `comments` and `others` alike. Every GitHub read goes
+    through `reads` (GhReads, or factory gate's broker reads in agent-token mode on), every permission through
+    `trust`."""
+    everywhere = comments + others
+    number, head = pr["number"], (pr.get("head") or {}).get("sha") or ""
+    if not FULL_SHA.fullmatch(head):
+        return f"#{number} has no full head SHA"
+    merged = parse_time(pr.get("merged_at"))
+    if merged is None:
+        return f"#{number} has no readable merge time"
+
+    # 1. The gate record in force at the merge, and the last word on gates.
+    gates = trust.records(comments, "gate")
+    gate = in_force(gates, lambda record: record.when <= merged)
+    if gate is None:
+        if any(record.get("head") == head for record in gates):
+            return f"#{number}: the gate record for head {head[:7]} was written after the merge"
+        return f"#{number} has no gate record for its final head {head[:7]} by a person with write access"
+    if gate.get("head") != head:
+        return f"#{number} has no gate record for its final head {head[:7]}: the gate record in force at the " \
+               f"merge is for {escape(gate.get('head')[:12])}"
+    if gate.get("result") != "pass":
+        return f"#{number}: the latest gate record for head {head[:7]} says result={escape(gate.get('result'))}"
+    if contradicted(trust.markers(everywhere, "gate"), gate, lambda marker: False):
+        if any(record.after(gate) for record in gates):
+            return f"#{number}: a gate record for head {head[:7]} was written after the merge"
+        return f"#{number}: a gate marker was written after the gate record in force at the merge; delete that " \
+               f"comment if it is not a gate result"
+
+    # 2. The merged result is exactly what the gate tested.
+    parents = git("rev-list", "--parents", "-n", "1", sha).split()[1:]
+    if not parents or gate.get("base") != parents[0]:
+        return f"#{number} was gated against base {escape(gate.get('base')[:12])}, but {sha[:7]} sits on " \
+               f"{parents[0][:7] if parents else 'nothing'}"
+    head_tree = tree_of(sha)
+    if reads.commit_tree(repo, head) != head_tree:
+        return f"#{number} merged as {sha[:7]}, whose content differs from the gated head {head[:7]}"
+
+    # 3. The checks the gate relied on, as they stood when it was written.
+    kind = gate.get("checks")
+    if kind not in ("ci", "local"):
+        return f"#{number}: the gate record names no known kind of check evidence ({escape(kind)})"
+    problems = check_problems(repo, head, ignore_checks, kind, gate.when, merged, reads)
+    if problems:
+        return f"#{number}: the checks on {head[:7]} do not back the gate record ({kind}): {'; '.join(problems)}"
+    if kind == "local":
+        def passes(record):
+            """Evidence for this head: with tree=, the checks ran on exactly the head's tree (on whichever commit,
+            such as a batch's combined tree); without it (older records), they ran on the head itself."""
+            tested = record.get("tree") if "tree" in record.fields else None
+            covers = tested == head_tree if tested is not None else record.get("head") == head
+            return covers and record.get("result") == "pass"
+
+        def agrees(marker):
+            """A later evidence marker that says the same: result=pass, for this head or for its tree."""
+            return marker.get("result") == "pass" and (marker.get("head") == head or marker.get("tree") == head_tree)
+        cited = [record for record in trust.records(comments, "evidence")
+                 if str(record.id) == gate.get("evidence") and gate.after(record)]
+        if not cited or not passes(cited[-1]):
+            return f"#{number}: the gate record cites local evidence {escape(gate.get('evidence'))}, but no unedited " \
+                   f"evidence record with that id for {head[:7]} (or for its tree {head_tree[:7]}), by a person " \
+                   f"with write access and written before the gate record, says result=pass"
+        if contradicted(trust.markers(everywhere, "evidence"), cited[-1], agrees):
+            return f"#{number}: the gate record cites local evidence {escape(gate.get('evidence'))}, but a later " \
+                   f"evidence marker does not say result=pass for {head[:7]} or its tree"
+
+    # 4. The review in force when the gate record was written, and every review marker since.
+    reviews = trust.records(comments, "review")
+    review = in_force(reviews, gate.after)
+    if review is None:
+        if reviews:
+            return f"#{number} has no review record written before its gate record: a review posted afterwards " \
+                   f"cannot have been what the gate relied on"
+        return f"#{number} has no review record by a person with write access"
+    reviewed = review.get("head")
+    if reviewed != head:
+        stale = f"#{number}: the review in force at the gate is of head {escape(reviewed[:12])}, not the gated head " \
+                f"{head[:7]}"
+        if not FULL_SHA.fullmatch(reviewed):
+            return f"{stale}, and it names no full head SHA"
+        if not reads.fetch_pull_head(remote, number, head):
+            return f"{stale}, and whether it carries over cannot be checked: the commits of #{number} up to " \
+                   f"{head[:7]} are not in the clone and could not be fetched from {escape(remote)}"
+        why = carried_review(reviewed, head, parents[0])
+        if why:
+            return f"{stale}, and it does not carry over: {reviewed[:7]} {why}"
+
+    def clean(marker):
+        return (marker.get("head") in (head, reviewed) and marker.get("verdict") == "merge"
+                and all(marker.get(key) == "0" for key in ("p0", "p1", "p2", "human")))
+    if review.get("verdict") != "merge":
+        return f"#{number}: the review in force at the gate has verdict {escape(review.get('verdict'))}, not merge"
+    if not clean(review) or not COUNT.fullmatch(review.get("release_hold")):
+        return f"#{number}: the review in force at the gate still has open findings or human gates"
+    if contradicted(trust.markers(everywhere, "review"), review, clean):
+        return f"#{number}: a review marker later than the review in force at the gate is not a clean merge " \
+               f"review of {head[:7]} or the reviewed head (open findings, another head or another verdict)"
+    return None
+
+
+def holds(sources):
+    """H7 release holds recorded on the pull request, read loosely (any of these holds): `release hold: H7 ...`
+    lines in its description or in any comment or review by a person, and any review marker anywhere in them whose
+    release_hold is not 0, or is unreadable. An approval is never read from here: it is bound to the released commit
+    and comes with the deploy run (deploy contract, rule 7)."""
+    people = [c for c in sources if (c.get("user") or {}).get("type") == "User"]
+    texts = [loose(c.get("body")) for c in people]
+    lines = list(dict.fromkeys(escape(m.group(0).strip()) for t in texts for m in HOLD_LINE.finditer(t)))
+    counts = [marker.get("release_hold") for marker in Trust.markers(people, "review")
+              if "release_hold" in marker.fields]
+    held = [c for c in counts if not (COUNT.fullmatch(c) and int(c) == 0)]
+    if held and not lines:
+        lines = [f"release hold recorded by a review (release_hold={escape(held[-1])})"]
+    return lines
+
+
+# --- commands --------------------------------------------------------------------------------------------------------
+
+def check(args):
+    """Prints the findings of the range, then, with --target, its version line (built from the same findings)."""
+    require_full_history()
+    if args.target:
+        target_name(args.target)
+    end = resolve(args.end)
+    if end is None:
+        sys.exit(f"factory-release-check: {escape(args.end)!r} is not a commit")
+    start = resolve(args.start) if args.start else None
+    if args.start and (start is None or not is_ancestor(start, end)):
+        print(f"factory-release-check: {escape(args.start)!r} is not a commit before {end}; the range is unknown",
+              file=sys.stderr)
+        sys.exit(2)
+    view = Range(start, end)
+    breaking = findings(view, args)
+    if args.target:
+        version, bump, previous = release_version(view, args.target, breaking)
+        print(f"version: {version} bump={bump} previous={previous or 'none'} tag={version_tag(args.target, version)}")
+
+
+def findings(view, args):
+    """Prints every finding of the range; returns whether any of them was breaking:."""
+    breaking = False
+    for sha in view.commits:
+        if view.is_breaking(sha):
+            breaking = True
+            print(f"breaking: {sha[:7]} {escape(subject_of(sha))}")
+    patterns = json.loads(args.migrations or "[]")
+    if patterns and view.start:
+        for path in view.paths():
+            if selected(path, patterns, fold=True):
+                print(f"migration: {escape(path)}")
+    if not (args.prove or args.holds):
+        return breaking
+    if not (args.repo and args.branch):
+        sys.exit("factory-release-check: --prove and --holds need --repo and --branch")
+    trust = Trust(args.repo)
+    for sha in view.line:
+        try:
+            pr = merged_pr(args.repo, sha, args.branch)
+            if pr is None:
+                if args.prove:
+                    print(f"not-gated: {sha[:7]} no pull request was merged into {escape(args.branch)} "
+                          f"as this exact commit")
+                continue
+            comments = gh_pages(f"repos/{args.repo}/issues/{pr['number']}/comments")
+            others = loose_sources(args.repo, pr)
+            reason = (prove(args.repo, sha, pr, comments, others, set(args.ignore_check), trust, args.remote)
+                      if args.prove else None)
+            hold_lines = holds(others + comments) if args.holds else []
+            titled = text_is_breaking(pr.get("title")) and not view.is_breaking(sha)
+        except (Unverifiable, GhError, KeyError, TypeError, AttributeError, ValueError) as error:
+            why = str(error).splitlines()[0] if str(error) else type(error).__name__
+            print(f"not-gated: {sha[:7]} could not be checked: {escape(why)}")
+            continue
+        if titled:      # the title marks what the commit message no longer says (an edited squash message)
+            breaking = True
+            print(f"breaking: {sha[:7]} #{pr['number']} {escape(next(iter(lines_of(pr.get('title'))), ''))}")
+        if reason:
+            print(f"not-gated: {sha[:7]} {reason}")
+        for hold_line in hold_lines:
+            print(f"hold: #{pr['number']} {hold_line}")
+    return breaking
+
+
+def notes(args):
+    end = resolve(args.end)
+    if end is None:
+        sys.exit(f"factory-release-check: {escape(args.end)!r} is not a commit")
+    end7 = end[:7]
+    if args.version:
+        if not SEMVER.fullmatch(args.version):
+            sys.exit(f"factory-release-check: {escape(args.version)!r} is not a version (X.Y.Z)")
+        date = args.date or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        try:
+            datetime.date.fromisoformat(date if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", date) else "")
+        except ValueError:
+            sys.exit(f"factory-release-check: {escape(date)!r} is not a date (YYYY-MM-DD)")
+        print(f"## {args.version} ({date})\n")
+    if args.title:
+        print(f"### {args.title}\n")
+    start = resolve(args.start) if args.start else None
+    if not (start and is_ancestor(start, end)):
+        print("The version that was live before names no commit the factory knows, so the range is unknown.")
+        print(f"This release is `{end7}`: {escape(subject_of(end))}")
+        return
+    if args.changelog:
+        added = [line[1:] for line in git("diff", "--unified=0", start, end, "--", args.changelog)
+                 .splitlines() if line.startswith("+") and not line.startswith("+++")]
+        if any(line.strip() for line in added):
+            print(f"From `{start[:7]}` to `{end7}`, from `{args.changelog}`:\n")
+            print("\n".join(escape(line) for line in added))
+            return
+    entries = Range(start, end).line
+    if not entries:
+        print(f"No changes: `{end7}` was already live.")
+        return
+    print(f"From `{start[:7]}` to `{end7}`, {len(entries)} change{'s' if len(entries) != 1 else ''}:\n")
+    for sha in entries:
+        print(f"- {escape(subject_of(sha))} (`{sha[:7]}`)")
+
+
+def version(args):
+    """The version recorded on one commit, or nothing (VERSIONS above)."""
+    target = target_name(args.target)
+    at = resolve(args.at)
+    found = highest(recorded_versions(target, at)) if at else None
+    if found:
+        print(found)
+
+
+def main(argv=None):
+    global lookup_waits_left
+    lookup_waits_left = LOOKUP_TRIES - 1   # one wait budget per run, shared by every commit of the range
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    p_check = sub.add_parser("check")
+    p_check.add_argument("--from", dest="start", default="")
+    p_check.add_argument("--to", dest="end", required=True)
+    p_check.add_argument("--migrations", default="[]")
+    p_check.add_argument("--repo", default="")
+    p_check.add_argument("--branch", default="")
+    p_check.add_argument("--prove", action="store_true")
+    p_check.add_argument("--holds", action="store_true")
+    p_check.add_argument("--ignore-check", action="append", default=[])
+    p_check.add_argument("--remote", default="origin")
+    p_check.add_argument("--target", default="")
+    p_check.set_defaults(func=check)
+    p_version = sub.add_parser("version")
+    p_version.add_argument("--target", required=True)
+    p_version.add_argument("--at", required=True)
+    p_version.set_defaults(func=version)
+    p_notes = sub.add_parser("notes")
+    p_notes.add_argument("--from", dest="start", default="")
+    p_notes.add_argument("--to", dest="end", required=True)
+    p_notes.add_argument("--changelog", default="")
+    p_notes.add_argument("--title", default="")
+    p_notes.add_argument("--version", default="")
+    p_notes.add_argument("--date", default="")
+    p_notes.set_defaults(func=notes)
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

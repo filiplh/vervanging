@@ -1,0 +1,2747 @@
+#!/bin/sh
+''':'
+# The shell part: find Python 3, or block. Claude Code lets a tool call through when a hook exits with anything but 2.
+command -v python3 > /dev/null 2>&1 || { echo "factory-hook: blocked: python3 is not on PATH, so this hook cannot judge the call" >&2; exit 2; }
+exec python3 -I -B "$0" "$@"
+'''
+"""factory-hook: the factory's Claude Code hooks, one file for four events (core/hooks/README.md says what each one
+blocks, why, and what it cannot see).
+
+    sh "$CLAUDE_PROJECT_DIR"/.factory/hooks/factory-hook        reads the hook's JSON on stdin
+
+PreToolUse   Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep. Exit 2 blocks the call and its message goes to
+             the agent; exit 0 lets it through. It blocks pushes to the default branch, force pushes, a push the hook
+             cannot read, `gh pr merge --admin` and `--auto`, every merge that `factory gate <P>` does not pass, a
+             merge or API write that is not the one command of the call, merges through the API, deploy approvals,
+             commands that print a credential or read a credential file, writes to acceptance/ and .factory/hooks/,
+             and clearing the emergency stop. Before a push, opening a pull request, marking it ready or a merge, it
+             runs `factory-pause status`: paused (3) or cannot tell (1, twice) blocks. It guards against an agent's
+             mistakes, not against an agent that sets out to get around it (README, "What the hooks cannot see").
+PostToolUse  Bash. Records a green `factory verify` or `factory verify --no-heavy` (no pull request) on the checkout's
+             HEAD, from its own output, so the Stop hook does not run it again; one with an assignment (other than
+             FACTORY_TEST_WORKERS=<n>) or `env` in front is recorded as not counted. Never blocks.
+Stop         Refuses an implementer's "done" (a final message with the implementer report's heading that ends with
+             the `PR <URL>, head <SHA>, checks and reviews <state>` line) until `factory verify` has a green run on the
+             current commit: a recorded one (full or --no-heavy), or a `factory verify --no-heavy` this hook runs,
+             which leaves each heavy check to the gate (factory-implement § 5.2) and says so. A pause lets the agent
+             stop, and so does a report that says the work is not done (a line starting with "Not done:"); the same
+             done report is refused again.
+SubagentStop The same check, on the final report of a builder that runs as an in-process subagent (its stop ends with
+             this event, not Stop). It reads only the fields both events carry (`cwd`, `last_assistant_message`,
+             `stop_hook_active`) and ignores the subagent-only ones (`agent_id`, `agent_type`, transcript paths).
+
+Every run has one deadline below its registration's timeout, and every subprocess gets at most what is left of it, so
+the hook answers before Claude Code would cancel it.
+
+Where the tools cannot decide (no factory.yaml, agent-token mode on, a tool missing, a timeout), the dangerous actions
+are blocked and the message says why. An internal error blocks too. The tools it runs are the core's own, next to this
+folder: ../bin/factory (gate, verify) and ../bin/factory-pause. It never reads, asks for or prints a credential, and
+it calls GitHub only through those tools and `git ls-remote` (when the remote's default branch is not known locally).
+
+Standard library only; Python 3.8 and later, on macOS and Linux.
+"""
+
+import importlib.util
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.parse
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BIN = os.path.join(os.path.dirname(HERE), "bin")
+sys.dont_write_bytecode = True
+
+PAUSE_TIMEOUT = 120      # one factory-pause status call
+GATE_TIMEOUT = 480       # factory gate; the PreToolUse entry's timeout (600 s) leaves room for the rest
+VERIFY_TIMEOUT = 3300    # factory verify from the Stop hook; its entry's timeout is 3600 s
+GIT_TIMEOUT = 30
+# One total deadline per run, below the registration's timeout (600 s, 60 s, 3600 s in core/templates/
+# claude-settings.json; SubagentStop shares Stop's): every subprocess gets at most what is left of it, minus a moment to print the denial, so the
+# hook always answers before Claude Code cancels it (a cancelled hook lets the call through). FACTORY_HOOK_BUDGET
+# (seconds) can only lower it, for tests.
+BUDGETS = {"PreToolUse": 540, "PostToolUse": 50, "Stop": 3480, "SubagentStop": 3480}
+STOP_EVENTS = ("Stop", "SubagentStop")   # the two events that end an agent's turn; the same check for both
+ANSWER_MARGIN = 0.5
+_deadline = []
+MAX_DEPTH = 8            # nested scripts (sh -c, eval, $( ), aliases) read before the hook gives up and blocks
+RECORD = "factory-hook-verify"   # in the checkout's own git folder: "<head> <green|green-no-heavy|uncounted|red|error>"
+NAME_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _load_doctor():
+    spec = importlib.util.spec_from_file_location("factory_doctor", os.path.join(BIN, "factory-doctor.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_doctor_cache = []
+
+
+def doctor():
+    """factory-doctor.py next to the tools, loaded when first needed (most calls never need it), or None."""
+    if not _doctor_cache:
+        try:
+            _doctor_cache.append(_load_doctor())
+        except BaseException:  # noqa: B036 (without it, --repo cannot be confirmed and text is not redacted)
+            _doctor_cache.append(None)
+    return _doctor_cache[0]
+
+
+def redact(text):
+    d = doctor()
+    return d.redact(text) if d else text
+
+
+def clean(text):
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", str(text))
+
+
+class Blocked(Exception):
+    pass
+
+
+class Unreadable(Exception):
+    pass
+
+
+def set_deadline(event):
+    budget = BUDGETS.get(event, BUDGETS["PostToolUse"])
+    try:
+        lower = float(os.environ.get("FACTORY_HOOK_BUDGET", ""))
+    except ValueError:
+        lower = 0
+    if 0 < lower < budget:
+        budget = lower
+    _deadline[:] = [time.monotonic() + budget]
+
+
+def run(argv, cwd, timeout):
+    """(exit code, stdout+stderr text) of a command; 124 when it would outlast its timeout or the run's deadline (then
+    its whole process group is killed, so a child it started cannot hold the hook open), 127 when it cannot start."""
+    if _deadline:
+        timeout = min(timeout, _deadline[0] - time.monotonic() - ANSWER_MARGIN)
+    if timeout <= 0:
+        return 124, ""
+    try:
+        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+    except (OSError, ValueError):
+        return 127, ""
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, out.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            p.kill()
+        try:
+            p.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        return 124, ""
+
+
+def git(cwd, *args):
+    """git's stripped output, or None when it fails."""
+    rc, out = run(["git"] + list(args), cwd, GIT_TIMEOUT)
+    return out.strip() if rc == 0 else None
+
+
+# --- reading shell commands ------------------------------------------------------------------------------------------
+# A small reader for the POSIX shell grammar, as far as a guard needs it: words with their quoting (single and double
+# quotes, backslashes, $'...'), expansions ($NAME, ${...}, $( ), backticks, $(( ))), whose inner scripts are read too,
+# operators (; & && || | |& ( ) newline) that split simple commands, redirections with their targets, here-documents
+# and here-strings, comments and line continuations. A word that holds an expansion or an unquoted glob is not plain
+# text: where a guard needs its value (a refspec, a pull request number), it blocks. Anything the reader cannot read
+# (an open quote, an unmatched parenthesis) blocks the whole call.
+
+OPS = ("&>>", "<<<", "<<-", "&&", "||", ";;", "|&", ">>", "<<", ">&", "<&", "<>", ">|", "&>",
+       ";", "&", "|", "(", ")", "<", ">")
+SEPARATORS = {";", "&", "&&", "||", "|", "|&", "(", ")", "\n", ";;"}
+LIST_OPS = SEPARATORS - {"\n"}   # a second line is a list too: it counts as a second command (see Guard.script)
+REDIRECTS = {"<", ">", ">>", "<<", "<<-", "<<<", ">&", "<&", "<>", ">|", "&>", "&>>"}
+WRITES = {">", ">>", ">|", "&>", "&>>", "<>"}
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+class Word:
+    def __init__(self):
+        self.text = ""
+        self.quoted = False      # some part was quoted or escaped
+        self.plain_start = None  # the first character was an unquoted ordinary one
+        self.expanded = False    # holds an expansion: its value is not known here
+        self.glob = False        # holds an unquoted * ? or [
+        self.names = []          # the variables it expands
+        self.io = False          # an fd number before a redirection (2 in 2>&1)
+
+    def literal(self):
+        return not self.expanded and not self.glob
+
+
+class Op:
+    def __init__(self, op):
+        self.op = op
+        self.delim = None
+        self.delim_quoted = False
+        self.body = None         # a here-document's text
+        self.body_word = None    # its expansions, when the delimiter is not quoted
+
+
+class Lexer:
+    def __init__(self, s):
+        self.s = s
+        self.nested = []         # inner scripts: $( ), backticks, ${ }, here-document expansions
+        self.runs = False        # a command substitution ($( ) or backticks) runs a command before the one it is in
+
+    def match_close(self, i, open_ch, close_ch):
+        """The index of the close_ch that ends the open_ch at i, skipping quotes, escapes and here-document bodies
+        (so a body with a quote or a parenthesis in `"$(cat <<'EOF' ... EOF)"` does not end it early)."""
+        s, depth, j, pending = self.s, 0, i, []
+        while j < len(s):
+            c = s[j]
+            if c == "\\":
+                j += 2
+                continue
+            if c == "\n" and pending:
+                j += 1
+                for delim, tabs in pending:
+                    while j < len(s):
+                        eol = s.find("\n", j)
+                        line = s[j:] if eol < 0 else s[j:eol]
+                        j = len(s) if eol < 0 else eol + 1
+                        if (line.lstrip("\t") if tabs else line) == delim:
+                            break
+                pending = []
+                continue
+            if open_ch == "(" and s.startswith("<<", j) and not s.startswith("<<<", j):
+                k = j + 2
+                tabs = s.startswith("-", k)
+                k += 1 if tabs else 0
+                while k < len(s) and s[k] in " \t":
+                    k += 1
+                m = re.match(r"'([^']*)'|\"([^\"]*)\"|((?:\\.|[^\s;&|()<>])+)", s[k:])
+                if m:
+                    delim = m.group(1) if m.group(1) is not None else m.group(2) if m.group(2) is not None else \
+                        m.group(3).replace("\\", "").replace("'", "").replace('"', "")
+                    pending.append((delim, tabs))
+                    j = k + m.end()
+                    continue
+            if c == "'" and open_ch != "{":
+                k = s.find("'", j + 1)
+                if k < 0:
+                    raise Unreadable("a single quote is not closed")
+                j = k + 1
+                continue
+            if c == '"':
+                j = self.skip_dquote(j)
+                continue
+            if c == "`":
+                j = self.skip_backtick(j)
+                continue
+            if c == open_ch:
+                depth += 1
+            elif c == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return j
+            j += 1
+        raise Unreadable("a %s is not closed" % open_ch)
+
+    def skip_dquote(self, i):
+        s, j = self.s, i + 1
+        while j < len(s):
+            c = s[j]
+            if c == "\\":
+                j += 2
+                continue
+            if c == '"':
+                return j + 1
+            if c == "$" and s.startswith("$(", j):
+                j = self.match_close(j + 1, "(", ")") + 1
+                continue
+            if c == "`":
+                j = self.skip_backtick(j)
+                continue
+            j += 1
+        raise Unreadable("a double quote is not closed")
+
+    def skip_backtick(self, i):
+        s, j = self.s, i + 1
+        while j < len(s):
+            if s[j] == "\\":
+                j += 2
+                continue
+            if s[j] == "`":
+                return j + 1
+            j += 1
+        raise Unreadable("a backtick is not closed")
+
+    def dollar(self, i, w, in_dquote):
+        s = self.s
+        nx = s[i + 1] if i + 1 < len(s) else ""
+        if nx == "(":
+            j = self.match_close(i + 1, "(", ")")
+            inner = s[i + 2:j]
+            if inner.startswith("(") and inner.endswith(")"):
+                inner = inner[1:-1]
+                self.runs = self.runs or "$(" in inner or "`" in inner
+            else:
+                self.runs = True
+            self.nested.append(inner)
+            w.text += s[i:j + 1]
+            w.expanded = True
+            return j + 1
+        if nx == "{":
+            j = self.match_close(i + 1, "{", "}")
+            inner = s[i + 2:j]
+            m = re.match(r"[!#]?([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])", inner)
+            if m:
+                w.names.append(m.group(1))
+                rest = inner[m.end():]
+            else:
+                rest = inner
+            if rest:
+                self.nested.append(rest)
+                self.runs = self.runs or "$(" in rest or "`" in rest
+            w.text += s[i:j + 1]
+            w.expanded = True
+            return j + 1
+        m = NAME.match(s, i + 1)
+        if m:
+            w.names.append(m.group(0))
+            w.text += "$" + m.group(0)
+            w.expanded = True
+            return m.end()
+        if nx and (nx.isdigit() or nx in "@*#?$!-"):
+            w.text += s[i:i + 2]
+            w.expanded = True
+            return i + 2
+        if nx == "'" and not in_dquote:      # $'...': read as text the hook does not decode
+            j = i + 2
+            while j < len(s) and s[j] != "'":
+                j += 2 if s[j] == "\\" else 1
+            if j >= len(s):
+                raise Unreadable("a $' quote is not closed")
+            w.text += s[i:j + 1]
+            w.expanded = True
+            return j + 1
+        if nx == '"' and not in_dquote:      # $"...": a double-quoted string
+            return self.dquote(i + 1, w)
+        w.text += "$"
+        return i + 1
+
+    def backtick(self, i, w):
+        s, j, inner = self.s, i + 1, ""
+        while j < len(s):
+            c = s[j]
+            if c == "\\" and j + 1 < len(s):
+                inner += s[j + 1] if s[j + 1] in "`\\$" else s[j:j + 2]
+                j += 2
+                continue
+            if c == "`":
+                self.nested.append(inner)
+                self.runs = True
+                w.text += s[i:j + 1]
+                w.expanded = True
+                return j + 1
+            inner += c
+            j += 1
+        raise Unreadable("a backtick is not closed")
+
+    def dquote(self, i, w):
+        s, j = self.s, i + 1
+        w.quoted = True
+        while j < len(s):
+            c = s[j]
+            if c == '"':
+                return j + 1
+            if c == "\\" and j + 1 < len(s):
+                nx = s[j + 1]
+                if nx == "\n":
+                    j += 2
+                elif nx in '$`"\\':
+                    w.text += nx
+                    j += 2
+                else:
+                    w.text += c
+                    j += 1
+                continue
+            if c == "$":
+                j = self.dollar(j, w, True)
+                continue
+            if c == "`":
+                j = self.backtick(j, w)
+                continue
+            w.text += c
+            j += 1
+        raise Unreadable("a double quote is not closed")
+
+    def heredoc_expansions(self, body):
+        """The expansions in an unquoted here-document's body, as a word."""
+        w, sub = Word(), Lexer(body)
+        j = 0
+        while j < len(body):
+            c = body[j]
+            if c == "\\":
+                j += 2
+            elif c == "$":
+                j = sub.dollar(j, w, True)
+            elif c == "`":
+                j = sub.backtick(j, w)
+            else:
+                j += 1
+        self.nested.extend(sub.nested)
+        self.runs = self.runs or sub.runs
+        return w
+
+    def tokens(self):
+        s, i, out, cur, want_delim, pending = self.s, 0, [], None, None, []
+
+        def flush():
+            nonlocal cur, want_delim
+            if cur is not None:
+                out.append(cur)
+                if want_delim is not None:
+                    want_delim.delim, want_delim.delim_quoted = cur.text, cur.quoted
+                    pending.append(want_delim)
+                    want_delim = None
+            cur = None
+
+        while i < len(s):
+            c = s[i]
+            if c == "\\" and s.startswith("\\\n", i):
+                i += 2
+                continue
+            if cur is None and c == "#":
+                while i < len(s) and s[i] != "\n":
+                    i += 1
+                continue
+            if c in " \t\r":
+                flush()
+                i += 1
+                continue
+            if c == "\n":
+                flush()
+                out.append(Op("\n"))
+                i += 1
+                for op in pending:
+                    lines = []
+                    while i < len(s):
+                        eol = s.find("\n", i)
+                        line = s[i:] if eol < 0 else s[i:eol]
+                        i = len(s) if eol < 0 else eol + 1
+                        if (line.lstrip("\t") if op.op == "<<-" else line) == op.delim:
+                            break
+                        lines.append(line)
+                    op.body = "\n".join(lines)
+                    if not op.delim_quoted:
+                        op.body_word = self.heredoc_expansions(op.body)
+                pending = []
+                continue
+            op = next((o for o in OPS if s.startswith(o, i)), None)
+            if op:
+                if cur is not None and op[0] in "<>" and re.fullmatch(r"[0-9]+", cur.text) and not cur.quoted:
+                    cur.io = True
+                flush()
+                o = Op(op)
+                out.append(o)
+                if op in ("<<", "<<-"):
+                    want_delim = o
+                i += len(op)
+                continue
+            if cur is None:
+                cur = Word()
+                cur.plain_start = c not in "'\"\\$`"
+            if c == "'":
+                j = s.find("'", i + 1)
+                if j < 0:
+                    raise Unreadable("a single quote is not closed")
+                cur.text += s[i + 1:j]
+                cur.quoted = True
+                i = j + 1
+            elif c == '"':
+                i = self.dquote(i, cur)
+            elif c == "\\":
+                cur.text += s[i + 1:i + 2]
+                cur.quoted = True
+                i += 2
+            elif c == "$":
+                i = self.dollar(i, cur, False)
+            elif c == "`":
+                i = self.backtick(i, cur)
+            else:
+                if c in "*?[":
+                    cur.glob = True
+                cur.text += c
+                i += 1
+        flush()
+        if want_delim is not None:
+            raise Unreadable("a here-document has no delimiter")
+        for op in pending:              # a here-document on the last line has an empty body
+            op.body = ""
+        return out
+
+
+class Command:
+    def __init__(self):
+        self.words = []
+        self.redirects = []      # (Op, Word)
+        self.upstream = []       # the commands before it in its pipeline
+
+
+def commands(tokens):
+    out, cur = [], Command()
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if isinstance(t, Op):
+            if t.op in SEPARATORS:
+                nxt = Command()
+                if t.op in ("|", "|&") and (cur.words or cur.redirects):
+                    nxt.upstream = cur.upstream + [cur]
+                if cur.words or cur.redirects:
+                    out.append(cur)
+                cur = nxt
+            elif t.op in REDIRECTS:
+                if t.op in ("<", ">") and i + 1 < len(tokens) and isinstance(tokens[i + 1], Op) and \
+                        tokens[i + 1].op == "(":
+                    i += 1          # process substitution, <( ) or >( ): its commands are read as a subshell's
+                    continue
+                if i + 1 >= len(tokens) or not isinstance(tokens[i + 1], Word):
+                    raise Unreadable("a redirection has no target")
+                cur.redirects.append((t, tokens[i + 1]))
+                i += 1
+        elif not t.io:
+            cur.words.append(t)
+        i += 1
+    if cur.words or cur.redirects:
+        out.append(cur)
+    return out
+
+
+# --- what the guard knows about paths --------------------------------------------------------------------------------
+
+HOME = os.path.expanduser("~")
+# Credential stores, under the home folder (a folder covers everything in it).
+CREDENTIAL_PATHS = (".config/gh", ".git-credentials", ".netrc", "_netrc", ".ssh", "Library/Keychains",
+                    ".config/git/credentials", ".docker/config.json", ".npmrc", ".pypirc", ".aws/credentials",
+                    ".config/hub", ".gnupg", ".password-store")
+CREDENTIAL_NAMES = {".git-credentials", ".netrc", "_netrc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+                    "id_ecdsa_sk", "id_ed25519_sk"}
+SENSITIVE_VAR = re.compile(r"TOKEN|SECRET|PASSW(OR)?D|CREDENTIAL|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|"
+                           r"(^|_)PAT($|_)|(^|_)AUTH($|_)", re.IGNORECASE)
+PROTECTED = ("acceptance", ".factory/hooks")   # folders of a checkout no agent writes
+
+
+def expand_home(text):
+    for pre in ("~/", "$HOME/", "${HOME}/"):
+        if text.startswith(pre):
+            return os.path.join(HOME, text[len(pre):])
+    return HOME if text in ("~", "$HOME", "${HOME}") else text
+
+
+def absolute(text, cwd):
+    t = expand_home(text)
+    if not t.startswith("/"):
+        if not cwd:
+            return None
+        t = os.path.join(cwd, t)
+    return os.path.normpath(t)
+
+
+def credential_path(text, cwd, glob=False):
+    """The credential store a path names, or None. A glob counts when its fixed start could reach one."""
+    if not text:
+        return None
+    p = absolute(text, cwd if cwd else "/")
+    if p is None:
+        return None
+    low = p.casefold()
+    home = HOME.casefold().rstrip("/")
+    parts = low.split("/")
+    if parts[-1] in CREDENTIAL_NAMES or parts[-2:] == ["gh", "hosts.yml"] or ".ssh" in parts:
+        return p
+    if len(parts) >= 3 and parts[1] == "proc" and parts[-1] == "environ":
+        return p
+    for rel in CREDENTIAL_PATHS:
+        c = "%s/%s" % (home, rel.casefold())
+        if low == c or low.startswith(c + "/"):
+            return p
+    if glob:
+        fixed = re.split(r"[*?\[]", expand_home(text), 1)[0]
+        f = absolute(fixed, cwd if cwd else "/") if fixed else None
+        if f is not None:
+            f = f.casefold() + ("/" if fixed.endswith("/") else "")
+            if f.startswith(home + "/") and len(f) > len(home) + 1:
+                rest = f[len(home) + 1:]
+                if any(r.casefold().startswith(rest) for r in CREDENTIAL_PATHS):
+                    return p
+    return None
+
+
+# --- the guard -------------------------------------------------------------------------------------------------------
+
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "yash"}
+# Commands that run their arguments as a command; the first argument that names a command the guard knows is read
+# as that command. FEEDERS add arguments of their own (from stdin, from files found), unknown to the guard.
+WRAPPERS = {"command", "exec", "nohup", "nice", "time", "timeout", "sudo", "doas", "stdbuf", "caffeinate", "ionice",
+            "chronic", "unbuffer", "setsid", "flock", "watch", "busybox", "script", "nocorrect", "noglob", "builtin"}
+FEEDERS = {"xargs", "find", "parallel"}
+WRITERS = {"rm", "rmdir", "unlink", "shred", "truncate", "touch", "mkdir", "chmod", "chown", "chgrp", "mv", "tee",
+           "patch", "cp", "ln", "install", "rsync", "scp", "sed", "gsed", "perl", "ruby", "dd", "awk", "gawk"}
+KNOWN = {"git", "gh", "factory-github", "factory", "factory-pause", "printenv", "env", "security", "secret-tool",
+         "eval", "set", "export", "declare", "typeset", "cd", "pushd", "popd", "chdir"} | SHELLS | WRAPPERS | FEEDERS | \
+    WRITERS
+RESERVED = {"!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "time", "function"}
+HEADERS = {"for", "case", "select", "in", "esac"}
+# Words that make a command whose name the guard cannot read worth blocking.
+DANGER_WORDS = {"push", "merge", "pr-merge", "credential", "token", "git-credential", "send-pack", "printenv",
+                "--approve", "find-generic-password", "find-internet-password"}
+# gh's own commands. Not `co`: it is a gh alias (pr checkout) that a person's config may have changed.
+GH_COMMANDS = {"agent-task", "alias", "api", "attestation", "auth", "browse", "cache", "codespace", "completion",
+               "config", "copilot", "extension", "gist", "gpg-key", "help", "issue", "label", "org", "pr", "preview",
+               "project", "release", "repo", "ruleset", "run", "search", "secret", "ssh-key", "status", "variable",
+               "workflow", "version", "--version", "-h", "--help"}
+# git subcommands that are git's own, so an alias of that name never runs (others are looked up as aliases).
+GIT_BUILTINS = {"add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file",
+                "check-attr", "check-ignore", "check-ref-format", "checkout", "cherry", "cherry-pick", "clean",
+                "clone", "column", "commit", "commit-tree", "config", "count-objects", "describe", "diff",
+                "diff-files", "diff-index", "diff-tree", "difftool", "fetch", "for-each-ref", "format-patch", "fsck",
+                "gc", "grep", "hash-object", "help", "init", "interpret-trailers", "log", "ls-files", "ls-remote",
+                "ls-tree", "maintenance", "merge", "merge-base", "merge-file", "merge-tree", "mergetool", "mv",
+                "name-rev", "notes", "prune", "pull", "range-diff", "read-tree", "rebase", "reflog", "remote",
+                "repack", "replace", "request-pull", "reset", "restore", "rev-list", "rev-parse", "revert", "rm",
+                "shortlog", "show", "show-branch", "show-ref", "sparse-checkout", "stash", "status", "submodule",
+                "switch", "symbolic-ref", "tag", "update-index", "update-ref", "var", "verify-commit", "verify-tag",
+                "version", "whatchanged", "worktree", "write-tree"}
+GIT_GLOBAL_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env",
+                    "--exec-path", "--attr-source", "--list-cmds"}
+GIT_GLOBAL_FLAGS = {"-p", "-P", "--paginate", "--no-pager", "--bare", "--literal-pathspecs", "--glob-pathspecs",
+                    "--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects", "--no-optional-locks",
+                    "--no-lazy-fetch", "--no-advice", "--html-path", "--man-path", "--info-path", "--exec-path"}
+PUSH_FLAGS = {"--set-upstream", "--quiet", "--verbose", "--progress", "--no-progress", "--dry-run", "--porcelain",
+              "--tags", "--follow-tags", "--no-follow-tags", "--atomic", "--no-atomic", "--thin", "--no-thin",
+              "--no-verify", "--verify", "--ipv4", "--ipv6", "--no-signed", "--no-recurse-submodules",
+              "--no-force-with-lease", "--no-force-if-includes", "--signed", "--recurse-submodules"}
+PUSH_VALUE = {"--repo", "--push-option", "--receive-pack", "--exec"}
+MERGE_VALUE_SHORT = {"b": "--body", "F": "--body-file", "t": "--subject", "A": "--author-email", "R": "--repo"}
+MERGE_FLAG_SHORT = {"s", "m", "r", "d", "h"}
+MERGE_VALUE = {"--body", "--body-file", "--subject", "--author-email", "--repo", "--match-head-commit"}
+MERGE_FLAGS = {"--squash", "--merge", "--rebase", "--delete-branch", "--disable-auto", "--help"}
+
+
+class Guard:
+    """Reads one Bash command and collects what it does: reasons to block, and the checks that need a tool (the pause,
+    the gate). Reading never runs anything that changes state: only git's read commands, and git ls-remote."""
+
+    def __init__(self, cwd):
+        self.cwd = cwd
+        self.blocks = []
+        self.pause_for = []      # what needs the pause check
+        self.gates = []          # (pull request number, folder)
+        self.tops = {}
+        # Every folder the shell may be in by now, for relative write destinations: the session's folder, and each
+        # folder a cd (pushd, env -C) anywhere in the call may have reached, lexically and physically. A cd can fail,
+        # or run in a subshell, a pipeline or one branch of an if, so folders are only ever added. None: a cd the hook
+        # cannot follow (cd -, popd, a target that is not plain text), after which every relative write is refused.
+        self.cwds = [cwd] if cwd else None
+
+    def block(self, reason):
+        if reason not in self.blocks:
+            self.blocks.append(reason)
+
+    # --- scripts and simple commands ---
+
+    def script(self, text, cwd, depth=0):
+        """Reads a script. Its command is "plain" (a merge or an API write may pass) only when it is the one simple
+        command of the whole call: at the top level (depth 0: not inside sh -c, eval, $( ) or a here-document fed to
+        a shell), with no compound command (subshell, group, function, loop, if, case), no list around it (;, &,
+        &&, ||, a pipe, a second line) and no command substitution in it. Whatever runs before a merge in the same
+        call could change where it merges (git remote set-url ...; gh pr merge 12), so nothing may."""
+        if depth > MAX_DEPTH:
+            self.block("the command nests scripts (sh -c, eval, $( ), aliases) deeper than the hook reads; run it "
+                       "in plainer steps")
+            return
+        lexer = Lexer(text)
+        tokens = lexer.tokens()
+        cmds = commands(tokens)
+        compound = any(isinstance(t, Op) and t.op in ("(", ")") for t in tokens) or \
+            any(c.words and not c.words[0].quoted and c.words[0].text in RESERVED | HEADERS for c in cmds)
+        alone = len(cmds) == 1 and not lexer.runs and not any(isinstance(t, Op) and t.op in LIST_OPS for t in tokens)
+        state = {"cwd": cwd, "plain": depth == 0 and not compound and alone}
+        for inner in lexer.nested:
+            self.script(inner, state["cwd"], depth + 1)
+        for cmd in cmds:
+            self.command(cmd, state, depth)
+
+    def command(self, cmd, state, depth):
+        words = list(cmd.words)
+        while words and words[0].literal() and not words[0].quoted and words[0].text in RESERVED:
+            words = words[1:]
+        self.generic(cmd, state)
+        if words and words[0].literal() and not words[0].quoted and words[0].text in HEADERS:
+            return
+        k, prefix, other, places = 0, {}, False, {}
+        while k < len(words) and words[k].plain_start and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[k].text):
+            name, value = assignment(words[k])
+            if name in OVERRIDES:
+                prefix[name] = (value, words[k])
+            else:
+                other = True
+                if name in GIT_PLACES:
+                    places[name] = True
+            k += 1
+        argv = words[k:]
+        if not argv:
+            prefix = {}                         # NAME=value on its own: not a prefix of a command, so refused
+        if argv and argv[0].text.rsplit("/", 1)[-1] == "env" and argv[0].literal():
+            for w in env_assignments(argv[1:]):
+                name, value = assignment(w)
+                if name in OVERRIDES:
+                    prefix[name] = (value, w)
+        self.overrides(cmd, prefix)
+        if argv:
+            env = {n: v for n, (v, _) in prefix.items()}
+            env.update(places)
+            if other:
+                env[SET_OTHER] = True
+            self.argv(argv, cmd, state, depth, feeder=False, env=env)
+
+    def overrides(self, cmd, allowed):
+        """GH_REPO and GH_HOST may appear only as a plain NAME=value prefix of a command, or as env NAME=value before
+        the command env runs, with a plain value. Any other mention (declare, typeset, readonly, local, read,
+        printf -v, export, unset, a loop variable, an expansion, an assignment on its own line) is refused."""
+        ok = {id(w) for _, w in allowed.values()}
+        for w in list(cmd.words) + [t for _, t in cmd.redirects]:
+            named = [n for n in OVERRIDES if n in w.text or n in w.names]
+            if not named:
+                continue
+            if id(w) not in ok:
+                self.block("%s appears here in a form the hook does not read (only NAME=value right before the "
+                           "command, or env NAME=value): it can change where gh merges, so it is refused" % named[0])
+            elif not assignment(w)[1].literal() or any(c in assignment(w)[1].text for c in "{}*?[$`"):
+                self.block("%s is not plain text here, so the hook cannot tell where gh would merge" % named[0])
+
+    def generic(self, cmd, state):
+        """Checks every word of every command: deploy approvals, credential files, credential variables, writes."""
+        cwd = state["cwd"]
+        everything = list(cmd.words) + [w for _, w in cmd.redirects]
+        for w in everything:
+            if w.text == "--approve" or w.text.startswith("--approve="):
+                self.block("--approve approves a deploy, which only a person does (deploy contract); an agent never "
+                           "passes it")
+            if credential_path(w.text, cwd, w.glob):
+                self.block("%s names a credential store; no agent reads or copies credentials (the hooks block it "
+                           "for everyone, tests included)" % shown(w.text))
+            for n in w.names:
+                if SENSITIVE_VAR.search(n):
+                    self.block("$%s looks like a credential variable; no command may expand it, since its value "
+                               "would reach the transcript" % n)
+        for op, w in cmd.redirects:
+            if op.body_word is not None:
+                for n in op.body_word.names:
+                    if SENSITIVE_VAR.search(n):
+                        self.block("the here-document expands $%s, which looks like a credential variable" % n)
+            if op.op in WRITES:
+                self.protected_write(w, self.wcwds(state))
+
+    def wcwds(self, state):
+        """The folders a command's relative write destinations are checked from: its own (git -C, env -C) or the
+        call's (self.cwds)."""
+        return state["wcwds"] if "wcwds" in state else self.cwds
+
+    def protected_write(self, w, cwds):
+        """A write destination passes only as a literal path whose existing parts resolve outside the protected
+        folders, from every folder the shell may be in; anything else is refused, since it cannot be shown to stay
+        out of them."""
+        if not w.literal() or any(c in w.text for c in "{}*?[$`"):
+            self.block("a write destination that is not plain text (%s; a brace, glob or $ counts, quoted or not): "
+                       "the hook cannot show that it stays out of acceptance/ and .factory/hooks/, so it is refused; "
+                       "write the path out" % shown(w.text))
+            return
+        where = self.protected(w.text, cwds)
+        if where is UNKNOWN:
+            self.block("a write to %s after a cd the hook cannot follow (cd -, popd, a folder that is not plain "
+                       "text): it cannot show that it stays out of acceptance/ and .factory/hooks/; use an absolute "
+                       "path" % shown(w.text))
+        elif where:
+            self.block("this writes into %s/, which no agent changes (%s)" % (where, PROTECTED_WHY[where]))
+
+    def top(self, cwd):
+        if cwd not in self.tops:
+            self.tops[cwd] = git(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else None
+        return self.tops[cwd]
+
+    def places(self, base, target, physical=False):
+        """The folders `cd target` may reach from the folders in base: the target resolved lexically (cd -L: a ..
+        drops the name before it) and physically (cd -P, git -C, env -C: symlinks first, then ..), so a later
+        relative write is checked from both. None when it cannot be told (base unknown, ~user)."""
+        t = expand_home(target)
+        if t.startswith("~") or (not t.startswith("/") and base is None):
+            return None
+        out = []
+        for b in (["/"] if t.startswith("/") else base):
+            j = os.path.join(b, t)
+            for p in ([] if physical else [os.path.normpath(j)]) + [os.path.realpath(j)]:
+                if p not in out:
+                    out.append(p)
+        return out
+
+    def protected(self, text, cwds):
+        """acceptance or .factory/hooks when the path, from any of the folders in cwds, is inside one of them,
+        resolved lexically and physically (every existing part, symlinks and .. included); None when it is outside
+        from all of them; UNKNOWN for a relative path when the folder is unknown (cwds None). The checkouts looked
+        at: the session's and the ones that hold the destination."""
+        t = expand_home(text)
+        if t.startswith("/"):
+            fulls = [t]
+        elif not cwds:
+            return UNKNOWN
+        else:
+            fulls = [os.path.join(c, t) for c in cwds]
+        for full in fulls:
+            real, lexical = os.path.realpath(full), os.path.normpath(full)
+            paths = {real.casefold(), lexical.casefold()}
+            roots = {self.top(self.cwd)}
+            for ancestor in (real, lexical):
+                while ancestor and ancestor != "/" and not os.path.isdir(ancestor):
+                    ancestor = os.path.dirname(ancestor)
+                roots.add(self.top(ancestor))
+            for root in roots - {None}:
+                for d in PROTECTED:
+                    for b in {os.path.join(root, d), os.path.realpath(os.path.join(root, d))}:
+                        b = b.casefold()
+                        if any(x == b or x.startswith(b + "/") for x in paths):
+                            return d
+        return None
+
+    def argv(self, argv, cmd, state, depth, feeder, env=None):
+        w0 = argv[0]
+        base = w0.text.rsplit("/", 1)[-1]
+        if not base or not w0.literal():
+            if any(a.text.casefold() in DANGER_WORDS for a in argv[1:]):
+                self.block("the command's name is not plain text (%s), and it reads like a push, a merge or a "
+                           "credential read; write the command itself" % shown(w0.text))
+            # A name the hook cannot read may be a wrapper (env, command, exec) or an assignment env takes for its
+            # command (env "${n}REPO=x" gh pr merge 12): what follows is read as behind a wrapper, never plain.
+            for j in range(1, len(argv)):
+                if argv[j].literal() and argv[j].text.rsplit("/", 1)[-1] in KNOWN:
+                    self.argv(argv[j:], cmd, dict(state, plain=False), depth, feeder, env)
+                    break
+            return
+        cwd = state["cwd"]
+        if base.startswith("git-credential"):
+            self.block("%s handles stored credentials; no agent runs it" % base)
+            return
+        if base in ("cd", "pushd", "popd", "chdir"):
+            self.chdir(base, argv[1:], state)
+            return
+        if base == "find":
+            self.find(argv[1:], cmd, state, depth, env)
+            return
+        if base == "xargs":
+            j = xargs_command(argv)
+            if j is not None:
+                if j < len(argv):
+                    self.argv(argv[j:], cmd, dict(state, plain=False), depth, True, env)
+                return
+        if base in WRAPPERS or base in FEEDERS:
+            for j in range(1, len(argv)):
+                b = argv[j].text.rsplit("/", 1)[-1]
+                if base == "sudo" and (argv[j].text.startswith("--chdir") or
+                                       re.fullmatch(r"-[A-Za-z]*D.*", argv[j].text)):
+                    self.block("sudo -D runs its command in another folder, where the hook does not check its writes; "
+                               "cd there first, or give absolute paths")
+                    return
+                if argv[j].literal() and b in KNOWN:
+                    self.argv(argv[j:], cmd, dict(state, plain=False), depth, feeder or base in FEEDERS, env)
+                    break
+            return
+        if base not in KNOWN:
+            # A command the hook does not know may run its arguments (arch -arm64, direnv exec, op run --, ssh):
+            # where they name a tool the hook guards together with a verb that matters, they are read as behind a
+            # wrapper, so a merge or API write there is never plain and a push is checked as any push.
+            for j in range(1, len(argv)):
+                if runs_guarded(argv, j):
+                    self.argv(argv[j:], cmd, dict(state, plain=False), depth, feeder, env)
+                    break
+            return
+        handler = {"git": self.git, "gh": self.gh, "factory-github": self.broker, "factory": self.factory,
+                   "factory-pause": self.factory_pause, "printenv": self.printenv, "env": self.env,
+                   "set": self.set_, "export": self.export, "declare": self.declare, "typeset": self.declare,
+                   "security": self.security, "secret-tool": self.secret_tool, "eval": self.eval_}.get(base)
+        if base in SHELLS:
+            self.shell(argv, cmd, state, depth)
+        elif base in ("env", "gh"):
+            handler(argv[1:], cmd, state, depth, feeder, env or {})
+        elif base == "git":
+            self.git(argv[1:], cmd, state, depth, feeder, env=env or {})
+        elif handler:
+            handler(argv[1:], cmd, state, depth, feeder)
+        self.writes(base, argv[1:], self.wcwds(state), feeder)
+
+    def chdir(self, base, args, state):
+        """cd, pushd, popd: the folders the target may name are added to self.cwds (a cd can fail or run in a
+        subshell, so the folder before stays possible too). A change the hook cannot follow makes the folder
+        unknown: popd and pushd without a folder (the folder stack), cd - (the previous folder), +N or -N, a second
+        argument (zsh's cd old new), a target that is not plain text, or a bare name while CDPATH is set."""
+        rest, physical, options = [], False, True
+        for a in args:
+            if options and a.literal() and a.text == "--":
+                options = False
+            elif options and a.literal() and re.fullmatch(r"-[LPeqs@]+", a.text):
+                physical = physical or "P" in a.text
+            else:
+                rest.append(a)
+        target = None
+        if base != "popd" and len(rest) <= 1:
+            if not rest:
+                target = "~" if base != "pushd" else None
+            else:
+                t = rest[0].text
+                cdpath = os.environ.get("CDPATH") and not t.startswith(("/", "./", "../", "~")) and t not in (".", "..")
+                if rest[0].literal() and t != "-" and not re.fullmatch(r"[+-][0-9]+", t) and not cdpath:
+                    target = t
+        folders = self.places(self.wcwds(state), target, physical) if target is not None else None
+        self.cwds = union(self.cwds, folders)
+        state["cwd"] = absolute(target, state["cwd"]) if target is not None else None
+
+    # --- writes into protected folders ---
+
+    def writes(self, base, args, cwds, fed=False):
+        """The destinations a writer names are checked (protected_write). A writer that xargs, find -exec or parallel
+        runs gets more paths from them, which the hook cannot see, so it is refused; so is a link (ln) to a protected
+        file, or a symbolic link to a protected folder or a folder above one."""
+        plain = [a for a in args if not a.text.startswith("-")]
+        targets, writing = [], True
+        if base in ("rm", "rmdir", "unlink", "shred", "truncate", "touch", "mkdir", "chmod", "chown", "chgrp", "mv",
+                    "tee", "patch"):
+            targets = plain
+        elif base in ("cp", "ln", "install", "rsync", "scp"):
+            if base == "ln":
+                self.links(args, cwds)
+            targets = plain[-1:]
+            for i, a in enumerate(args):
+                if a.text in ("-t", "--target-directory") and i + 1 < len(args):
+                    targets.append(args[i + 1])
+                elif a.text.startswith("--target-directory="):
+                    targets.append(part(a, a.text.split("=", 1)[1]))
+        elif base in ("sed", "gsed", "perl", "ruby"):
+            writing = any(a.text.startswith("--in-place") or (re.match(r"-[A-Za-z]*i", a.text) and
+                                                                not a.text.startswith("--")) for a in args)
+            if writing:
+                targets = plain
+        elif base == "dd":
+            for a in args:
+                if a.text.startswith("of="):
+                    targets.append(part(a, a.text[3:]))
+        elif base in ("awk", "gawk"):
+            targets = awk_files(args)
+            writing = targets is not None
+            targets = targets or []
+        else:
+            writing = False
+        if fed and writing:
+            self.block("%s gets more paths from xargs, find -exec or parallel, which the hook cannot see, so it cannot "
+                       "show that they stay out of acceptance/ and .factory/hooks/; name the paths" % base)
+        for t in targets:
+            self.protected_write(t, cwds)
+
+    def links(self, args, cwds):
+        """ln: its sources may not be in a protected folder (a hard link there is a protected file under another
+        name), and a symbolic link may not point at a protected folder or a folder above one (a write through it, in
+        this call or a later one, would land there). A relative source is read from every folder the shell may be in
+        and from the link's own folder, since ln -s reads it from there and ln -r from here."""
+        symbolic, tdir, pos, i, ended = False, None, [], 0, False
+        while i < len(args):
+            a, t = args[i], args[i].text
+            if not ended and t == "--":
+                ended = True
+            elif not ended and t in ("-t", "--target-directory"):
+                tdir = args[i + 1] if i + 1 < len(args) else Word()
+                i += 1
+            elif not ended and t.startswith("--target-directory="):
+                tdir = part(a, t.split("=", 1)[1])
+            elif not ended and t.startswith("--"):
+                symbolic = symbolic or t == "--symbolic"
+            elif not ended and t.startswith("-") and len(t) > 1:
+                for k, c in enumerate(t[1:], 2):
+                    symbolic = symbolic or c == "s"
+                    if c in "tS":                       # takes a value: the rest of the word, or the next one
+                        value = part(a, t[k:]) if k < len(t) else (args[i + 1] if i + 1 < len(args) else Word())
+                        i += 0 if k < len(t) else 1
+                        if c == "t":
+                            tdir = value
+                        break
+            else:
+                pos.append(a)
+            i += 1
+        sources = pos if tdir is not None else (pos[:-1] if len(pos) >= 2 else pos)
+        dirs = [tdir] if tdir is not None else ([pos[-1]] if len(pos) >= 2 else [])
+        bases = list(cwds or [])
+        for d in dirs:
+            if not d.literal() or any(c in d.text for c in "{}*?[$`"):
+                self.block("ln with a link folder that is not plain text (%s); write the path out" % shown(d.text))
+                return
+            full = expand_home(d.text)
+            for f in ([full] if full.startswith("/") else [os.path.join(c, full) for c in cwds or []]):
+                bases += [f, os.path.dirname(f)]
+        for s in sources:
+            if not s.literal() or any(c in s.text for c in "{}*?[$`"):
+                self.block("ln with a source that is not plain text (%s): the hook cannot show that it is not in "
+                           "acceptance/ or .factory/hooks/; write the path out" % shown(s.text))
+                continue
+            t = expand_home(s.text)
+            if not t.startswith("/") and cwds is None:
+                self.block("ln with a relative source after a cd the hook cannot follow; use an absolute path")
+                continue
+            for full in ([t] if t.startswith("/") else [os.path.join(b, t) for b in bases]):
+                where = self.protected(full, None)
+                if where:
+                    self.block("ln %s links to %s/, which no agent changes (%s); a write through the link would land "
+                               "there" % (shown(s.text), where, PROTECTED_WHY[where]))
+                    break
+                if symbolic and self.holds_protected(full):
+                    self.block("ln -s %s points at a folder that holds acceptance/ or .factory/hooks/; a write "
+                               "through the link would land there, so link a folder below it" % shown(s.text))
+                    break
+
+    def holds_protected(self, path):
+        """True when the absolute path, read lexically or physically, is a folder that holds a protected folder of
+        the session's checkout or of the one that holds the path."""
+        paths = {os.path.normpath(path).casefold().rstrip("/"), os.path.realpath(path).casefold().rstrip("/")}
+        ancestor = os.path.realpath(path)
+        while ancestor and ancestor != "/" and not os.path.isdir(ancestor):
+            ancestor = os.path.dirname(ancestor)
+        for root in {self.top(self.cwd), self.top(ancestor)} - {None}:
+            for d in PROTECTED:
+                for b in {os.path.join(root, d), os.path.realpath(os.path.join(root, d))}:
+                    if any(b.casefold() == x or b.casefold().startswith(x + "/") for x in paths):
+                        return True
+        return False
+
+    def find(self, args, cmd, state, depth, env):
+        """find, read word by word (find_reading). A command it runs (-exec, -execdir, -ok, -okdir, up to ; or +) is
+        always read, as fed: its paths come from find. A find that writes (-delete, -rm, -fprint, -fprint0,
+        -fprintf, -fls) is judged on an allowlist: every word must be a flag, primary or operator the hook knows
+        (with its operands), or a starting folder, wherever it stands (bfs takes them in any order); one it does not
+        know, any -f word but -fprint* and -fls, or a dash word that is not plain text refuses the call. Its starting
+        folders (the session's folder when none is given) and the files -fprint* and -fls name are write
+        destinations. A find that writes nothing is not judged."""
+        cwds = self.wcwds(state)
+        paths, files, execs, writes, unknown = find_reading(args)
+        for body in execs:
+            if body:
+                self.argv(body, cmd, dict(state, plain=False), depth, True, env)
+        if not writes:
+            return
+        if unknown is not None:
+            self.block("find with %s holds a word the hook does not read for find (%s; any -f word but -fprint* "
+                       "and -fls counts, and -f PATH, -follow, -false, -fstype, -files0-from with it): it cannot "
+                       "tell which folders it writes, so it is refused; name the folders as plain words and use the "
+                       "primaries the hook knows" % (writes, shown(unknown.text)))
+            return
+        if not paths:
+            here = Word()
+            here.text = "."
+            paths = [here]
+        for w in paths + files:
+            self.protected_write(w, cwds)
+
+    # --- shells and eval ---
+
+    def shell(self, argv, cmd, state, depth):
+        cwd = state["cwd"]
+        args, i, has_c, script = argv[1:], 0, False, None
+        while i < len(args):
+            t = args[i].text
+            if t == "--":
+                i += 1
+                break
+            if t in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+                i += 2
+                continue
+            if t.startswith("--"):
+                i += 1
+                continue
+            if len(t) > 1 and t[0] in "-+":
+                if t[0] == "-" and "c" in t[1:]:
+                    has_c = True
+                i += 1
+                continue
+            break
+        rest = args[i:]
+        if has_c:
+            if not rest:
+                return
+            script = rest[0]
+            if only_expansion(script):
+                self.block("the script given to %s -c is not plain text, so the hook cannot read it; run the "
+                           "commands themselves" % argv[0].text.rsplit("/", 1)[-1])
+                return
+            self.script(script.text, cwd, depth + 1)
+            return
+        if rest:
+            return                  # a script file: not read (core/hooks/README.md, what it cannot see)
+        for op, w in cmd.redirects:
+            if op.body is not None:
+                self.script(op.body, cwd, depth + 1)
+            elif op.op == "<<<":
+                self.script(w.text, cwd, depth + 1)
+        for up in cmd.upstream:
+            for w in up.words[1:]:
+                self.script(w.text, cwd, depth + 1)
+            for op, w in up.redirects:
+                if op.body is not None:
+                    self.script(op.body, cwd, depth + 1)
+
+    def eval_(self, args, cmd, state, depth, feeder):
+        if any(only_expansion(a) for a in args):
+            self.block("eval of text that is not plain, so the hook cannot read it; run the commands themselves")
+            return
+        self.script(" ".join(a.text for a in args), state["cwd"], depth + 1)
+
+    # --- credentials ---
+
+    def printenv(self, args, cmd, state, depth, feeder):
+        names = [a.text for a in args if not a.text.startswith("-")]
+        if not names or feeder:
+            self.block("printenv without a name prints every variable, credentials included")
+        for n in names:
+            if SENSITIVE_VAR.search(n):
+                self.block("printenv %s would print what looks like a credential" % n)
+
+    def env(self, args, cmd, state, depth, feeder, env):
+        env, i = dict(env), 0
+        while i < len(args):
+            t = args[i].text
+            if t in ("-i", "-", "--ignore-environment"):
+                env = {CLEARED: True}
+                i += 1
+                continue
+            if t in ("-u", "--unset") or t.startswith(("--unset=", "-u")):
+                name = t.split("=", 1)[1] if "=" in t else t[2:] if len(t) > 2 and t != "--unset" else \
+                    (args[i + 1].text if i + 1 < len(args) else "")
+                env[name] = None
+                i += 1 if ("=" in t or (len(t) > 2 and t != "--unset")) else 2
+                continue
+            if t in ("-C", "--chdir") or t.startswith("--chdir=") or (t.startswith("-C") and len(t) > 2):
+                if t in ("-C", "--chdir"):
+                    w = args[i + 1] if i + 1 < len(args) else Word()
+                    i += 2
+                else:
+                    w = part(args[i], t.split("=", 1)[1] if t.startswith("--chdir=") else t[2:])
+                    i += 1
+                # env's command runs in that folder (or not at all): its writes are checked from there, and the
+                # call's folders grow by it, for a script the command reads (sh -c) and anything after it.
+                folders = self.places(self.wcwds(state), w.text, physical=True) if w.literal() and w.text else None
+                self.cwds = union(self.cwds, folders)
+                state = dict(state, wcwds=folders,
+                             cwd=absolute(w.text, state["cwd"]) if w.literal() and w.text else None)
+                continue
+            if t == "-P":
+                i += 2
+                continue
+            if re.fullmatch(r"-[i0v]+[CSuP].*", t):
+                self.block("env %s puts an option that takes a value (-C, -S, -u, -P) in a cluster the hook does not "
+                           "read apart; write each option on its own" % shown(t))
+                return
+            if t in ("-S", "--split-string") or t.startswith("--split-string="):
+                s = args[i + 1].text if "=" not in t and i + 1 < len(args) else t.split("=", 1)[-1]
+                self.script(s, state["cwd"], depth + 1)
+                return              # the split string is the command (its arguments follow it)
+            if t == "-" or t.startswith("-"):
+                i += 1
+                continue
+            if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", t):
+                name, value = assignment(args[i])
+                if name in OVERRIDES:
+                    env[name] = value
+                else:
+                    env[SET_OTHER] = True
+                    if name in GIT_PLACES:
+                        env[name] = True
+                i += 1
+                continue
+            break
+        if i >= len(args):
+            self.block("env without a command prints every variable, credentials included")
+            return
+        self.argv(args[i:], cmd, state, depth, feeder, env)
+
+    def set_(self, args, cmd, state, depth, feeder):
+        if not args:
+            self.block("set without arguments prints every variable, credentials included")
+
+    def export(self, args, cmd, state, depth, feeder):
+        if not [a for a in args if not a.text.startswith("-")]:
+            self.block("export without a name prints every exported variable, credentials included")
+
+    def declare(self, args, cmd, state, depth, feeder):
+        names = [a.text for a in args if not a.text.startswith(("-", "+"))]
+        if not names:
+            self.block("declare or typeset without a name prints variables, credentials included")
+        for n in names:
+            if SENSITIVE_VAR.search(n.split("=", 1)[0]) and "=" not in n:
+                self.block("declare %s would print what looks like a credential" % n)
+
+    def security(self, args, cmd, state, depth, feeder):
+        sub = next((a.text for a in args if not a.text.startswith("-")), "")
+        if sub.startswith("find-") or sub in ("dump-keychain", "export", "dump-trust-settings"):
+            self.block("security %s reads the keychain; no agent reads credentials" % sub)
+
+    def secret_tool(self, args, cmd, state, depth, feeder):
+        sub = next((a.text for a in args if not a.text.startswith("-")), "")
+        if sub in ("lookup", "search"):
+            self.block("secret-tool %s reads stored secrets; no agent reads credentials" % sub)
+
+    # --- git ---
+
+    def git(self, args, cmd, state, depth, feeder, env=None, alias_depth=0):
+        cwd = state["cwd"]
+        wc = self.wcwds(state)              # where git's own writes (git rm, checkout, ...) land: git -C chdirs
+        i = 0
+        for name in GIT_PLACES:
+            if (env or {}).get(name):
+                self.block("%s points git at another repository or work tree, where the hook does not check its "
+                           "writes; run git from that checkout, or with git -C" % name)
+                return
+        while i < len(args):
+            t = args[i].text
+            if not t.startswith("-"):
+                break
+            name = t.split("=", 1)[0]
+            if name in ("-C",):
+                if i + 1 >= len(args):
+                    return
+                if not args[i + 1].literal():
+                    self.block("git -C with a folder that is not plain text; the hook cannot tell which repository")
+                    return
+                cwd = absolute(args[i + 1].text, cwd)
+                wc = self.places(wc, args[i + 1].text, physical=True) if args[i + 1].text else wc
+                i += 2
+                continue
+            if name in ("-c", "--config-env"):
+                attached = name != t                    # --config-env=<name>=<envvar>
+                if not attached and i + 1 >= len(args):
+                    return
+                w = args[i] if attached else args[i + 1]
+                kv = w.text.split("=", 1)[1] if attached else w.text
+                key = kv.split("=", 1)[0].casefold()
+                if not w.literal() or key.startswith(("alias.", "push.", "remote.", "branch.", "url.",
+                                                      "credential.", "include.", "includeif.")) or \
+                        key == "core.worktree":
+                    self.block("git -c %s changes what a push or an alias does, where git writes, or reaches "
+                               "credentials; the hook does not read config set on the command line" % shown(key))
+                i += 1 if attached else 2
+                continue
+            if name in ("--work-tree", "--git-dir"):
+                self.block("git %s points git at another work tree or repository, where the hook does not check its "
+                           "writes; run git from that checkout, or with git -C" % name)
+                return
+            if name in GIT_GLOBAL_VALUE:
+                i += 1 if "=" in t or name == "--exec-path" else 2
+                continue
+            if name in GIT_GLOBAL_FLAGS:
+                i += 1
+                continue
+            self.block("git %s is not an option this hook reads; write the command without it" % shown(t))
+            return
+        if i >= len(args):
+            return
+        subw, rest = args[i], args[i + 1:]
+        if not subw.literal():
+            self.block("the git subcommand is not plain text (%s); write it out" % shown(subw.text))
+            return
+        sub = subw.text
+        if sub == "push":
+            self.push(rest, cwd, feeder)
+        elif sub == "credential" or sub.startswith("credential-"):
+            self.block("git %s handles stored credentials; no agent runs it" % sub)
+        elif sub in ("send-pack", "http-push"):
+            self.block("git %s pushes without the checks git push gets here; use git push" % sub)
+        elif sub == "subtree" and any(a.text == "push" for a in rest):
+            self.block("git subtree push pushes without the checks git push gets here; use git push")
+        elif sub == "config":
+            self.git_config(rest, cmd, state, depth)
+        elif sub in ("rm", "mv", "checkout", "restore", "clean"):
+            if feeder:
+                self.block("git %s gets its paths from xargs, find -exec or parallel, which the hook cannot see, so "
+                           "it cannot show that they stay out of acceptance/ and .factory/hooks/; name the paths"
+                           % sub)
+            for a in rest:
+                if not a.text.startswith("-"):
+                    self.protected_write(a, wc)
+        elif sub not in GIT_BUILTINS:
+            value = git(cwd or self.cwd, "config", "--get", "alias." + sub)
+            if value:
+                if alias_depth >= 4:
+                    self.block("git alias %s expands through too many aliases for the hook to read" % sub)
+                elif value.startswith("!"):
+                    self.script(value[1:] + "".join(" " + quote(a.text) for a in rest), cwd, depth + 1)
+                else:
+                    inner = Lexer(value).tokens()
+                    words = [t for t in inner if isinstance(t, Word)]
+                    if any(isinstance(t, Op) for t in inner):
+                        self.block("git alias %s holds shell operators; the hook does not read it" % sub)
+                        return
+                    self.git(words + list(rest), cmd, dict(state, cwd=cwd, wcwds=wc), depth + 1, feeder,
+                             alias_depth=alias_depth + 1)
+
+    def git_config(self, args, cmd, state, depth):
+        """git config, read with its options and subcommands (config_call), in whichever file it writes. A read
+        passes. A write of a key the hook checks is judged: an alias is read as the command it runs, push.default
+        matching is refused, and so are core.worktree and include paths (they move the work tree or load config
+        the hook does not read). A write whose key or value the hook cannot tell is refused."""
+        mode, key, value, files = config_call(args)
+        if mode != "read":
+            for f in files:
+                self.protected_write(f, self.wcwds(state))     # git config writes that file (--blob is a read)
+        if mode == "read" or mode == "unset":
+            return
+        if mode is None or key is None or not key.literal():
+            self.block("git config in a form the hook does not read (an option it does not know, a word that is not "
+                       "plain text, edit, rename-section): it cannot tell which setting it writes; write it as git "
+                       "config <key> <value>")
+            return
+        k = key.text.casefold()
+        if k == "core.worktree":
+            self.block("git config core.worktree points git at another work tree, where the hook does not check its "
+                       "writes; run git from that checkout, or with git -C")
+        elif k == "include.path" or (k.startswith("includeif.") and k.endswith(".path")):
+            self.block("git config %s loads another config file, which the hook does not read; set the keys "
+                       "themselves" % shown(key.text))
+        elif k.startswith("alias.") or k == "push.default":
+            if value is None or not value.literal():
+                self.block("git config %s with a value that is not plain text; the hook cannot read what it does"
+                           % shown(key.text))
+            elif k == "push.default":
+                if value.text.casefold() == "matching":
+                    self.block("push.default matching makes a plain git push update the default branch")
+            elif value.text.startswith("!"):
+                self.script(value.text[1:], state["cwd"], depth + 1)
+            else:
+                self.script("git " + value.text, state["cwd"], depth + 1)
+
+    def default_branches(self, cwd, remote):
+        """The default branch names to protect: the pushed remote's and origin's; empty when none can be told."""
+        names = set()
+        for r in {remote, "origin"}:
+            if not r:
+                continue
+            ref = None
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", r):
+                ref = git(cwd, "symbolic-ref", "-q", "refs/remotes/%s/HEAD" % r)
+                if ref:
+                    names.add(ref.split("refs/remotes/%s/" % r, 1)[-1])
+                    continue
+                if git(cwd, "config", "--get", "remote.%s.url" % r) is None:
+                    continue
+            out = git(cwd, "ls-remote", "--symref", r, "HEAD")
+            m = re.search(r"^ref: refs/heads/(\S+)\tHEAD$", out or "", re.M)
+            if m:
+                names.add(m.group(1))
+        return {n.casefold() for n in names}
+
+    def push(self, args, cwd, feeder):
+        force = mirror = every = delete = prune = False
+        repo, positional, i, ended = None, [], 0, False
+        while i < len(args):
+            a = args[i]
+            t = a.text
+            if not ended and t == "--":
+                ended = True
+            elif not ended and t.startswith("--"):
+                name, eq, val = t.partition("=")
+                if name in ("--force", "--force-with-lease", "--force-if-includes"):
+                    force = True
+                elif name == "--mirror":
+                    mirror = True
+                elif name in ("--all", "--branches"):
+                    every = True
+                elif name == "--delete":
+                    delete = True
+                elif name == "--prune":
+                    prune = True
+                elif name in PUSH_VALUE:
+                    if not eq:
+                        i += 1
+                        val = args[i].text if i < len(args) else ""
+                    if name == "--repo":
+                        repo = val
+                elif name not in PUSH_FLAGS:
+                    self.block("git push %s is not an option this hook reads; push without it" % shown(t))
+                    return
+            elif not ended and t.startswith("-") and len(t) > 1:
+                cluster = t[1:]
+                for k, ch in enumerate(cluster):
+                    if ch == "f":
+                        force = True
+                    elif ch == "d":
+                        delete = True
+                    elif ch in "uqvn46":
+                        continue
+                    elif ch == "o":
+                        if k == len(cluster) - 1:
+                            i += 1
+                        break
+                    else:
+                        self.block("git push -%s is not an option this hook reads; push without it" % ch)
+                        return
+            else:
+                positional.append(a)
+            i += 1
+        if force:
+            self.block("force pushes are blocked: never rewrite pushed history; push a new commit instead")
+        if mirror or every:
+            self.block("git push --mirror, --all or --branches would push the default branch too; push your branch "
+                       "by name")
+        if prune:
+            self.block("git push --prune deletes remote branches; push your branch by name")
+        if force or mirror or every or prune:
+            return
+        if feeder:
+            self.block("this push takes arguments from xargs, find or parallel, which the hook cannot see; push one "
+                       "branch by name")
+            return
+        bad = [a for a in positional if not a.literal()]
+        if bad:
+            self.block("git push with %s, which is not plain text, so the hook cannot tell where it pushes; write the "
+                       "remote and branch out" % shown(bad[0].text))
+            return
+        remote = repo if repo is not None else (positional[0].text if positional else None)
+        specs = [a.text for a in (positional if repo is not None else positional[1:])]
+        cwd = cwd or self.cwd
+        branch = git(cwd, "symbolic-ref", "-q", "--short", "HEAD")
+        if remote is None:
+            remote = ((branch and (git(cwd, "config", "--get", "branch.%s.pushRemote" % branch) or
+                                   git(cwd, "config", "--get", "remote.pushDefault") or
+                                   git(cwd, "config", "--get", "branch.%s.remote" % branch))) or "origin")
+        protected = self.default_branches(cwd, remote)
+        if not protected:
+            self.block("the hook cannot tell the default branch of %s (no refs/remotes/<remote>/HEAD and git "
+                       "ls-remote failed), so no push can be shown not to reach it; run git remote set-head origin "
+                       "--auto" % shown(remote))
+            return
+        dests = []
+        if specs:
+            skip = False
+            for k, spec in enumerate(specs):
+                if skip:
+                    skip = False
+                    continue
+                if spec == "tag":
+                    skip = True
+                    continue
+                if spec.startswith("+"):
+                    self.block("a refspec starting with + (%s) is a force push; push a new commit instead" % spec)
+                    return
+                if delete:
+                    dests.append(("delete", spec))
+                    continue
+                src, colon, dst = spec.partition(":")
+                if colon and not src and not dst:
+                    self.block("git push <remote> : pushes every matching branch, the default branch too")
+                    return
+                if colon and not src:
+                    dests.append(("delete", dst))
+                elif colon:
+                    dests.append(("push", dst))
+                elif src in ("HEAD", "@"):
+                    if branch:
+                        dests.append(("push", branch))
+                else:
+                    dests.append(("push", src))
+        else:
+            if remote and re.fullmatch(r"[A-Za-z0-9_.-]+", remote) and \
+                    git(cwd, "config", "--get-all", "remote.%s.push" % remote):
+                self.block("remote.%s.push is set, so a push without a branch follows refspecs the hook does not "
+                           "read; push your branch by name (git push -u origin HEAD)" % remote)
+                return
+            mode = (git(cwd, "config", "--get", "push.default") or "simple").casefold()
+            if mode == "matching":
+                self.block("push.default is matching, so a push without a branch updates the default branch too; push "
+                           "your branch by name")
+                return
+            if mode in ("upstream", "tracking") and branch:
+                merge = git(cwd, "config", "--get", "branch.%s.merge" % branch)
+                if merge:
+                    dests.append(("push", merge))
+            elif mode in ("simple", "current") and branch:
+                dests.append(("push", branch))
+            elif mode != "nothing" and branch:
+                self.block("push.default is %s, which the hook does not read; push your branch by name" % mode)
+                return
+        for kind, dst in dests:
+            if "*" in dst:
+                self.block("a wildcard refspec (%s) can reach the default branch; push your branch by name" % dst)
+                return
+            name = dst
+            for pre in ("refs/heads/", "heads/"):
+                if name.startswith(pre):
+                    name = name[len(pre):]
+                    break
+            else:
+                if name.startswith("refs/"):
+                    continue
+            if name.casefold() in protected:
+                if kind == "delete":
+                    self.block("this deletes the default branch %s" % name)
+                else:
+                    self.block("pushes to the default branch %s are blocked: push your branch and open a pull "
+                               "request; only the gate merges into it" % name)
+                return
+        self.pause_for.append("push")
+
+    # --- gh ---
+
+    def gh(self, args, cmd, state, depth, feeder, env):
+        if not args:
+            return
+        top = args[0]
+        if not top.literal():
+            self.block("the gh command is not plain text (%s); write it out" % shown(top.text))
+            return
+        sub = top.text
+        if sub not in GH_COMMANDS:
+            self.block("gh %s is not a gh command this hook knows (an alias or an extension can merge or push); run "
+                       "the gh command itself" % shown(sub))
+            return
+        rest = args[1:]
+        verb = next((a.text for a in rest if not a.text.startswith("-")), "")
+        if sub == "alias" and verb in ("set", "import"):
+            self.block("gh alias %s defines a gh command the hook cannot read (an alias can merge with --admin, and "
+                       "--clobber can change a known one); run the gh command itself" % verb)
+        elif sub == "pr":
+            self.gh_pr(rest, state, feeder, env)
+        elif sub == "auth":
+            verb = next((a.text for a in rest if not a.text.startswith("-")), "")
+            if verb in ("token", "git-credential"):
+                self.block("gh auth %s prints a credential; no agent runs it" % verb)
+            if verb == "status" and any(a.text in ("-t", "--show-token") or a.text.startswith("--show-token=")
+                                        for a in rest):
+                self.block("gh auth status --show-token prints a credential")
+        elif sub == "config":
+            if any("token" in a.text.casefold() for a in rest):
+                self.block("gh config with a token key reads a credential")
+        elif sub == "api":
+            self.gh_api(rest, state)
+        elif sub == "workflow":
+            self.gh_workflow(rest)
+        elif sub == "repo":
+            verb = next((a.text for a in rest if not a.text.startswith("-")), "")
+            if verb == "sync":
+                self.block("gh repo sync can move or force-update a branch without a pull request; use git and a pull "
+                           "request")
+        elif sub in ("issue", "label"):
+            self.paused_label(rest)
+
+    def paused_label(self, args):
+        texts = [a.text for a in args]
+        for k, t in enumerate(texts):
+            val = None
+            if t in ("--remove-label",) and k + 1 < len(texts):
+                val = texts[k + 1]
+            elif t.startswith("--remove-label="):
+                val = t.split("=", 1)[1]
+            if val is not None and "factory:paused" in val.casefold():
+                self.block("removing factory:paused clears the emergency stop, which only the person does")
+        if texts and texts[0] in ("delete", "edit") and any("factory:paused" in t.casefold() for t in texts[1:]):
+            self.block("changing the factory:paused label is the person's call (the emergency stop)")
+
+    def gh_pr(self, args, state, feeder, env):
+        i, repo = 0, None
+        while i < len(args) and args[i].text.startswith("-"):
+            t = args[i].text
+            if t in ("-R", "--repo") and i + 1 < len(args):
+                repo = args[i + 1].text
+                i += 2
+            elif t.startswith("--repo="):
+                repo = t.split("=", 1)[1]
+                i += 1
+            else:
+                i += 1
+        if i >= len(args):
+            return
+        verb, rest = args[i].text, args[i + 1:]
+        if not args[i].literal():
+            self.block("the gh pr subcommand is not plain text; write it out")
+        elif verb == "merge":
+            self.merge(rest, repo, state, feeder, env)
+        elif verb in ("create", "ready"):
+            self.pause_for.append("gh pr %s" % verb)
+        elif verb == "edit":
+            self.paused_label(rest)
+
+    def lookup(self, name, state, env):
+        """The value of GH_REPO or GH_HOST that a command sees, as a Word, or None when unset: its own prefix or env
+        settings, else the environment the hook inherited (every other way to set them is refused, see overrides)."""
+        if name in env:
+            return env[name]
+        if env.get(CLEARED):
+            return None
+        value = os.environ.get(name)
+        if not value:
+            return None
+        w = Word()
+        w.text = value
+        return w
+
+    def merge(self, args, repo, state, feeder, env):
+        if not state.get("plain"):
+            self.block(NOT_PLAIN % "gh pr merge")
+            return
+        if env.get(SET_OTHER):
+            self.block("gh pr merge takes no NAME=value setting but GH_REPO or GH_HOST: others (GIT_DIR, git's config "
+                       "variables, PATH) can change which repository gh reads or which gh runs; run it without them")
+            return
+        positional, admin, auto, disable_auto, i = [], False, False, False, 0
+        while i < len(args):
+            a = args[i]
+            t = a.text
+            if t == "--":
+                positional += args[i + 1:]
+                break
+            if t.startswith("--"):
+                name, eq, val = t.partition("=")
+                if name == "--admin":
+                    admin = True
+                elif name == "--auto":
+                    auto = True
+                elif name == "--disable-auto":
+                    disable_auto = True
+                elif name in MERGE_VALUE:
+                    if not eq:
+                        i += 1
+                        val = args[i].text if i < len(args) else ""
+                    if name == "--repo":
+                        repo = val
+                elif name not in MERGE_FLAGS:
+                    self.block("gh pr merge %s is not an option this hook reads" % shown(t))
+                    return
+            elif t.startswith("-") and len(t) > 1:
+                cluster = t[1:]
+                for k, ch in enumerate(cluster):
+                    if ch in MERGE_FLAG_SHORT:
+                        continue
+                    if ch in MERGE_VALUE_SHORT:
+                        val = cluster[k + 1:].lstrip("=")
+                        if not val:
+                            i += 1
+                            val = args[i].text if i < len(args) else ""
+                        if ch == "R":
+                            repo = val
+                        break
+                    self.block("gh pr merge -%s is not an option this hook reads" % ch)
+                    return
+            else:
+                positional.append(a)
+            i += 1
+        if admin:
+            self.block("gh pr merge --admin bypasses the merge gate; never use it")
+        if auto:
+            self.block("gh pr merge --auto merges later, on a head the gate did not judge; merge through the gate")
+        if admin or auto:
+            return
+        if disable_auto and not positional[1:]:
+            return              # only turns auto-merge off; merges nothing
+        if feeder:
+            self.block("gh pr merge takes arguments from xargs, find or parallel; name one pull request")
+            return
+        if len(positional) != 1 or not positional[0].literal():
+            self.block("gh pr merge needs exactly one pull request, as a number, so the hook can run factory gate "
+                       "on it")
+            return
+        ref = positional[0].text
+        m = re.fullmatch(r"#?([1-9][0-9]{0,9})", ref) or \
+            re.fullmatch(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]{0,9})(?:[/#?].*)?",
+                         ref)
+        if not m:
+            self.block("gh pr merge %s: name the pull request by its number, so the hook can run factory gate on it"
+                       % shown(ref))
+            return
+        n = int(m.group(m.lastindex))
+        # The repository gh merges in: --repo, else the URL's, else GH_REPO; and the host: GH_HOST or --repo's. Each
+        # must be the one factory gate judges (github.com, factory.yaml › project.repo), or the merge is refused.
+        source = "--repo" if repo is not None else None
+        if m.lastindex == 2:
+            if repo is None:
+                repo, source = m.group(1), "the pull request URL"
+            elif m.group(1).casefold() != repo.casefold():
+                self.block("the pull request URL and --repo name different repositories")
+                return
+        host = self.lookup("GH_HOST", state, env)
+        if host is not None and (not host.literal() or host.text.casefold() not in ("", "github.com")):
+            self.block("GH_HOST is %s, so gh would merge on another host than the one factory gate judges"
+                       % shown(host.text))
+            return
+        if repo is None:
+            w = self.lookup("GH_REPO", state, env)
+            if w is not None and w.text:
+                if not w.literal():
+                    self.block("GH_REPO is not plain text (%s), so the hook cannot tell which repository gh would "
+                               "merge in" % shown(w.text))
+                    return
+                repo, source = w.text, "GH_REPO"
+        if repo is not None and not self.same_repo(repo, state["cwd"], source):
+            return
+        self.pause_for.append("merge")
+        if (n, state["cwd"] or self.cwd) not in self.gates:
+            self.gates.append((n, state["cwd"] or self.cwd))
+
+    def same_repo(self, repo, cwd, source):
+        """True when repo is this checkout's project.repo in factory.yaml; blocks and returns False otherwise. A repo
+        given as HOST/OWNER/NAME must name github.com."""
+        repo = re.sub(r"^https?://", "", repo).rstrip("/")
+        parts = repo.split("/")
+        if len(parts) == 3:
+            if parts[0].casefold() != "github.com":
+                self.block("the merge targets %s (%s), on another host than the one factory gate judges"
+                           % (shown(repo), source))
+                return False
+            repo = "/".join(parts[1:])
+        top = self.top(cwd or self.cwd)
+        mine = None
+        if top and doctor():
+            try:
+                doc = doctor().load_yaml(os.path.join(top, "factory.yaml"))
+                mine = (doc.get("project") or {}).get("repo")
+            except Exception:  # noqa: BLE001 (any failure means the repository cannot be confirmed)
+                mine = None
+        if not isinstance(mine, str):
+            self.block("the merge targets %s (%s), and the hook cannot read project.repo in factory.yaml to confirm "
+                       "it is this project; merge from the project's checkout" % (shown(repo), source))
+            return False
+        if mine.casefold() != repo.casefold():
+            self.block("the merge targets %s (%s), not this project's %s; factory gate judges only this project"
+                       % (shown(repo), source, mine))
+            return False
+        return True
+
+    def gh_api(self, args, state):
+        method, endpoint, fields, inputs, i = None, None, [], False, 0   # fields: (typed, key, value, Word)
+
+        def value(k):
+            """(value, next index) of the option at k: attached (--x=v, -Xv) or the next argument."""
+            t = args[k].text
+            if t.startswith("--"):
+                if "=" in t:
+                    return t.split("=", 1)[1], k + 1
+            elif len(t) > 2:
+                return t[2:], k + 1
+            return (args[k + 1].text if k + 1 < len(args) else ""), k + 2
+
+        while i < len(args):
+            t = args[i].text
+            name = t.split("=", 1)[0] if t.startswith("--") else t[:2]
+            if t.startswith("-") and len(t) > 1:
+                if name in ("-X", "--method"):
+                    v, i = value(i)
+                    method = v.upper()
+                elif name in ("-f", "-F", "--field", "--raw-field"):
+                    w = args[i] if (t.startswith("--") and "=" in t) or (not t.startswith("--") and len(t) > 2) \
+                        else (args[i + 1] if i + 1 < len(args) else Word())
+                    v, i = value(i)
+                    key, _, val = v.partition("=")
+                    fields.append((name in ("-F", "--field"), key, val, w))
+                elif name == "--input":
+                    inputs = True
+                    _, i = value(i)
+                elif name in ("-H", "--header", "-p", "--preview", "-q", "--jq", "-t", "--template", "--hostname",
+                              "--cache"):
+                    _, i = value(i)
+                else:
+                    i += 1
+                continue
+            if endpoint is None:
+                endpoint = args[i]
+            i += 1
+        if endpoint is None:
+            return
+        if any(a.expanded and "query=" in a.text for a in args):
+            self.block("the gh api query is not plain text, so the hook cannot read what it changes; write it out")
+            return
+        if endpoint.expanded:
+            self.block("the gh api endpoint is not plain text, so the hook cannot tell what it calls; write it out")
+            return
+        path = api_path(endpoint.text)
+        write = (method or ("POST" if fields or inputs else "GET")) != "GET"
+        if path is None:
+            if write or fields or inputs:
+                self.block("the gh api endpoint %s does not read as one plain path (a path, or https://api.github.com/ "
+                           "and a path; no other scheme, host or port, no empty, . or .. part, backslash, # or "
+                           "%%-escape of one), so the hook cannot tell what it changes; write the path out"
+                           % shown(endpoint.text))
+            return
+        seg = path.split("/")
+        if seg[0].casefold() == "graphql":
+            self.graphql(fields, inputs)
+            return
+        if not write:
+            return
+        if not state.get("plain"):
+            self.block(NOT_PLAIN % "a gh api write")
+            return
+        low = [s.casefold() for s in seg]
+        if len(low) >= 4 and low[0] == "repos":
+            tail = low[3:]
+            if tail[:1] == ["pulls"] and tail[2:3] == ["merge"]:
+                self.block("merging through the API bypasses the hook's gate check; use gh pr merge <number>")
+            elif tail[:1] == ["merges"]:
+                self.block("the merges API merges a branch into another without a pull request or the gate")
+            elif tail[:2] == ["git", "refs"] or tail[:1] == ["contents"] or tail[:1] == ["branches"]:
+                self.block("this API call writes a branch directly (refs, contents or branches), which can move the "
+                           "default branch; use git push to your own branch")
+            elif "pending_deployments" in tail or any("approve" in s for s in tail):
+                self.block("this API call approves a deployment, which only a person does")
+        elif any("approve" in s for s in low):
+            self.block("this API call approves something, which only a person does")
+
+    def graphql(self, fields, inputs):
+        """gh api graphql passes only an inline query that reads as having no mutation: a file or stdin input (--input,
+        -F key=@file, @-), a query that is not plain text, and any mutation or subscription are refused, since no
+        gated pull request stands behind them."""
+        if inputs or any(typed and val.startswith("@") for typed, _, val, _ in fields):
+            self.block("gh api graphql reads input from a file or stdin (--input, -F key=@file), which the hook cannot "
+                       "read; pass the query inline with -f query='...'")
+            return
+        queries = [(val, w) for _, key, val, w in fields if key == "query"]
+        if not queries:
+            self.block("gh api graphql without an inline query the hook can read; pass it with -f query='...'")
+        for val, w in queries:
+            if w.expanded:
+                self.block("the gh api graphql query is not plain text, so the hook cannot read what it does")
+            elif graphql_reads(val) is not True:
+                self.block("gh api graphql with a mutation, a subscription or a document the hook cannot read: only "
+                           "inline read queries pass, since no gated pull request stands behind a change made this "
+                           "way; use git push to your branch, gh pr merge through the gate, or a person")
+
+    def gh_workflow(self, args):
+        if not args or args[0].text != "run":
+            return
+        texts = [a.text for a in args[1:]]
+        for k, t in enumerate(texts):
+            if t == "--json":
+                self.block("gh workflow run --json reads its inputs from stdin, which the hook cannot see; pass them "
+                           "with -f")
+            val = None
+            if t in ("-f", "-F", "--field", "--raw-field") and k + 1 < len(texts):
+                val = texts[k + 1]
+            elif t.startswith(("--field=", "--raw-field=")):
+                val = t.split("=", 1)[1]
+            elif re.match(r"-[fF].", t):
+                val = t[2:]
+            if val is not None and "approve" in val.split("=", 1)[0].casefold():
+                self.block("a workflow input named approve approves a deploy, which only a person does")
+
+    # --- the factory's own tools ---
+
+    def broker(self, args, cmd, state, depth, feeder):
+        if not args:
+            return
+        verb, rest = args[0].text, args[1:]
+        plain = [a for a in rest if not a.text.startswith("-")]
+        if verb == "push":
+            if any(a.text in ("--lease",) or a.text.startswith("--lease=") for a in rest):
+                self.block("factory-github push --lease is a force push; push a new commit instead")
+                return
+            branch = plain[0] if plain else None
+            if branch is None or not branch.literal():
+                self.block("factory-github push needs the branch as plain text")
+                return
+            protected = self.default_branches(state["cwd"] or self.cwd, "origin")
+            if not protected:
+                self.block("the hook cannot tell the default branch, so the push cannot be shown not to reach it")
+                return
+            name = re.sub(r"^(refs/)?heads/", "", branch.text)
+            if name.casefold() in protected:
+                self.block("pushes to the default branch %s are blocked" % name)
+                return
+            self.pause_for.append("push")
+        elif verb == "pr-merge":
+            if not state.get("plain"):
+                self.block(NOT_PLAIN % "factory-github pr-merge")
+                return
+            if not plain or not re.fullmatch(r"[1-9][0-9]{0,9}", plain[0].text) or not plain[0].literal():
+                self.block("factory-github pr-merge needs the pull request number as plain text")
+                return
+            self.pause_for.append("merge")
+            if (int(plain[0].text), state["cwd"] or self.cwd) not in self.gates:
+                self.gates.append((int(plain[0].text), state["cwd"] or self.cwd))
+        elif verb in ("pr-create", "pr-ready"):
+            self.pause_for.append("factory-github %s" % verb)
+        elif verb == "issue-labels":
+            texts = [a.text for a in rest]
+            for k, t in enumerate(texts):
+                if t == "--remove" and k + 1 < len(texts) and "factory:paused" in texts[k + 1].casefold():
+                    self.block("removing factory:paused clears the emergency stop, which only the person does")
+
+    def factory(self, args, cmd, state, depth, feeder):
+        if args and args[0].text == "pause":
+            self.factory_pause(args[1:], cmd, state, depth, feeder)
+
+    def factory_pause(self, args, cmd, state, depth, feeder):
+        if any(a.text in ("on", "off") for a in args):
+            self.block("factory-pause on and off are the person's; agents run only factory-pause status")
+
+
+PROTECTED_WHY = {"acceptance": "holdout scenarios are the validator's alone; a person changes them",
+                 ".factory/hooks": "the hooks guard every agent; factory-update changes them"}
+
+
+UNKNOWN = object()               # a path whose place cannot be told
+OVERRIDES = ("GH_REPO", "GH_HOST")
+GIT_PLACES = ("GIT_DIR", "GIT_WORK_TREE")   # set on a git command, they move where its writes land
+CLEARED = "\0cleared"            # env -i: nothing inherited
+SET_OTHER = "\0other"            # the command sets a variable other than GH_REPO and GH_HOST (a prefix, env NAME=)
+
+
+def union(folders, more):
+    """folders with more added, in order; None (unknown) when either is."""
+    if folders is None or more is None:
+        return None
+    return folders + [f for f in more if f not in folders]
+
+
+def assignment(w):
+    """(name, value Word) of a NAME=value word; the value keeps the word's expansion flags."""
+    name, _, value = w.text.partition("=")
+    return name, part(w, value)
+
+
+def part(w, text):
+    """A Word holding part of w's text, not plain whenever w is not."""
+    out = Word()
+    out.text, out.expanded, out.glob, out.quoted = text, w.expanded, w.glob, w.quoted
+    return out
+
+
+# GraphQL's lexical tokens, as far as a read needs them (the GraphQL specification, "Source Text"): ignored spaces,
+# tabs, newlines and commas; the punctuators of an executable document; names; numbers (a number may not run into a
+# name or a dot); and ordinary strings with their escapes. Not here, so refused: comments, block strings, \u{...},
+# the type-system punctuators & and |, carriage returns and every other character outside a string.
+GQL_TOKEN = re.compile(r'[ \t\n,]+|\.\.\.|[!$():=@\[\]{}]|[_A-Za-z][_0-9A-Za-z]*|'
+                       r'-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?(?![_0-9A-Za-z.])|'
+                       r'"(?:[^"\\\n]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"')
+
+
+class _ReadQuery:
+    """A recursive-descent parser for the one GraphQL document gh api graphql may send: exactly one query operation.
+
+        Document     = SelectionSet | "query" Name? VariableDefs? Directives? SelectionSet     (then the end)
+        VariableDefs = "(" ( "$" Name ":" Type ( "=" Value )? Directives? )+ ")"
+        Type         = ( Name | "[" Type "]" ) "!"?
+        SelectionSet = "{" Selection+ "}"
+        Selection    = ( Name ":" )? Name Arguments? Directives? SelectionSet?
+                     | "..." ( "on" Name )? Directives? SelectionSet          (an inline fragment; no named spread)
+        Arguments    = "(" ( Name ":" Value )+ ")"        Directives = ( "@" Name Arguments? )*
+        Value        = "$" Name | number | string | Name | "[" Value* "]" | "{" ( Name ":" Value )* "}"
+
+    A query operation runs no mutation, whatever its fields are called, so a document that parses is a read. Any
+    other document raises ValueError: a mutation, subscription or fragment definition, a second operation, a
+    fragment spread, an empty selection, unbalanced or misplaced punctuation."""
+
+    def __init__(self, tokens):
+        self.t, self.i, self.depth = tokens, 0, 0
+
+    def peek(self):
+        return self.t[self.i] if self.i < len(self.t) else None
+
+    def take(self, want):
+        if self.peek() != want:
+            raise ValueError(want)
+        self.i += 1
+
+    def opt(self, want):
+        if self.peek() == want:
+            self.i += 1
+            return True
+        return False
+
+    def name(self):
+        tok = self.peek()
+        if tok is None or not NAME.fullmatch(tok):
+            raise ValueError("a name")
+        self.i += 1
+
+    def nest(self, step):
+        self.depth += step
+        if self.depth > 64:
+            raise ValueError("too deep")
+
+    def document(self):
+        if self.opt("query"):
+            if self.peek() not in ("(", "@", "{"):
+                self.name()
+            if self.peek() == "(":
+                self.variables()
+            self.directives()
+        self.selections()
+        if self.peek() is not None:
+            raise ValueError("more after the operation")
+
+    def variables(self):
+        self.take("(")
+        while True:
+            self.take("$")
+            self.name()
+            self.take(":")
+            self.type_()
+            if self.opt("="):
+                self.value()
+            self.directives()
+            if self.opt(")"):
+                return
+
+    def type_(self):
+        self.nest(1)
+        if self.opt("["):
+            self.type_()
+            self.take("]")
+        else:
+            self.name()
+        self.opt("!")
+        self.nest(-1)
+
+    def directives(self):
+        while self.opt("@"):
+            self.name()
+            if self.peek() == "(":
+                self.arguments()
+
+    def arguments(self):
+        self.take("(")
+        while True:
+            self.name()
+            self.take(":")
+            self.value()
+            if self.opt(")"):
+                return
+
+    def selections(self):
+        self.nest(1)
+        self.take("{")
+        while True:
+            if self.opt("..."):
+                if self.opt("on"):
+                    self.name()
+                elif self.peek() not in ("@", "{"):
+                    raise ValueError("a fragment spread")
+                self.directives()
+                self.selections()
+            else:
+                self.name()
+                if self.opt(":"):
+                    self.name()
+                if self.peek() == "(":
+                    self.arguments()
+                self.directives()
+                if self.peek() == "{":
+                    self.selections()
+            if self.opt("}"):
+                break
+        self.nest(-1)
+
+    def value(self):
+        self.nest(1)
+        tok = self.peek()
+        if tok == "$":
+            self.i += 1
+            self.name()
+        elif tok == "[":
+            self.i += 1
+            while not self.opt("]"):
+                self.value()
+        elif tok == "{":
+            self.i += 1
+            while not self.opt("}"):
+                self.name()
+                self.take(":")
+                self.value()
+        elif tok is not None and (tok[0] in '"-0123456789' or NAME.fullmatch(tok)):
+            self.i += 1
+        else:
+            raise ValueError("a value")
+        self.nest(-1)
+
+
+def graphql_reads(text):
+    """True only for a document that is exactly one query operation (_ReadQuery's grammar), read with GraphQL's own
+    tokens. Anything else is False: a comment, a block string, a carriage return or other control character, a
+    fragment, a second definition, a mutation or subscription, an empty, invalid or unbalanced document."""
+    if any((ord(c) < 32 and c not in "\n\t") or ord(c) == 127 for c in text):
+        return False
+    tokens, i = [], 0
+    while i < len(text):
+        if text.startswith('"""', i):
+            return False                    # a block string: refused, so its escapes never matter
+        m = GQL_TOKEN.match(text, i)
+        if not m:
+            return False
+        if not re.fullmatch(r"[ \t\n,]+", m.group(0)):
+            tokens.append(m.group(0))
+        i = m.end()
+    try:
+        _ReadQuery(tokens).document()
+    except ValueError:
+        return False
+    return True
+
+
+NOT_PLAIN = ("%s passes only as the one command of the Bash call: alone (no ;, &&, ||, pipe, & or second line "
+             "around it), at the top level (not inside sh -c, bash -c, zsh -c, eval, $( ), a here-document fed to a "
+             "shell, a function, a loop, an if, a subshell, braces, or a wrapper other than env, nor in the arguments "
+             "of a command the hook does not know: arch, direnv exec, ssh, an unquoted echo), and with no $( ) or "
+             "backticks in it (give a body with --body-file, or -F key=@file); run it as a call of its own")
+
+
+def env_assignments(args):
+    """The NAME=value words env sets before the command it runs (its options are skipped; -u's name is not one)."""
+    out, i = [], 0
+    while i < len(args):
+        t = args[i].text
+        if t in ("-u", "--unset", "-C", "--chdir", "-P", "-S", "--split-string"):
+            i += 2
+        elif t.startswith("-"):
+            i += 1
+        elif re.match(r"[A-Za-z_][A-Za-z0-9_]*=", t):
+            out.append(args[i])
+            i += 1
+        else:
+            break
+    return out
+
+
+API_HOST = re.compile(r"https://api\.github\.com(:443)?(?=/|$)", re.IGNORECASE)
+
+
+def api_path(text):
+    """The path a gh api endpoint names, normalised (https://api.github.com with or without :443 and one leading /
+    dropped, %-escapes decoded once), or None when it does not normalise: another scheme, host or port, an empty, .
+    or .. part (//, /./, a trailing /), a part with a space at either end, a backslash, ?, #, % or control character
+    left after decoding. A path that does not normalise is refused for a write, rather than guessed the way GitHub
+    would route it."""
+    t = text
+    if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", t):
+        m = API_HOST.match(t)
+        if not m:
+            return None
+        t = t[m.end():]
+    t = t.split("?", 1)[0]
+    if t.startswith("/"):
+        t = t[1:]
+    try:
+        d = urllib.parse.unquote(t, errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if re.search(r"[%#?\\\x00-\x1f\x7f]", d) or any(s.strip() in ("", ".", "..") or s != s.strip()
+                                                         for s in d.split("/")):
+        return None
+    return d
+
+
+GUARDED = {"gh", "git", "factory-github", "security", "secret-tool"}
+
+
+def runs_guarded(argv, j):
+    """True when argv[j:] reads as a command the guard must see: a tool it guards followed by a verb that matters (a
+    push, a merge, an API call, a credential), gh followed by any gh command (gh pr create and gh pr ready need the
+    pause check), the factory's own tools (the broker, the pause), printenv, env as the last word (it prints every
+    variable), or a shell given a script with -c."""
+    w = argv[j]
+    if not w.literal():
+        return False
+    b, rest = w.text.rsplit("/", 1)[-1], argv[j + 1:]
+    first = rest[0].text if rest and rest[0].literal() else None
+    if b in ("factory-github", "factory-pause", "security", "secret-tool", "printenv") or (b == "env" and not rest):
+        return True
+    if b == "factory":
+        return first == "pause"
+    if b == "gh" and first in GH_COMMANDS:
+        return True
+    if b in GUARDED:
+        return any(a.literal() and a.text.casefold() in DANGER_WORDS | {"api", "auth"} for a in rest)
+    if b in SHELLS:
+        return any(a.literal() and re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", a.text) for a in rest[:3])
+    return False
+
+
+# find's words, as GNU find, BSD find and bfs document them: flags and primaries without an operand, with one, and
+# with a file to write. -depth and -exit take an optional number. A word that starts with -f is known only as -fprint,
+# -fprint0, -fprintf or -fls: -f PATH names a starting folder, and BSD find reads -follow, -false, -fstype or
+# -files0-from before the folders as -f with a path attached.
+FIND_FLAGS = {"-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x", "-daystart", "-depth", "-ignore_readdir_race",
+              "-noignore_readdir_race", "-mount", "-noerror", "-nohidden", "-noleaf", "-status", "-unique", "-warn",
+              "-nowarn", "-xdev", "-color", "-nocolor", "-acl", "-empty", "-executable", "-readable", "-writable",
+              "-true", "-hidden", "-nogroup", "-nouser", "-sparse", "-xattr", "-delete", "-rm", "-ls", "-print",
+              "-print0", "-printx", "-prune", "-quit", "-exit", "-version", "-help", "-not", "-a", "-and", "-o",
+              "-or", "-exclude", "!", ",", "(", ")"}
+FIND_ONE = {"-D", "-S", "-regextype", "-maxdepth", "-mindepth", "-limit", "-samefile", "-newer", "-since", "-used",
+            "-size", "-type", "-xtype", "-perm", "-links", "-inum", "-gid", "-uid", "-group", "-user", "-name",
+            "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname", "-regex", "-iregex",
+            "-xattrname", "-printf", "-context"}
+FIND_ONE_RE = re.compile(r"-[aBcm](min|time|newer|since)|-newer[aBcmt][aBcmt]")
+FIND_FLAG_RE = re.compile(r"-O[0-9]*|-j[0-9]+|-[EHLPXdsx]{2,}")
+FIND_FILE = {"-fprint": 1, "-fprint0": 1, "-fls": 1, "-fprintf": 2}
+FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
+FIND_WRITES = ("-delete", "-rm", "-fprint", "-fprint0", "-fprintf", "-fls")
+
+
+def find_reading(args):
+    """(starting folders, files written, command bodies, first write action or None, first unknown word or None) of
+    a find call. Every word is read in order: a command body (-exec ... ; or +), a known flag or primary with its
+    operands, or else, when it does not start with -, a starting folder (bfs takes folders anywhere). A word that
+    starts with - and is not known, or is not plain text, is the unknown one, and so is any word of find's own (an
+    operand too, not a command body) that starts with -f but is not -fprint, -fprint0, -fprintf or -fls."""
+    paths, files, execs, writes, unknown, i = [], [], [], None, None, 0
+    while i < len(args):
+        w, t = args[i], args[i].text
+        if w.literal() and t in FIND_EXEC:
+            end = i + 1
+            while end < len(args) and args[end].text not in (";", "+"):
+                end += 1
+            execs.append(args[i + 1:end])
+            i = end + 1
+            continue
+        if not w.literal():
+            if t.startswith("-") or not t:
+                unknown = unknown or w
+            else:
+                paths.append(w)                 # refused as a destination that is not plain text
+            i += 1
+            continue
+        if t in FIND_WRITES:
+            writes = writes or t
+        if t in FIND_FILE:
+            files += args[i + 1:i + 2]
+            i += 1 + FIND_FILE[t]
+        elif t in FIND_ONE or FIND_ONE_RE.fullmatch(t):
+            i += 2
+        elif t in ("-depth", "-exit") and i + 1 < len(args) and re.fullmatch(r"[-+]?[0-9]+", args[i + 1].text):
+            i += 2
+        elif t in FIND_FLAGS or FIND_FLAG_RE.fullmatch(t):
+            i += 1
+        elif t.startswith("-") and t != "-":
+            unknown = unknown or w
+            i += 1
+        else:
+            paths.append(w)
+            i += 1
+    i = 0
+    while unknown is None and i < len(args):        # any -f word but -fprint* and -fls, operands included
+        t = args[i].text
+        if t in FIND_EXEC:
+            while i < len(args) and args[i].text not in (";", "+"):
+                i += 1
+        elif t.startswith("-f") and t not in FIND_FILE:
+            unknown = args[i]
+        i += 1
+    return paths, files, execs, writes, unknown
+
+
+XARGS_VALUE = set("adEILnPsJRS")                 # xargs options that take a value (GNU and BSD)
+XARGS_FLAG = set("0oprtx")
+
+
+def xargs_command(argv):
+    """The index in argv of the command xargs runs (len(argv) when none: echo), or None when its options cannot be
+    read (an option it does not know, or one that is not plain text), so the caller falls back to the first word it
+    knows."""
+    i = 1
+    while i < len(argv):
+        w, t = argv[i], argv[i].text
+        if not w.literal():
+            return None
+        if t == "--":
+            return i + 1
+        if t.startswith("--"):
+            if t.split("=", 1)[0] not in ("--null", "--no-run-if-empty", "--verbose", "--exit", "--interactive",
+                                          "--open-tty", "--arg-file", "--delimiter", "--eof", "--replace",
+                                          "--max-lines", "--max-args", "--max-procs", "--max-chars",
+                                          "--process-slot-var", "--show-limits"):
+                return None
+            i += 2 if t in ("--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
+                            "--process-slot-var") else 1
+            continue
+        if not t.startswith("-") or t == "-":
+            return i
+        step = 1
+        for k, c in enumerate(t[1:], 2):
+            if c in XARGS_VALUE:
+                step = 1 if k < len(t) else 2
+                break
+            if c in "eil":                              # GNU: an optional value, attached only
+                break
+            if c not in XARGS_FLAG:
+                return None
+        i += step
+    return i
+
+
+def config_call(args):
+    """(mode, key, value, files) of a git config call; files are the --file and -f operands. mode: "read" (--get, --get-all, --get-regexp, --get-urlmatch,
+    --get-color, --get-colorbool, -l, --list, the get and list subcommands, or a key alone), "unset" (--unset,
+    --unset-all, --remove-section, unset, remove-section), "set" (a key and a value, --add, --replace-all, set), or
+    None when the hook cannot tell: an option it does not know, a word that is not plain text where an option or
+    the subcommand may be, edit or rename-section (they change keys it cannot see). Options are read wherever they
+    stand, as git does; the file options (--file, --global, --blob and the like) do not change which key is set."""
+    value_opts = {"-f", "--file", "--blob", "-t", "--type", "--default", "--comment", "--value", "--url"}
+    flags = {"--global", "--system", "--local", "--worktree", "--bool", "--int", "--bool-or-int", "--path",
+             "--expiry-date", "-z", "--null", "--name-only", "--show-origin", "--show-scope", "--includes",
+             "--no-includes", "--fixed-value", "--all", "--no-type"}
+    reads = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "-l",
+             "--list"}
+    unsets = {"--unset", "--unset-all", "--remove-section"}
+    sets = {"--add", "--replace-all"}
+    modes, pos, unknown, files, i = set(), [], False, [], 0
+    while i < len(args):
+        w, t = args[i], args[i].text
+        if t == "--" and w.literal():
+            pos += args[i + 1:]
+            break
+        if w.literal() and t.startswith("-") and len(t) > 1:
+            name = t.split("=", 1)[0] if t.startswith("--") else t[:2]
+            attached = ("=" in t) if t.startswith("--") else len(t) > 2
+            if name in value_opts:
+                if name in ("-f", "--file"):
+                    files.append(part(w, t.split("=", 1)[1] if t.startswith("--") else t[2:]) if attached else
+                                 (args[i + 1] if i + 1 < len(args) else Word()))
+                i += 1 if attached else 2
+                continue
+            if attached and name not in ("--type",):
+                unknown = True
+            elif name in reads:
+                modes.add("read")
+            elif name in unsets:
+                modes.add("unset")
+            elif name in sets:
+                modes.add("set")
+            elif name not in flags:
+                unknown = True              # --edit, --rename-section, and anything else
+        else:
+            pos.append(w)
+        i += 1
+    subs = {"list": "read", "get": "read", "set": "set", "unset": "unset", "remove-section": "unset",
+            "rename-section": None, "edit": None}
+    if pos and pos[0].literal() and pos[0].text in subs:
+        modes.add(subs[pos[0].text] or "unknown")
+        pos = pos[1:]
+    if "read" in modes and not modes - {"read"}:
+        return "read", None, None, files
+    if unknown or "unknown" in modes or len(modes) > 1:
+        return None, None, None, files
+    if pos and not pos[0].literal():
+        return None, None, None, files
+    if modes == {"unset"}:
+        return "unset", None, None, files
+    if not modes and len(pos) <= 1:
+        return "read", None, None, files
+    return "set", pos[0] if pos else None, pos[1] if len(pos) > 1 else None, files
+
+
+def awk_files(args):
+    """The files awk changes in place, or None when it changes none. gawk edits in place only with a library it
+    loads (-i inplace, -l, --include, --load); any library counts, since the hook cannot read one. Its files are the
+    operands after the program, which is the first operand unless -f, -e or -E gives it."""
+    include, program, operands, i = False, False, [], 0
+    while i < len(args):
+        t = args[i].text
+        if t == "--":
+            operands += args[i + 1:]
+            break
+        if t.startswith("--"):
+            name = t.split("=", 1)[0]
+            include = include or name in ("--include", "--load")
+            program = program or name in ("--file", "--source", "--exec")
+            takes = name in ("--include", "--load", "--file", "--source", "--exec", "--assign", "--field-separator")
+            i += 2 if takes and "=" not in t else 1
+        elif t.startswith("-") and len(t) > 1:
+            step = 1
+            for k, c in enumerate(t[1:], 2):
+                if c in "fFveilEW":                     # takes a value: the rest of the word, or the next one
+                    include = include or c in "il"
+                    program = program or c in "feE"
+                    step = 1 if k < len(t) else 2
+                    break
+            i += step
+        else:
+            operands.append(args[i])
+            i += 1
+    if not include:
+        return None
+    return operands if program else operands[1:]
+
+
+def only_expansion(w):
+    """True for a word that is one expansion and nothing else ("$CMD", $(cat f), `cat f`): its text says nothing."""
+    return w.expanded and bool(re.fullmatch(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\$\(.*\)|`.*`", w.text, re.S))
+
+
+def quote(text):
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def shown(text, limit=80):
+    t = clean(text)
+    return "'%s'" % (t if len(t) <= limit else t[:limit] + "...")
+
+
+# --- the tools the hook runs ----------------------------------------------------------------------------------------
+
+def tool(name):
+    p = os.path.join(BIN, name)
+    return p if os.path.isfile(p) else None
+
+
+def pause_status(cwd):
+    """factory-pause status: 0 not paused, 3 paused, 1 cannot tell (tried twice, as the skills say)."""
+    p = tool("factory-pause")
+    if not p:
+        return 1
+    rc = 1
+    for _ in range(2):
+        rc, _out = run(["sh", p, "status", "-q"], cwd, PAUSE_TIMEOUT)
+        if rc in (0, 3):
+            return rc
+    return 1
+
+
+def tail(text, n=15):
+    lines = [ln.rstrip() for ln in clean_lines(text) if ln.strip()]
+    return "\n".join("  " + ln for ln in lines[-n:])
+
+
+def clean_lines(text):
+    return [re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", ln) for ln in redact(str(text)).splitlines()]
+
+
+def deny(reasons):
+    msg = "factory-hook: blocked: " + reasons[0]
+    for r in reasons[1:]:
+        msg += "\nfactory-hook: also: " + r
+    sys.stderr.write(redact(msg) + "\n")
+    return 2
+
+
+def pre_tool(data):
+    name = data.get("tool_name")
+    inp = data.get("tool_input") or {}
+    cwd = data.get("cwd") or os.getcwd()
+    if not isinstance(inp, dict):
+        return deny(["the tool call's input is not an object; the hook cannot judge it"])
+    g = Guard(cwd)
+    if name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        path = inp.get("file_path") or inp.get("notebook_path")
+        if not isinstance(path, str):
+            return deny(["the %s call names no file the hook can read" % name])
+        where = g.protected(path, [cwd])
+        if where is UNKNOWN:
+            return deny(["the %s call names a relative path from a folder the hook cannot tell" % name])
+        if where:
+            return deny(["%s/ is not edited by agents (%s)" % (where, PROTECTED_WHY[where])])
+        return 0
+    if name in ("Read", "Grep"):
+        for key in ("file_path", "path"):
+            v = inp.get(key)
+            if isinstance(v, str) and credential_path(v, cwd, glob=True):
+                return deny(["%s names a credential store; no agent reads credentials" % shown(v)])
+        return 0
+    if name != "Bash":
+        return 0
+    command = inp.get("command")
+    if not isinstance(command, str):
+        return deny(["the Bash call has no command the hook can read"])
+    try:
+        g.script(command, cwd)
+    except Unreadable as e:
+        return deny(["the hook cannot read this command (%s); write it in plain shell" % e])
+    if g.blocks:
+        return deny(g.blocks)
+    if g.pause_for:
+        rc = pause_status(cwd)
+        if rc == 3:
+            return deny(["the factory is paused (factory:paused on the status issue): no %s until the person clears "
+                         "it; finish your current step, post the paused report and stop" % g.pause_for[0]])
+        if rc != 0:
+            return deny(["cannot tell whether the factory is paused (factory-pause status failed twice, or is "
+                         "missing), so it counts as paused: no %s; run factory pause status for the reason"
+                         % g.pause_for[0]])
+    for n, where in g.gates:
+        p = tool("factory")
+        if not p:
+            return deny(["the factory tool is missing next to the hooks, so factory gate %d cannot run; nothing "
+                         "merges ungated" % n])
+        rc, out = run(["sh", p, "gate", str(n)], where, GATE_TIMEOUT)
+        if rc != 0:
+            why = {1: "the gate cannot judge it (a failed read, no factory.yaml, or agent-token mode on, where the "
+                      "gate cannot pass); gate it by hand (merge-gate.md) and let a person merge",
+                   2: "a rule of the merge gate fails",
+                   3: "the gate refused it",
+                   124: "factory gate took longer than the hook allows"}.get(rc, "factory gate exited %d" % rc)
+            return deny(["factory gate %d did not pass: %s. Its output:\n%s" % (n, why, tail(out) or "  (none)")])
+    return 0
+
+
+# --- verify records, PostToolUse and Stop ----------------------------------------------------------------------------
+
+PASSED = re.compile(r"^All [0-9]+ commands passed on head ([0-9a-f]{40}), tree ([0-9a-f]{40})\.", re.M)
+# factory verify --no-heavy's summary: the same start, then the option instead of the full run's closing period.
+PASSED_NO_HEAVY = re.compile(r"^All [0-9]+ commands passed on head ([0-9a-f]{40}), tree ([0-9a-f]{40}), with "
+                             r"--no-heavy: not a full run \(heavy checks left to the gate: ([^\n]*)\)\.", re.M)
+
+
+def record_file(cwd):
+    d = git(cwd, "rev-parse", "--absolute-git-dir")
+    return os.path.join(d, RECORD) if d else None
+
+
+def records(path):
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 2 and re.fullmatch(r"[0-9a-f]{40}", parts[0]):
+                    out[parts[0]] = parts[1]
+    except (OSError, TypeError, UnicodeDecodeError):
+        pass
+    return out
+
+
+def write_record(path, head, result):
+    """Writes the record file found before (record_file runs git, which cannot run once the deadline has passed)."""
+    if not path:
+        return
+    lines = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if ln.split()[:1] != [head]]
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    lines = (lines + ["%s %s" % (head, result)])[-50:]
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def is_factory_tool(word, cwd):
+    """True when a command name runs the factory tool next to the hooks (by path, or bare `factory` found on PATH)."""
+    mine = tool("factory")
+    if not mine or not word.literal():
+        return False
+    text = word.text
+    top = git(cwd, "rev-parse", "--show-toplevel")
+    allowed = {os.path.realpath(mine)} | ({os.path.realpath(os.path.join(top, ".factory", "bin", "factory"))} if top
+                                          else set())
+    if "/" not in text:
+        found = None
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            c = os.path.join(d, text)
+            if d and os.path.isfile(c):
+                found = c
+                break
+        return bool(found) and os.path.realpath(found) in allowed
+    p = absolute(text, cwd)
+    return bool(p) and os.path.isfile(p) and os.path.realpath(p) in allowed
+
+
+def post_tool(data):
+    if data.get("tool_name") != "Bash":
+        return 0
+    command = (data.get("tool_input") or {}).get("command")
+    resp = data.get("tool_response")
+    out = resp.get("stdout") if isinstance(resp, dict) else resp if isinstance(resp, str) else None
+    if not isinstance(command, str) or not isinstance(out, str):
+        return 0
+    cwd = data.get("cwd") or os.getcwd()
+    lexer = Lexer(command)
+    cmds = commands(lexer.tokens())
+    if lexer.nested or len(cmds) != 1 or cmds[0].redirects or cmds[0].upstream:
+        return 0
+    kind = verify_kind(cmds[0].words, cwd)
+    if not kind:
+        return 0
+    head = git(cwd, "rev-parse", "HEAD")
+    if kind == "uncounted":
+        if head:
+            write_record(record_file(cwd), head, "uncounted")
+        return 0
+    m = (PASSED_NO_HEAVY if kind == "green-no-heavy" else PASSED).search(out)
+    if m and head and m.group(1) == head:
+        write_record(record_file(cwd), head, kind)
+    return 0
+
+
+# The one assignment a recorded verify may carry: the worker cap the briefs ask for. It cannot change which executable
+# runs (factory verify takes its cap from the machine settings anyway). Any other assignment, PATH among them, could.
+CAP_ASSIGNMENT = re.compile(r"FACTORY_TEST_WORKERS=[0-9]{1,4}")
+
+
+def verify_kind(words, cwd):
+    """What a lone command's words are to the verify record, the one rule for both green kinds: "green" for
+    `factory verify`, "green-no-heavy" for `factory verify --no-heavy`, both by the factory tool next to the hooks, as
+    the hook resolves it, with at most the worker cap in front; "uncounted" for a factory verify the hook cannot be
+    sure ran that tool (any other leading assignment, or `env` in front); None for anything else."""
+    k = 0
+    other = False
+    while k < len(words) and words[k].plain_start and NAME_ASSIGN.match(words[k].text):
+        other = other or not (words[k].literal() and not words[k].quoted and CAP_ASSIGNMENT.fullmatch(words[k].text))
+        k += 1
+    argv = words[k:]
+    if argv and argv[0].literal() and os.path.basename(argv[0].text) == "env":
+        if any(w.text == "verify" for w in argv[1:]) and any(os.path.basename(w.text) == "factory"
+                                                              for w in argv[1:]):
+            return "uncounted"
+        return None
+    no_heavy = len(argv) == 3 and argv[2].text == "--no-heavy" and argv[2].literal()
+    if len(argv) != 2 + no_heavy or argv[1].text != "verify":
+        return None
+    if other:
+        return "uncounted" if os.path.basename(argv[0].text) == "factory" or is_factory_tool(argv[0], cwd) else None
+    if not is_factory_tool(argv[0], cwd):
+        return None
+    return "green-no-heavy" if no_heavy else "green"
+
+
+DONE = re.compile(r"^PR https?://\S+/pull/[0-9]+, head ([0-9a-fA-F]{7,40}), checks and reviews\b")
+HEADING = re.compile(r"^#{1,6}\s*Implementer report\b(.*)$", re.IGNORECASE)
+NOT_DONE = re.compile(r"^[\s>*_-]*not done[\s*_]*:", re.IGNORECASE)    # "**Not done:** <why>": the report says so
+
+
+def claims_done(message):
+    """True for an implementer's final report that names a pull request (core/skills/factory-implement/references/
+    report.md): its heading, not the paused one, and its last line."""
+    lines = [ln.strip() for ln in message.splitlines() if ln.strip()]
+    if not lines or not DONE.match(lines[-1].strip("`*_ ")) or any(NOT_DONE.match(ln) for ln in lines):
+        return False
+    heading = next((HEADING.match(ln) for ln in lines if HEADING.match(ln)), None)
+    return bool(heading) and "paused" not in heading.group(1).casefold()
+
+
+def reported_head(message):
+    """The head the report's last line names: a full or abbreviated hex SHA after "head ", read strictly. None when the
+    line has anything else there (the hook then judges the commit under cwd, as it always did)."""
+    lines = [ln.strip() for ln in message.splitlines() if ln.strip()]
+    m = DONE.match(lines[-1].strip("`*_ ")) if lines else None
+    return m.group(1).lower() if m else None
+
+
+def stop(data):
+    message = data.get("last_assistant_message")
+    if not isinstance(message, str) or not claims_done(message):
+        return 0
+    cwd = data.get("cwd") or os.getcwd()
+    head = git(cwd, "rev-parse", "HEAD")
+    reported = reported_head(message)
+    if head and reported and not head.lower().startswith(reported):
+        # The report is about another commit than the one this hook can verify (another worktree, or an older head):
+        # a green record or run here says nothing about it. The hook does not look for that commit elsewhere.
+        if pause_status(cwd) != 0:
+            return 0            # paused, or cannot tell: stopping is what the emergency stop asks for
+        return deny(["your report says the work is done on head %s, but the commit this hook verifies, under %s, is "
+                     "%s, so no factory verify run can vouch for the reported head. Report the head that is checked "
+                     "out in this folder (git rev-parse HEAD) after a green factory verify --no-heavy; if this folder is "
+                     "not your own checkout, end with a Not done: line saying so instead. %s"
+                     % (reported, cwd, head[:12], HOW_NOT_DONE)])
+    path = record_file(cwd)     # found now: after a verify cut at the deadline, git could not run to find it
+    before = records(path).get(head) if head else None
+    if before == "green":
+        return 0
+    if before == "green-no-heavy":
+        return left_to_gate(head, None)
+    if pause_status(cwd) != 0:
+        return 0                # paused, or cannot tell: stopping is what the emergency stop asks for
+    if not head:
+        return deny(["your report says the work is done, but this folder has no commit the hook can read, so no "
+                     "factory verify run can be found for it. " + HOW_NOT_DONE])
+    if before == "red" or (before == "error" and data.get("stop_hook_active")):
+        # Shown already; not run again. A green foreground factory verify is recorded; otherwise the report says so.
+        return deny(["your report says the work is done, but factory verify was %s on the current commit %s. Run "
+                     "factory verify --no-heavy (or factory verify) in the foreground until it is green (a green run "
+                     "is recorded), or report that "
+                     "the work is not done. %s" % ("red" if before == "red" else "not able to finish", head[:12],
+                                                   HOW_NOT_DONE)])
+    p = tool("factory")
+    if not p:
+        write_record(path, head, "error")
+        return deny(["your report says the work is done, but the factory tool is missing next to the hooks, so "
+                     "factory verify cannot run on %s; restore the core with factory update" % head[:12]])
+    # --no-heavy: a heavy check is left to the gate, which runs it under the machine's heavy lock (factory-implement
+    # § 5.2); the builder runs only the tests its change adds or edits.
+    rc, out = run(["sh", p, "verify", "--no-heavy"], cwd, VERIFY_TIMEOUT)
+    m = PASSED_NO_HEAVY.search(out)
+    if rc == 0 and m and m.group(1) == head:
+        write_record(path, head, "green-no-heavy")
+        return left_to_gate(head, m.group(3))
+    if rc == 3:
+        return 0                # paused meanwhile
+    write_record(path, head, "red" if rc == 2 else "error")
+    why = {2: "a command failed", 124: "it took longer than the hook allows (run factory verify --no-heavy yourself; "
+                                       "a green run in the foreground is recorded)"}.get(rc, "it exited %d" % rc)
+    if rc == 0:
+        why = "it passed on another head than %s" % head[:12]
+    return deny(["your report says the work is done, but factory verify --no-heavy is not green on the current "
+                 "commit %s (%s). "
+                 "Fix it and report again, or report that the work is not done. %s Its output:\n%s"
+                 % (head[:12], why, HOW_NOT_DONE, tail(out) or "  (none)")]
+                + ([UNCOUNTED] if before == "uncounted" else []))
+
+
+def left_to_gate(head, checks):
+    """Lets the agent stop on a green --no-heavy run, with a message that the run was not a full one: every heavy check
+    it selects is left to the gate. `checks` is the run's own list, or None when only its record is known."""
+    which = (" (%s)" % clean_lines(checks)[0][:300]) if checks else ""
+    msg = ("factory-hook: factory verify --no-heavy is green on %s; it is not a full run: the heavy checks it "
+           "selects%s are left to the gate" % (head[:12], which))
+    sys.stdout.write(json.dumps({"systemMessage": redact(msg)}) + "\n")
+    return 0
+
+
+UNCOUNTED = ("your own factory verify on this commit was not counted: it had an assignment or env in front, so the "
+             "hook cannot be sure which executable ran. Run factory verify (or factory verify --no-heavy) with no "
+             "assignment in front; FACTORY_TEST_WORKERS=<n> is the one allowed.")
+
+
+HOW_NOT_DONE = ("A report that is not done carries a line starting with \"Not done:\" that says why; the same done "
+                "report is refused again.")
+
+
+def main():
+    event, data = None, None
+    try:
+        raw = sys.stdin.buffer.read()
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+        event = data.get("hook_event_name")
+        set_deadline(event)
+        if event == "PreToolUse":
+            return pre_tool(data)
+        if event == "PostToolUse":
+            try:
+                return post_tool(data)
+            except Exception:  # noqa: BLE001 (recording is best effort and never blocks)
+                return 0
+        if event in STOP_EVENTS:
+            return stop(data)
+        return 0
+    except Exception as e:  # noqa: BLE001 (an error must block, since Claude Code lets any other exit through)
+        if event == "PostToolUse":
+            return 0
+        if event in STOP_EVENTS and data.get("stop_hook_active"):
+            return 0                # one block per stop at most, so a broken hook cannot keep an agent running
+        return deny(["the hook failed (%s), so it cannot judge this call" % type(e).__name__])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

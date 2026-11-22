@@ -1,0 +1,9 @@
+# The headless runtime's defaults (runtime/headless.md › Settings): the one place that holds them. A machine overrides
+# them in ~/.factory/headless.yaml, under `defaults:` for every job and inside a job for that job alone.
+max_turns: 200                 # turns per run: the CLI's own limit (claude --max-turns); Codex has none, see headless.md
+timeout_minutes: 120           # wall-clock time per run, a number above 0; at the limit the run's processes are stopped
+concurrency: 1                 # headless runs at once on this machine, and never more than the machine cap of the pool
+grace_seconds: 30              # after the polite stop (SIGTERM), how long before the hard one (SIGKILL)
+report: status-issue           # where the runner posts each run's report: status-issue, or none (local files only)
+claude_permission_mode: ""     # empty: the CLI's own configured mode; else one of claude --permission-mode's choices
+codex_sandbox: ""              # empty: the CLI's own configured sandbox; else one of codex exec --sandbox's values

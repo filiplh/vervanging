@@ -1,0 +1,31 @@
+#!/bin/sh
+# factory-usage: the machine-wide usage ledger (~/.factory/usage/) and the weekly allowance reserve.
+#
+#   factory-usage start --spec SPEC [--project NAME] [--role ROLE]   a run starts; prints its id
+#   factory-usage end ID                                              that run ended
+#   factory-usage limit PROVIDER [--reset UTC]                        a usage-limit error, with its reset time
+#   factory-usage observe PROVIDER --used-pct N --reset UTC           a real weekly figure
+#   factory-usage observe-statusline                                  the same, from Claude Code's statusline JSON
+#   factory-usage observe-claude-stream                               the same, from Claude Code's stream-json
+#   factory-usage observe-codex                                       the same, from Codex's newest session logs
+#   factory-usage estimate [PROVIDER] [--json]                        one line per provider, for the status
+#   factory-usage may-start PROVIDER [--urgent]                       0 may start, 3 may not, 1 cannot tell
+#   factory-usage refresh claude --model MODEL                        a stale figure: ask the claude CLI once (hourly)
+#   factory-usage --help                                              the ledger format and the rules
+#
+# The settings are the machine settings' usage section: ~/.factory/machine.yaml over the machine section of the core's
+# defaults.yaml (docs/factory-yaml.md › Machine settings). Everything else is in factory-usage.py next to this file
+# (python3, standard library only), which reads ~/.factory/machine.yaml, reads only the rate_limits of Codex's session
+# logs (~/.codex/sessions), and reads and appends under ~/.factory/usage/ only, each ledger path opened without
+# following links and checked (yours, a real folder or file, writable only by you). Only refresh runs a command (the
+# claude CLI, once, in an empty temporary folder); nothing reads a credential. Exit codes: 0 done or may start; 3 may not start; 1 cannot tell,
+# unsafe path, refused input or cannot write; 64 bad usage.
+set -u
+unset CDPATH
+here=$(cd -P "$(dirname "$0")" 2> /dev/null && pwd -P) || { echo "factory-usage: cannot find its own folder" >&2; exit 1; }
+command -v python3 > /dev/null 2>&1 || { echo "factory-usage: needs python3 (standard library only); install Python 3" >&2; exit 1; }
+for f in factory-usage.py factory-doctor.py factory-safe-paths.py; do
+  [ -f "$here/$f" ] || { echo "factory-usage: $f is missing next to it; restore the core files with factory-update" >&2; exit 1; }
+done
+# The core's defaults: core/defaults.yaml in the factory repo, .factory/defaults.yaml in a project (one folder up).
+exec python3 -I -B "$here/factory-usage.py" --defaults "$here/../defaults.yaml" "$@"
