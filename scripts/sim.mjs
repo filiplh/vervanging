@@ -3,11 +3,14 @@
 // browser. Players are numbered 1..n.
 //   node scripts/sim.mjs plan --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>] [--json]
 //   node scripts/sim.mjs match --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
-//                              [--actions <wissel|undo,...>] [--json]
-//     Actions are comma-separated; "wissel*11" repeats an action 11 times. Prints the final match state.
+//                              [--actions <action,...>] [--json]
+//     Actions are comma-separated: wissel, undo ("wissel*11" repeats one 11 times), wissel:keep=P (in the zone:
+//     P stays on, the proposed incoming player stays off), wissel:keep=P:bench=Q (Q stays off), uit=P (P leaves at
+//     once; on court, a replacement comes on, the block still counts for P) and terug=P (from the next block on).
+//     Prints the final match state; onCourt shows the current block as it is on court.
 // Prints one JSON object on stdout. Invalid input: exit status 2, one line on stderr, nothing on stdout.
 import { makePlan, swapPlayers, planStats, PlanError } from '../public/js/planner.js';
-import { startMatch, applyAction, onCourt, minutesSoFar } from '../public/js/match.js';
+import { startMatch, applyAction, onCourt, minutesSoFar, MatchError } from '../public/js/match.js';
 
 class UsageError extends Error {}
 
@@ -55,15 +58,28 @@ function planFrom(opts) {
   return plan;
 }
 
-// "wissel,wissel*3,undo" -> ['wissel', 'wissel', 'wissel', 'wissel', 'undo']
+// "wissel,wissel*3,wissel:keep=4,wissel:keep=4:bench=9,uit=1,terug=1,undo" -> a list of engine actions
 function parseActions(text = '') {
   const actions = [];
   for (const item of String(text).split(',').filter((s) => s !== '')) {
-    const match = /^(wissel|undo)(?:\*(\d+))?$/.exec(item);
-    if (!match) throw new UsageError(`unknown action "${item}": use wissel or undo, optionally with *<count>`);
-    const count = match[2] === undefined ? 1 : Number(match[2]);
-    if (count < 1 || count > 1000) throw new UsageError(`action "${item}": the count must be 1 to 1000`);
-    for (let i = 0; i < count; i++) actions.push(match[1]);
+    let m = /^(wissel|undo)(?:\*(\d+))?$/.exec(item);
+    if (m) {
+      const count = m[2] === undefined ? 1 : Number(m[2]);
+      if (count < 1 || count > 1000) throw new UsageError(`action "${item}": the count must be 1 to 1000`);
+      for (let i = 0; i < count; i++) actions.push({ type: m[1] });
+      continue;
+    }
+    m = /^wissel:keep=(\d+)(?::bench=(\d+))?$/.exec(item);
+    if (m) {
+      actions.push({ type: 'wissel', keep: Number(m[1]), bench: m[2] === undefined ? null : Number(m[2]) });
+      continue;
+    }
+    m = /^(uit|terug)=(\d+)$/.exec(item);
+    if (m) {
+      actions.push({ type: m[1], player: Number(m[2]) });
+      continue;
+    }
+    throw new UsageError(`unknown action "${item}": use wissel, undo (optionally with *<count>), wissel:keep=P[:bench=Q], uit=P or terug=P`);
   }
   return actions;
 }
@@ -71,7 +87,14 @@ function parseActions(text = '') {
 function runMatch(opts) {
   const actions = parseActions(opts.actions);
   let state = startMatch(planFrom(opts));
-  for (const action of actions) state = applyAction(state, action);
+  for (const action of actions) {
+    try {
+      state = applyAction(state, action);
+    } catch (error) {
+      if (error instanceof MatchError) throw new UsageError(error.message);
+      throw error;
+    }
+  }
   return {
     block: state.block,
     blocks: state.blocks,
