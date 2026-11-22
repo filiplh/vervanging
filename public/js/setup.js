@@ -2,7 +2,7 @@
 // Roster entries carry a stable numeric id; the planner works with those ids, the screen shows names and numbers.
 
 import { makePlan, swapPlayers, planStats, PlanError, ON_COURT, SCHEDULES } from './planner.js';
-import { normaliseHistory, clearHistory, extraPriority, seasonSummary } from './history.js';
+import { normaliseHistory, clearHistory, catchUp, seasonSummary } from './history.js';
 
 export const MAX_PLAYERS = 15;
 const MAX_NAME = 20;
@@ -254,8 +254,9 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
     if (start.length !== ON_COURT || present.size < ON_COURT) return;
     try {
       const ids = players.filter((p) => present.has(p.id)).map((p) => p.id);
-      const priority = history.useHistory ? extraPriority(history, ids, seed) : [];
-      plan = makePlan({ players: ids, start, schedule, seed, extraPriority: priority });
+      const { priority, adjust } = history.useHistory
+        ? catchUp(history, ids, SCHEDULES[schedule], seed) : { priority: [], adjust: {} };
+      plan = makePlan({ players: ids, start, schedule, seed, extraPriority: priority, adjust });
     } catch (error) {
       if (!(error instanceof PlanError)) throw error;
       message = 'Er kon geen plan gemaakt worden. Probeer "Ander plan".';

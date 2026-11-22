@@ -185,11 +185,18 @@ export function searchGrid({ prefix, players, available, targets, blocks, blockS
   throw new PlanError('no plan found within the substitution limit of 3');
 }
 
-export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPriority = [] }) {
+// `adjust` (optional, from the history's catch-up, decision #28) moves blocks between players: +1 or -1 per player id,
+// summing to 0.
+export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPriority = [], adjust = {} }) {
   const { blocks, blockSeconds, blocksPerQuarter } = scheduleOf(schedule);
   checkPlayers(players, start);
   const random = seededRandom(seed);
   const targets = blockTargets(players, ON_COURT * blocks, random, extraPriority);
+  const moved = Object.entries(adjust).filter(([p]) => players.includes(Number(p)));
+  if (moved.reduce((sum, [, d]) => sum + d, 0) !== 0 || moved.some(([, d]) => d !== 1 && d !== -1)) {
+    throw new PlanError('catch-up must move whole blocks between players, +1 and -1 summing to 0');
+  }
+  for (const [p, d] of moved) targets[Number(p)] = Math.max(0, Math.min(blocks, targets[Number(p)] + d));
   const first = start.slice().sort((a, b) => a - b);
   const { grid, sitLimitRelaxed } = searchGrid({ prefix: [first], players, targets, blocks, blockSeconds, random });
   return { schedule, blocks, blockSeconds, blocksPerQuarter, players: players.slice(), start: first, grid, sitLimitRelaxed };

@@ -6,7 +6,7 @@
 import { el, normaliseMatchSetup, formatSeconds, byNumber } from './setup.js';
 import { SCHEDULES } from './planner.js';
 import {
-  startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
+  startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar, extraSeconds,
   normaliseMatchState, proposedBench, replacements, minutesOverview, MatchError,
 } from './match.js';
 import { normaliseHistory, recordMatch, forgetMatch, hasMatch, startedAfterClear } from './history.js';
@@ -45,7 +45,7 @@ export function restoreMatch(store, setup) {
 export function syncHistory(store, setup, state) {
   if (!setup.savedAt) return true; // a setup without savedAt cannot be told apart from another, so it is not recorded
   const history = normaliseHistory(store.load('history'));
-  if (state.ended) return store.save('history', recordMatch(history, setup.savedAt, minutesSoFar(state)));
+  if (state.ended) return store.save('history', recordMatch(history, setup.savedAt, minutesSoFar(state), extraSeconds(state)));
   if (!hasMatch(history, setup.savedAt)) return true;
   return store.save('history', forgetMatch(history, setup.savedAt));
 }
@@ -59,7 +59,7 @@ export function repairHistory(store, setup, state) {
   const history = normaliseHistory(store.load('history'));
   const recorded = hasMatch(history, setup.savedAt);
   if (state.ended && !recorded && startedAfterClear(history, setup.savedAt)) {
-    return store.save('history', recordMatch(history, setup.savedAt, minutesSoFar(state)));
+    return store.save('history', recordMatch(history, setup.savedAt, minutesSoFar(state), extraSeconds(state)));
   }
   if (!state.ended && recorded) return store.save('history', forgetMatch(history, setup.savedAt));
   return true;

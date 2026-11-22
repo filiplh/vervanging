@@ -767,3 +767,20 @@ test('manifest and page: installable as "Vervanging" in Dutch, standalone from /
   assert.ok(manifest.icons.some((i) => i.sizes === '192x192') && manifest.icons.some((i) => i.sizes === '512x512'));
   for (const icon of manifest.icons) assert.equal(pngSize(icon.src.replace(/^\//, '')), icon.sizes, icon.src);
 });
+
+test('setup screen: with the switch on, a player who missed a match gets one block more in the plan (#28)', () => {
+  const missed = {
+    useHistory: true,
+    matches: [
+      { id: 'm1', seconds: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [i + 1, 1000])) },
+      { id: 'm2', seconds: Object.fromEntries(Array.from({ length: 11 }, (_, i) => [i + 1, 1000])) },
+    ],
+  };
+  const { view } = openSetup({ players: 12, history: missed });
+  pickFive(view);
+  const minutes = minutesById(view);
+  assert.equal(minutes[12], 1200, 'player 12 missed a match: one block more');
+  assert.equal(Object.values(minutes).filter((m) => m === 800).length, 1, 'one player furthest ahead gives a block');
+  historySwitch(view).fire('change'); // the switch replans with the same five
+  assert.ok(Object.values(minutesById(view)).every((m) => m === 1000), 'switch off: equal minutes');
+});

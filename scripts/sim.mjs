@@ -4,7 +4,8 @@
 //   node scripts/sim.mjs plan --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
 //                             [--history <file> [--use-history]] [--json]
 //     --history reads a team history file in the shape the app stores (public/js/history.js; player ids are the
-//     player numbers); --use-history gives the uneven extra places to the players with the fewest total seconds in it.
+//     player numbers); --use-history gives the uneven extra places to the players with the fewest seconds in it and
+//     lets players behind catch up by one block (decision #28); seconds earned through Extra minuten are not counted.
 //   node scripts/sim.mjs match --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
 //                              [--actions <action,...>] [--json]
 //     Actions are comma-separated: wissel, undo ("wissel*11" repeats one 11 times), wissel:keep=P (in the zone:
@@ -17,9 +18,9 @@
 //     Prints the season totals of a team history file (decision #26, the Spelers screen): matches (the number of
 //     saved matches) and totals (seconds per player id over all of them; a player in no match is left out).
 // Prints one JSON object on stdout. Invalid input: exit status 2, one line on stderr, nothing on stdout.
-import { makePlan, swapPlayers, planStats, PlanError } from '../public/js/planner.js';
+import { makePlan, swapPlayers, planStats, PlanError, SCHEDULES } from '../public/js/planner.js';
 import { startMatch, applyAction, onCourt, minutesSoFar, extraSeconds, minutesOverview, MatchError } from '../public/js/match.js';
-import { normaliseHistory, extraPriority, seasonSummary } from '../public/js/history.js';
+import { normaliseHistory, catchUp, seasonSummary } from '../public/js/history.js';
 import { readFileSync } from 'node:fs';
 
 class UsageError extends Error {}
@@ -75,8 +76,11 @@ function planFrom(opts) {
   const seed = opts.seed === undefined ? 1 : positiveInt(opts.seed, 'seed');
   const history = opts.history === undefined ? null : readHistory(opts.history);
   if (opts['use-history'] && !history) throw new UsageError('--use-history needs --history <file>');
-  const priority = opts['use-history'] ? extraPriority(history, players, seed) : [];
-  let plan = makePlan({ players, start, schedule: opts.schedule ?? 'equal', seed, extraPriority: priority });
+  const schedule = opts.schedule ?? 'equal';
+  if (!SCHEDULES[schedule]) throw new UsageError(`unknown schedule "${schedule}": use equal or five`);
+  const { priority, adjust } = opts['use-history']
+    ? catchUp(history, players, SCHEDULES[schedule], seed) : { priority: [], adjust: {} };
+  let plan = makePlan({ players, start, schedule, seed, extraPriority: priority, adjust });
   if (opts.swap !== undefined) {
     const pair = numberList(opts.swap, 'swap');
     if (pair.length !== 2) throw new UsageError('--swap takes two player numbers');
