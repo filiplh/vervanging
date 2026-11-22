@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makePlan, planStats } from './planner.js';
+import { makePlan, planStats, maxSubsFrom, blockCounts } from './planner.js';
 import {
   startMatch, wissel, undo, canUndo, applyAction, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
-  normaliseMatchState, MatchError, MATCH_VERSION,
+  normaliseMatchState, MatchError, MATCH_VERSION, uit, terug, proposedBench,
 } from './match.js';
 
 const players = (n) => Array.from({ length: n }, (_, i) => i + 1);
@@ -121,7 +121,7 @@ test('normaliseMatchState refuses damaged states and states of another setup', (
   const good = roundTrip(times(startMatch(plan, 'saved-1'), 3));
   const damaged = [
     null, 7, 'x', [], {},
-    { ...good, version: 2 },
+    { ...good, version: 3 },
     { ...good, setupSavedAt: 'saved-2' },
     { ...good, schedule: 'five' },
     { ...good, blockSeconds: 300 },
@@ -155,4 +155,178 @@ test('normaliseMatchState refuses damaged states and states of another setup', (
   const two = roundTrip(times(startMatch(plan, 'saved-1'), 2));
   assert.deepEqual(normaliseMatchState(two, plan, 'saved-1'), two);
   assert.equal(normaliseMatchState({ ...two, previous: { block: 10, ended: false } }, plan, 'saved-1'), null);
+});
+
+// ---------- in the zone, uit and terug (#9) ----------
+
+const totalsAtEnd = (state) => Object.values(minutesSoFar(times(state, state.blocks, wissel)));
+const dueOff = (state) => nextChange(state).off;
+
+test('in the zone: the kept player stays on, the proposed bench player stays off, and the block comes back', () => {
+  for (const seed of [1, 2, 3, 4, 5]) {
+    const plan = planFor('equal', 12, seed);
+    const atTwo = wissel(startMatch(plan)); // block 2
+    for (const keep of dueOff(atTwo)) {
+      const bench = proposedBench(atTwo);
+      const next = wissel(atTwo, { keep });
+      assert.ok(onCourt(next).includes(keep), 'the zone player is on court in the next block');
+      assert.ok(!onCourt(next).includes(bench), 'the proposed incoming player stays on the bench');
+      assert.ok(maxSubsFrom(next.grid) <= 3, 'never more than 3 subs per change');
+      const end = times(next, 12);
+      assert.deepEqual(new Set(Object.values(minutesSoFar(end))), new Set([1000]), `seed ${seed}, keep ${keep}: equal at the end`);
+      assert.deepEqual(next.grid.slice(0, 2), atTwo.grid.slice(0, 2), 'blocks already played do not change');
+    }
+  }
+});
+
+test('in the zone: the proposal is the incoming player with the most minutes, ties to the lowest number', () => {
+  const state = times(startMatch(planFor('equal')), 3); // block 4
+  const minutes = minutesSoFar(state);
+  const on = nextChange(state).on;
+  const best = Math.max(...on.map((p) => minutes[p]));
+  assert.equal(proposedBench(state), Math.min(...on.filter((p) => minutes[p] === best)));
+});
+
+test('in the zone with a chosen bench player', () => {
+  const state = wissel(startMatch(planFor('equal')));
+  const { off, on } = nextChange(state);
+  const bench = on.find((p) => p !== proposedBench(state));
+  const next = wissel(state, { keep: off[0], bench });
+  assert.ok(onCourt(next).includes(off[0]));
+  assert.ok(!onCourt(next).includes(bench));
+  assert.deepEqual(new Set(totalsAtEnd(next)), new Set([1000]));
+});
+
+test('in the zone at the last change: no block left, so the difference stays', () => {
+  const state = times(startMatch(planFor('equal')), 10); // block 11
+  const keep = dueOff(state)[0];
+  const bench = proposedBench(state);
+  const end = wissel(wissel(state, { keep }));
+  const minutes = minutesSoFar(end);
+  assert.equal(minutes[keep], 1200);
+  assert.equal(minutes[bench], 800);
+  assert.equal(Object.values(minutes).filter((m) => m === 1000).length, 10);
+});
+
+test('in the zone is refused for a player not due off, a bench player not due on, and at the last block', () => {
+  const state = wissel(startMatch(planFor('equal')));
+  const stays = onCourt(state).find((p) => !dueOff(state).includes(p));
+  if (stays !== undefined) assert.throws(() => wissel(state, { keep: stays }), MatchError);
+  assert.throws(() => wissel(state, { keep: dueOff(state)[0], bench: onCourt(state)[0] }), MatchError);
+  assert.throws(() => wissel(times(startMatch(planFor('equal')), 11), { keep: 1 }), MatchError);
+});
+
+for (const at of [2, 9]) {
+  test(`uit at block ${at}: the player plays no more, the others end at most one block apart`, () => {
+    const start = times(startMatch(planFor('equal')), at - 1);
+    const player = onCourt(start)[0];
+    const out = uit(start, player);
+    assert.equal(out.block, at, 'uit does not move to the next block');
+    assert.deepEqual(out.grid.slice(0, at), start.grid.slice(0, at), 'played blocks and the current block stay');
+    assert.ok(out.grid.slice(at).every((court) => !court.includes(player)));
+    assert.ok(maxSubsFrom(out.grid, at - 1) <= 3);
+    const end = times(out, 12);
+    const minutes = minutesSoFar(end);
+    const others = Object.entries(minutes).filter(([p]) => Number(p) !== player).map(([, m]) => m);
+    assert.ok(Math.max(...others) - Math.min(...others) <= 200, others.join(' '));
+    assert.equal(minutes[player], blockCounts(start.grid.slice(0, at), start.players)[player] * 200);
+  });
+}
+
+test('terug: the player is back from the next block on and catches up', () => {
+  const start = times(startMatch(planFor('equal')), 2); // block 3
+  const player = onCourt(start)[0];
+  const out = times(uit(start, player), 3); // block 6
+  const back = terug(out, player);
+  assert.deepEqual(back.out, []);
+  assert.ok(back.grid.slice(6).some((court) => court.includes(player)), 'plays again in a later block');
+  assert.ok(maxSubsFrom(back.grid, 5) <= 3);
+  const minutes = minutesSoFar(times(back, 12));
+  assert.ok(Math.max(...Object.values(minutes)) - Math.min(...Object.values(minutes)) <= 400, Object.values(minutes).join(' '));
+});
+
+test('uit and terug are refused where they cannot apply', () => {
+  const state = startMatch(planFor('equal', 6));
+  assert.throws(() => uit(uit(state, 1), 2), MatchError, 'fewer than 5 available');
+  assert.throws(() => uit(uit(startMatch(planFor('equal')), 1), 1), MatchError, 'already out');
+  assert.throws(() => terug(startMatch(planFor('equal')), 1), MatchError, 'not out');
+  assert.throws(() => uit(times(startMatch(planFor('equal')), 11), 1), MatchError, 'last block');
+  assert.throws(() => uit(startMatch(planFor('equal')), 13), MatchError, 'not in the match');
+});
+
+test('undo puts back exactly one step after in the zone, uit and terug', () => {
+  const base = wissel(startMatch(planFor('equal')));
+  const zone = wissel(base, { keep: dueOff(base)[0] });
+  assert.deepEqual({ ...undo(zone), previous: null }, { ...base, previous: null });
+  const out = uit(base, onCourt(base)[0]);
+  assert.deepEqual({ ...undo(out), previous: null }, { ...base, previous: null });
+  const back = terug(out, onCourt(base)[0]);
+  const undone = undo(back);
+  assert.deepEqual(undone.out, out.out);
+  assert.deepEqual(undone.grid, out.grid);
+  assert.equal(canUndo(undone), false, 'one step only');
+});
+
+test('the runner actions: wissel with keep and bench, uit and terug', () => {
+  const state = wissel(startMatch(planFor('equal')));
+  const keep = dueOff(state)[0];
+  assert.deepEqual(applyAction(state, { type: 'wissel', keep }), wissel(state, { keep }));
+  assert.deepEqual(applyAction(state, { type: 'uit', player: 1 }), uit(state, 1));
+  assert.throws(() => applyAction(state, { type: 'swap' }), MatchError);
+});
+
+test('saved states after in the zone and uit round-trip and restore; a version 1 save still loads', () => {
+  const plan = planFor('equal');
+  const zone = wissel(wissel(startMatch(plan, 's')), { keep: dueOff(wissel(startMatch(plan, 's')))[0] });
+  assert.deepEqual(normaliseMatchState(roundTrip(zone), plan, 's'), zone);
+  const out = uit(zone, onCourt(zone)[0]);
+  assert.deepEqual(normaliseMatchState(roundTrip(out), plan, 's'), out);
+  // Damaged: someone who is out plays later; the first block changed; history whose played blocks differ.
+  const bad = roundTrip(out);
+  bad.grid[11] = [...bad.out, ...bad.grid[11].filter((p) => !bad.out.includes(p))].slice(0, 5);
+  assert.equal(normaliseMatchState(bad, plan, 's'), null);
+  const history = roundTrip(out);
+  history.previous.grid[0] = [1, 2, 3, 4, 6];
+  assert.equal(normaliseMatchState(history, plan, 's'), null);
+  // Version 1 (before #9): no live grid of its own, no one out, history without a grid.
+  const v1 = { version: 1, setupSavedAt: 's', schedule: plan.schedule, blocks: plan.blocks, blockSeconds: plan.blockSeconds,
+    blocksPerQuarter: plan.blocksPerQuarter, players: plan.players, grid: plan.grid, block: 4, ended: false,
+    previous: { block: 3, ended: false } };
+  const restored = normaliseMatchState(roundTrip(v1), plan, 's');
+  assert.equal(restored.version, MATCH_VERSION);
+  assert.equal(restored.block, 4);
+  assert.deepEqual(restored.out, []);
+  assert.equal(undo(restored).block, 3);
+});
+
+test('uit is never refused for planning reasons: one or two players out at any block, any count from 8 to 12', () => {
+  for (const schedule of ['equal', 'five']) {
+    for (let n = 8; n <= 12; n++) {
+      for (const seed of [1, 2, 3, 10]) {
+        const plan = planFor(schedule, n, seed);
+        for (let at = 1; at < plan.blocks; at++) {
+          let state = times(startMatch(plan), at - 1);
+          state = uit(state, 1);
+          state = uit(state, 6);
+          assert.ok(maxSubsFrom(state.grid, at - 1) <= 3, `${schedule} ${n} seed ${seed} block ${at}`);
+          assert.ok(state.grid.slice(at).every((court) => !court.includes(1) && !court.includes(6)));
+        }
+      }
+    }
+  }
+});
+
+test('in the zone at the second-to-last change keeps the cap of 3 (repair when no replan fits)', () => {
+  for (const schedule of ['equal', 'five']) {
+    for (let n = 8; n <= 12; n++) {
+      for (let seed = 1; seed <= 30; seed++) {
+        const plan = planFor(schedule, n, seed);
+        const state = times(startMatch(plan), plan.blocks - 3); // the change into the second-to-last block
+        for (const keep of nextChange(state).off) {
+          const next = wissel(state, { keep });
+          assert.ok(maxSubsFrom(next.grid, state.block - 1) <= 3, `${schedule} ${n} seed ${seed} keep ${keep}`);
+        }
+      }
+    }
+  }
 });

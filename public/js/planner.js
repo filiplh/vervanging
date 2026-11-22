@@ -235,3 +235,84 @@ export function planStats(plan) {
     longestStintSeconds: longestStint * blockSeconds,
   };
 }
+
+// Live changes (decisions #8 and #11): replan the blocks after `fromBlock` (1-based count of blocks already fixed)
+// so every available player reaches `targets`, under the same sub rule. Earlier blocks are never changed. Players who
+// are not available get no more blocks. Returns the full grid; throws PlanError when no plan fits.
+export function replanRemaining({ grid, players, available = players, fromBlock, targets, blockSeconds, seed = 1 }) {
+  if (!Number.isInteger(fromBlock) || fromBlock < 1 || fromBlock > grid.length) {
+    throw new PlanError('fromBlock must be between 1 and the number of blocks');
+  }
+  if (fromBlock === grid.length) return grid.map((court) => court.slice());
+  if (available.length < ON_COURT) throw new PlanError(`at least ${ON_COURT} players must be available`);
+  const prefix = grid.slice(0, fromBlock).map((court) => court.slice());
+  const { grid: filled } = searchGrid({
+    prefix, players, available, targets, blocks: grid.length, blockSeconds, random: seededRandom(seed),
+  });
+  return filled;
+}
+
+// Blocks per player for the rest of the match when who may play changes (uit, terug): the places left after
+// `fromBlock` go one by one to the available player with the fewest blocks so far (ties: lowest number), so the match
+// totals end as equal as the remaining blocks allow (decision #11).
+export function evenTargets({ grid, players, available, fromBlock }) {
+  const left = grid.length - fromBlock;
+  const counts = Object.fromEntries(players.map((p) => [p, 0]));
+  for (const court of grid.slice(0, fromBlock)) for (const p of court) counts[p] += 1;
+  const extra = Object.fromEntries(players.map((p) => [p, 0]));
+  const pool = players.filter((p) => available.includes(p)).sort((a, b) => a - b);
+  for (let place = 0; place < ON_COURT * left; place++) {
+    let best = null;
+    for (const p of pool) {
+      if (extra[p] >= left) continue;
+      if (best === null || counts[p] + extra[p] < counts[best] + extra[best]) best = p;
+    }
+    if (best === null) throw new PlanError(`at least ${ON_COURT} players must be available`);
+    extra[best] += 1;
+  }
+  return Object.fromEntries(players.map((p) => [p, counts[p] + extra[p]]));
+}
+
+export function blockCounts(grid, players) {
+  const counts = Object.fromEntries(players.map((p) => [p, 0]));
+  for (const court of grid) for (const p of court) counts[p] += 1;
+  return counts;
+}
+
+export function maxSubsFrom(grid, fromChange = 0) {
+  let max = 0;
+  for (let i = Math.max(1, fromChange + 1); i < grid.length; i++) {
+    max = Math.max(max, grid[i].filter((p) => !grid[i - 1].includes(p)).length);
+  }
+  return max;
+}
+
+// Last resort when no plan meets the targets under the sub rule (late in a match, after several live changes): keep
+// the planned line-ups as far as possible, but put in an available player for anyone who is not available (fewest
+// blocks first) and hold every change to at most MAX_SUBS subs by keeping players on instead (fewest blocks so far
+// come on first). Totals may then differ by more than a block; the minutes on screen show it. Never fails while at
+// least ON_COURT players are available.
+export function repairRemaining({ grid, players, available = players, fromBlock }) {
+  if (available.length < ON_COURT) throw new PlanError(`at least ${ON_COURT} players must be available`);
+  const out = grid.map((court) => court.slice());
+  const counts = blockCounts(out.slice(0, fromBlock), players);
+  const fewest = (a, b) => counts[a] - counts[b] || a - b;
+  for (let k = fromBlock; k < out.length; k++) {
+    const prev = out[k - 1];
+    const row = out[k].filter((p) => available.includes(p));
+    for (const p of [...prev.filter((q) => available.includes(q)), ...available.slice().sort(fewest)]) {
+      if (row.length >= ON_COURT) break;
+      if (!row.includes(p)) row.push(p);
+    }
+    let incoming = row.filter((p) => !prev.includes(p)).sort(fewest);
+    const stayers = prev.filter((p) => available.includes(p) && !row.includes(p)).sort(fewest);
+    while (incoming.length > MAX_SUBS && stayers.length > 0) {
+      const drop = incoming.pop(); // the incoming player with the most blocks waits
+      row.splice(row.indexOf(drop), 1, stayers.shift());
+      incoming = row.filter((p) => !prev.includes(p)).sort(fewest);
+    }
+    out[k] = row.sort((a, b) => a - b);
+    for (const p of out[k]) counts[p] += 1;
+  }
+  return out;
+}

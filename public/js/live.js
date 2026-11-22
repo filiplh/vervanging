@@ -1,11 +1,12 @@
-// Live match screen (#start): one tap per wissel, undo, minutes so far, and the end-of-match minutes.
-// Decisions: docs/PLAN.md #4, #12, #17, #18. The match state (match.js) is saved after every tap and restored after a
+// Live match screen (#start): one tap per wissel, in the zone, uit and terug, undo, minutes so far, and the
+// end-of-match minutes. Decisions: docs/PLAN.md #4, #8, #9, #11, #12, #17, #18. The match state (match.js) is saved after every tap and restored after a
 // reload; a missing or damaged saved setup shows a Dutch message instead of breaking the page.
 
 import { el, normaliseMatchSetup, formatSeconds, byNumber } from './setup.js';
 import { SCHEDULES } from './planner.js';
 import {
-  startMatch, wissel, undo, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar, normaliseMatchState,
+  startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
+  normaliseMatchState, proposedBench, MatchError,
 } from './match.js';
 
 const SAVE_FAILED = 'Opslaan lukte niet: de browser weigert opslag.';
@@ -47,10 +48,28 @@ export function liveScreen(root, { store }) {
   const byId = new Map(setup.players.map((p) => [p.id, p]));
   let state = restoreMatch(store, setup);
   let message = '';
+  let zone = null; // in the zone, chosen but not yet applied: { keep, bench }
 
-  function act(next) {
-    state = next;
-    message = store.save('match', state) ? '' : SAVE_FAILED;
+  // Applies one engine action, saves the new state and redraws; an action the engine refuses shows its reason.
+  function act(step) {
+    try {
+      state = step();
+      message = store.save('match', state) ? '' : SAVE_FAILED;
+    } catch (error) {
+      if (!(error instanceof MatchError)) throw error;
+      message = 'Dat kan nu niet.';
+    }
+    zone = null;
+    render();
+  }
+
+  function toggleZone(keep) {
+    zone = zone && zone.keep === keep ? null : { keep, bench: proposedBench(state) };
+    render();
+  }
+
+  function chooseBench(bench) {
+    if (zone) zone = { ...zone, bench };
     render();
   }
 
@@ -59,8 +78,9 @@ export function liveScreen(root, { store }) {
     return el('span', { className: 'player' }, el('span', { className: 'number' }, `#${p.number}`), ' ', p.name);
   };
   const sortedPlayers = (ids) => ids.map((id) => byId.get(id)).sort(byNumber).map((p) => p.id);
-  const nameList = (ids, className) => el('ul', { className: `names ${className}` },
-    sortedPlayers(ids).map((id) => el('li', {}, name(id))));
+  const nameList = (ids, className, extra = () => null) => el('ul', { className: `names ${className}` },
+    sortedPlayers(ids).map((id) => el('li', {}, name(id), extra(id))));
+  const isOut = (id) => state.out.includes(id);
 
   function minutesTable(heading) {
     const minutes = minutesSoFar(state);
@@ -71,13 +91,20 @@ export function liveScreen(root, { store }) {
         el('th', { scope: 'col' }, 'Speler'),
         el('th', { scope: 'col', className: 'min' }, 'Minuten'))),
       el('tbody', {}, sortedPlayers(setup.players.map((p) => p.id)).map((id) =>
-        el('tr', { className: court.includes(id) ? 'on' : null },
+        el('tr', { className: court.includes(id) ? 'on' : isOut(id) ? 'out' : null },
           el('th', { scope: 'row' }, name(id),
-            court.includes(id) && el('span', { className: 'visually-hidden' }, ' (op het veld)')),
-          el('td', { className: 'min' }, formatSeconds(minutes[id]))))));
+            court.includes(id) && el('span', { className: 'visually-hidden' }, ' (op het veld)'),
+            isOut(id) && el('span', { className: 'tag' }, ' uit')),
+          el('td', { className: 'min' }, formatSeconds(minutes[id])),
+          canChangeAvailability() && el('td', { className: 'act' }, isOut(id)
+            ? el('button', { type: 'button', className: 'chip', onclick: () => act(() => terug(state, id)) }, 'Terug')
+            : el('button', { type: 'button', className: 'chip', onclick: () => act(() => uit(state, id)) }, 'Uit'))))));
   }
 
-  const undoButton = () => el('button', { type: 'button', className: 'undo', disabled: !canUndo(state), onclick: () => act(undo(state)) },
+  // Uit and terug take effect from the next block, so they are offered while a next block exists.
+  const canChangeAvailability = () => !state.ended && state.block < state.blocks;
+
+  const undoButton = () => el('button', { type: 'button', className: 'undo', disabled: !canUndo(state), onclick: () => act(() => undo(state)) },
     'Ongedaan maken');
   const status = () => el('p', { className: 'message', role: 'alert' }, message);
 
@@ -94,11 +121,26 @@ export function liveScreen(root, { store }) {
       change && el('section', { 'aria-labelledby': 'h-next', className: 'next' },
         el('h2', { id: 'h-next' }, 'Bij de volgende wissel'),
         el('div', { className: 'change' },
-          el('div', {}, el('h3', {}, 'Eruit'), change.off.length ? nameList(change.off, 'off') : el('p', { className: 'note' }, 'Niemand')),
-          el('div', {}, el('h3', {}, 'Erin'), change.on.length ? nameList(change.on, 'on') : el('p', { className: 'note' }, 'Niemand')))),
+          el('div', {}, el('h3', {}, 'Eruit'), change.off.length
+            ? nameList(change.off, 'off', (id) => el('button', {
+              type: 'button', className: 'chip', 'aria-pressed': zone && zone.keep === id ? 'true' : 'false',
+              onclick: () => toggleZone(id),
+            }, 'In the zone'))
+            : el('p', { className: 'note' }, 'Niemand')),
+          el('div', {}, el('h3', {}, 'Erin'), change.on.length
+            ? nameList(change.on, 'on', (id) => zone && el('button', {
+              type: 'button', className: 'chip', 'aria-pressed': zone.bench === id ? 'true' : 'false',
+              onclick: () => chooseBench(id),
+            }, 'Op de bank'))
+            : el('p', { className: 'note' }, 'Niemand'))),
+        zone && el('p', { className: 'zone-note' },
+          name(zone.keep), ' blijft in the zone op het veld, ', name(zone.bench), ' blijft op de bank.')),
       status(),
       el('div', { className: 'live-actions' },
-        el('button', { type: 'button', className: 'primary wissel', onclick: () => act(wissel(state)) }, 'Wissel'),
+        el('button', {
+          type: 'button', className: 'primary wissel',
+          onclick: () => act(() => wissel(state, zone ? { keep: zone.keep, bench: zone.bench } : {})),
+        }, subTime(state).kind === 'endMatch' ? 'Einde match' : 'Wissel'),
         undoButton()),
       minutesTable('Minuten tot nu'),
     ];

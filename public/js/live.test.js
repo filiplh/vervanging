@@ -48,6 +48,7 @@ beforeEach(() => {
 
 const find = (root, tag, pred = () => true) => root.all().filter((e) => e.tag === tag && pred(e));
 const button = (root, label) => find(root, 'button', (e) => e.text === label)[0];
+const wisselButton = (root) => find(root, 'button', (e) => e.className.split(' ').includes('wissel'))[0];
 const listOf = (root, className) => find(root, 'ul', (e) => e.className.split(' ').includes(className))[0];
 const numbers = (ul) => (ul ? find(ul, 'li').map((li) => Number(find(li, 'span', (s) => s.className === 'number')[0].text.slice(1))) : []);
 const minuteRows = (root) => find(root, 'table', (e) => e.className === 'minutes')
@@ -94,7 +95,7 @@ test('live screen: block, sub time, on court, off and on next, Wissel, Ongedaan 
   assert.deepEqual(numbers(listOf(view, 'court')), grid[0]);
   assert.deepEqual(numbers(listOf(view, 'off')), grid[0].filter((p) => !grid[1].includes(p)));
   assert.deepEqual(numbers(listOf(view, 'on')), grid[1].filter((p) => !grid[0].includes(p)));
-  assert.ok(button(view, 'Wissel'));
+  assert.ok(wisselButton(view));
   assert.equal(button(view, 'Ongedaan maken').disabled, true, 'nothing to undo yet');
   const rows = minuteRows(view);
   assert.equal(rows.length, 8);
@@ -103,12 +104,12 @@ test('live screen: block, sub time, on court, off and on next, Wissel, Ongedaan 
 
 test('live screen: one tap per wissel moves one block, saves, and undo goes back', () => {
   const { view, data, setup } = open();
-  button(view, 'Wissel').fire('click');
+  wisselButton(view).fire('click');
   assert.match(h1(view), /^Blok 2 van 12/);
   assert.equal(subLine(view), 'Wissel op 3:20');
   assert.deepEqual(numbers(listOf(view, 'court')), setup.plan.grid[1]);
   assert.equal(JSON.parse(data.get('vervanging.match.v1')).block, 2, 'saved after the tap');
-  button(view, 'Wissel').fire('click');
+  wisselButton(view).fire('click');
   assert.equal(subLine(view), 'Einde kwart');
   button(view, 'Ongedaan maken').fire('click');
   assert.match(h1(view), /^Blok 2 van 12/);
@@ -123,14 +124,14 @@ test('live screen: a reload at any block comes back on the same block with the s
     const before = { title: h1(view), minutes: minuteRows(view), court: numbers(listOf(view, 'court')), undo: button(view, 'Ongedaan maken').disabled };
     view = env.reload();
     assert.deepEqual({ title: h1(view), minutes: minuteRows(view), court: numbers(listOf(view, 'court')), undo: button(view, 'Ongedaan maken').disabled }, before, `block ${b}`);
-    button(view, 'Wissel').fire('click');
+    wisselButton(view).fire('click');
   }
   assert.equal(h1(env.reload()), 'Einde match', 'the ended match is restored as ended');
 });
 
 test('end-of-match screen lists every present player with minutes as m:ss, and undo reopens the last block', () => {
   const env = open(setupOf({ n: 9, schedule: 'five' }));
-  for (let i = 0; i < 8; i++) button(env.view, 'Wissel').fire('click');
+  for (let i = 0; i < 8; i++) wisselButton(env.view).fire('click');
   const { view } = env;
   assert.equal(h1(view), 'Einde match');
   const rows = minuteRows(view);
@@ -150,7 +151,7 @@ test('live screen: a refused write shows a Dutch message and the tap still count
   const store = createStore({ getItem: (k) => data.get(k) ?? null, setItem() { throw new Error('full'); }, removeItem() {} });
   const view = new FakeElement('main');
   liveScreen(view, { store });
-  button(view, 'Wissel').fire('click');
+  wisselButton(view).fire('click');
   assert.match(h1(view), /^Blok 2/);
   assert.ok(find(view, 'p', (p) => /Opslaan lukte niet/.test(p.text)).length);
 });
@@ -180,4 +181,59 @@ test('live screen: a damaged saved setup shows a Dutch fallback instead of crash
     assert.match(h1(view), /Geen match gevonden/);
     assert.equal(find(view, 'a')[0].attrs.href, '#match');
   }
+});
+
+// ---------- in the zone, uit and terug, Einde match (#9) ----------
+
+const chips = (root, label) => find(root, 'button', (e) => e.className === 'chip' && e.text === label);
+
+test('live screen: In the zone on a player due off proposes a bench player, which the coach can change', () => {
+  const { view, setup } = open();
+  const { grid } = setup.plan;
+  const off = grid[0].filter((p) => !grid[1].includes(p));
+  const on = grid[1].filter((p) => !grid[0].includes(p));
+  assert.equal(chips(view, 'In the zone').length, off.length, 'one In the zone button per player due off');
+  assert.equal(chips(view, 'Op de bank').length, 0, 'no bench choice before In the zone');
+  chips(view, 'In the zone')[0].fire('click');
+  assert.equal(chips(view, 'In the zone')[0].attrs['aria-pressed'], 'true');
+  const bench = chips(view, 'Op de bank');
+  assert.equal(bench.length, on.length);
+  assert.equal(bench.filter((b) => b.attrs['aria-pressed'] === 'true').length, 1, 'one proposed bench player');
+  const other = bench.findIndex((b) => b.attrs['aria-pressed'] !== 'true');
+  if (other >= 0) {
+    bench[other].fire('click');
+    assert.equal(chips(view, 'Op de bank')[other].attrs['aria-pressed'], 'true', 'the coach changed the bench player');
+  }
+  const kept = off[0];
+  wisselButton(view).fire('click');
+  assert.ok(numbers(listOf(view, 'court')).includes(kept), 'the zone player stays on court');
+  button(view, 'Ongedaan maken').fire('click');
+  assert.match(h1(view), /^Blok 1 van 12/);
+});
+
+test('live screen: Uit and Terug per player in the minutes table, both undoable', () => {
+  const { view, data } = open();
+  const uitButtons = chips(view, 'Uit');
+  assert.equal(uitButtons.length, 8);
+  uitButtons[0].fire('click');
+  assert.equal(chips(view, 'Terug').length, 1);
+  const saved = JSON.parse(data.get('vervanging.match.v1'));
+  assert.deepEqual(saved.out, [1]);
+  assert.match(h1(view), /^Blok 1 van 12/, 'uit does not move to the next block');
+  chips(view, 'Terug')[0].fire('click');
+  assert.deepEqual(JSON.parse(data.get('vervanging.match.v1')).out, []);
+  button(view, 'Ongedaan maken').fire('click');
+  assert.equal(chips(view, 'Terug').length, 1, 'undo of terug puts the player back out');
+});
+
+test('live screen: the button reads Einde match at the last block', () => {
+  const { view } = open();
+  for (let b = 1; b < 12; b++) {
+    assert.equal(wisselButton(view).text, 'Wissel', `block ${b}`);
+    wisselButton(view).fire('click');
+  }
+  assert.equal(wisselButton(view).text, 'Einde match');
+  assert.equal(chips(view, 'Uit').length, 0, 'no uit at the last block: there is no next block');
+  wisselButton(view).fire('click');
+  assert.equal(h1(view), 'Einde match');
 });

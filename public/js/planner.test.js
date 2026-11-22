@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makePlan, swapPlayers, planStats, blockTargets, seededRandom, PlanError, SCHEDULES } from './planner.js';
+import {
+  makePlan, swapPlayers, planStats, blockTargets, seededRandom, PlanError, SCHEDULES, evenTargets, replanRemaining,
+  blockCounts, maxSubsFrom, repairRemaining,
+} from './planner.js';
 
 const range = (n) => Array.from({ length: n }, (_, i) => i + 1);
 const STARTS = [[1, 2, 3, 4, 5], [3, 5, 7, 8, 2], [4, 5, 6, 7, 8]];
@@ -90,4 +93,37 @@ test('13 players in the 5-minute schedule: the sit limit is relaxed, the sub cap
   const plan = makePlan({ players: range(13), start: [1, 2, 3, 4, 5], schedule: 'five', seed: 1 });
   assert.equal(plan.sitLimitRelaxed, true);
   assert.ok(Math.max(...planStats(plan).subsPerChange) <= 3);
+});
+
+test('evenTargets gives the places left to the fewest blocks first, nothing to players who are out', () => {
+  const plan = makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', seed: 1 });
+  const available = range(12).filter((p) => p !== 1);
+  const targets = evenTargets({ grid: plan.grid, players: plan.players, available, fromBlock: 4 });
+  const played = blockCounts(plan.grid.slice(0, 4), plan.players);
+  assert.equal(targets[1], played[1], 'an out player gets no more blocks');
+  const others = available.map((p) => targets[p]);
+  assert.ok(Math.max(...others) - Math.min(...others) <= 1);
+  assert.equal(Object.values(targets).reduce((a, b) => a + b, 0), 60);
+});
+
+test('replanRemaining keeps the fixed blocks, meets the targets and the cap of 3', () => {
+  const plan = makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', seed: 2 });
+  const available = range(12).filter((p) => p !== 3);
+  const targets = evenTargets({ grid: plan.grid, players: plan.players, available, fromBlock: 5 });
+  const grid = replanRemaining({ grid: plan.grid, players: plan.players, available, fromBlock: 5, targets, blockSeconds: 200 });
+  assert.deepEqual(grid.slice(0, 5), plan.grid.slice(0, 5));
+  assert.deepEqual(blockCounts(grid, plan.players), targets);
+  assert.ok(grid.slice(5).every((court) => !court.includes(3)));
+  assert.ok(maxSubsFrom(grid, 4) <= 3);
+  assert.throws(() => replanRemaining({ grid: plan.grid, players: plan.players, available: [1, 2, 3, 4], fromBlock: 5, targets, blockSeconds: 200 }), PlanError);
+});
+
+test('repairRemaining holds the cap and drops players who are not available, whatever the plan', () => {
+  const plan = makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', seed: 4 });
+  const available = range(12).filter((p) => p !== 2 && p !== 7);
+  const grid = repairRemaining({ grid: plan.grid, players: plan.players, available, fromBlock: 3 });
+  assert.deepEqual(grid.slice(0, 3), plan.grid.slice(0, 3));
+  assert.ok(grid.slice(3).every((court) => court.length === 5 && !court.includes(2) && !court.includes(7)));
+  assert.ok(maxSubsFrom(grid, 2) <= 3);
+  assert.throws(() => repairRemaining({ grid: plan.grid, players: plan.players, available: [1, 2, 3, 4], fromBlock: 3 }), PlanError);
 });
