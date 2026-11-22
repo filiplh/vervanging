@@ -1,13 +1,13 @@
 // Live match screen (#start): one tap per wissel, in the zone, uit and terug, undo, minutes so far, and the
 // end-of-match minutes, with the screen kept awake during the match. Decisions: docs/PLAN.md #4, #8, #9, #11, #12,
-// #17, #18. The match state (match.js) is saved after every tap and restored after a reload; a missing or damaged
+// #17, #18, #27 (every player's minutes at a glance at the top). The match state (match.js) is saved after every tap and restored after a reload; a missing or damaged
 // saved setup shows a Dutch message instead of breaking the page.
 
 import { el, normaliseMatchSetup, formatSeconds, byNumber } from './setup.js';
 import { SCHEDULES } from './planner.js';
 import {
   startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
-  normaliseMatchState, proposedBench, replacements, MatchError,
+  normaliseMatchState, proposedBench, replacements, minutesOverview, MatchError,
 } from './match.js';
 import { normaliseHistory, recordMatch, forgetMatch, hasMatch, startedAfterClear } from './history.js';
 
@@ -183,6 +183,21 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
             : el('button', { type: 'button', className: 'chip', onclick: () => act(() => uit(state, id)) }, 'Uit'))))));
   }
 
+  // Every player's minutes at a glance (decision #27): a dense grid of small cells in jersey order, number above
+  // minutes, players on court marked, so all of them fit on a phone without scrolling. The full table stays below.
+  function overview() {
+    const entries = new Map(minutesOverview(state).map((e) => [e.player, e]));
+    return el('ol', { className: 'overview', 'aria-label': 'Minuten tot nu per speler' },
+      sortedPlayers(setup.players.map((p) => p.id)).map((id) => {
+        const e = entries.get(id);
+        return el('li', { className: e.onCourt ? 'on' : e.out ? 'out' : null },
+          el('span', { className: 'number' }, `#${byId.get(id).number}`),
+          el('span', { className: 'min' }, formatSeconds(e.seconds)),
+          e.onCourt && el('span', { className: 'visually-hidden' }, ' (op het veld)'),
+          e.out && el('span', { className: 'visually-hidden' }, ' (uit)'));
+      }));
+  }
+
   // Uit works at any time during the match (on court, a replacement comes on at once). Terug takes effect from the
   // next block, so it is offered while a next block exists.
   const canTerug = () => !state.ended && state.block < state.blocks;
@@ -198,6 +213,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
         ' ', el('span', { className: 'count' }, `kwart ${quarterOf(state)}`)),
       setup.opponent && el('p', { className: 'note' }, `Tegen ${setup.opponent}`),
       el('p', { className: 'sub-time' }, subTimeText(state)),
+      overview(),
       el('section', { 'aria-labelledby': 'h-court' },
         el('h2', { id: 'h-court' }, 'Op het veld'),
         nameList(onCourt(state), 'court'),

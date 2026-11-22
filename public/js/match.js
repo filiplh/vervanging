@@ -380,6 +380,14 @@ export function minutesSoFar(state) {
   return minutes;
 }
 
+// The minutes at a glance (decision #27): one entry per player in player order, with the seconds so far (as
+// minutesSoFar), whether the player is on court in the current block (as onCourt) and whether the player is out.
+export function minutesOverview(state) {
+  const minutes = minutesSoFar(state);
+  const court = onCourt(state);
+  return state.players.map((p) => ({ player: p, seconds: minutes[p], onCourt: court.includes(p), out: state.out.includes(p) }));
+}
+
 function validGrid(grid, fresh) {
   return Array.isArray(grid) && grid.length === fresh.blocks && grid.every((court) => Array.isArray(court)
     && court.length === ON_COURT && new Set(court).size === ON_COURT && court.every((p) => fresh.players.includes(p)));
