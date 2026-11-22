@@ -78,9 +78,9 @@ function planFrom(opts) {
   if (opts['use-history'] && !history) throw new UsageError('--use-history needs --history <file>');
   const schedule = opts.schedule ?? 'equal';
   if (!SCHEDULES[schedule]) throw new UsageError(`unknown schedule "${schedule}": use equal or five`);
-  const { priority, adjust } = opts['use-history']
-    ? catchUp(history, players, SCHEDULES[schedule], seed) : { priority: [], adjust: {} };
-  let plan = makePlan({ players, start, schedule, seed, extraPriority: priority, adjust });
+  const { priority, moves } = opts['use-history']
+    ? catchUp(history, players, SCHEDULES[schedule], seed) : { priority: [], moves: [] };
+  let plan = makePlan({ players, start, schedule, seed, extraPriority: priority, moves });
   if (opts.swap !== undefined) {
     const pair = numberList(opts.swap, 'swap');
     if (pair.length !== 2) throw new UsageError('--swap takes two player numbers');

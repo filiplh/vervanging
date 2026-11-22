@@ -135,9 +135,10 @@ export function extraPriority(history, players, seed = 1) {
   return order.sort((a, b) => total(a) - total(b)); // Array.prototype.sort is stable: ties keep the shuffled order
 }
 
-// Gradual catch-up (decision #28): the targets the planner needs for a match with the history switch on. `priority`
-// orders the uneven places (as extraPriority); `adjust` moves one block from a present player far ahead to a present
-// player far behind, pairing the furthest behind with the furthest ahead, while they are at least one block apart.
+// Gradual catch-up (decision #28): what the planner needs for a match with the history switch on. `priority` orders
+// the uneven places (as extraPriority); `moves` lists [behind, ahead] pairs, each moving one block from a present
+// player far ahead to a present player far behind, pairing the furthest behind with the furthest ahead (most
+// important first), while they are at least one block apart. The planner takes as many from the front as fit.
 // Each player gets at most one block more than the equal share (a player who already has an uneven place gets none)
 // and at most one block less. Seconds earned through Extra minuten are not counted, so a reward is not taken back.
 export function catchUp(history, players, { blocks, blockSeconds, onCourt = 5 }, seed = 1) {
@@ -148,7 +149,7 @@ export function catchUp(history, players, { blocks, blockSeconds, onCourt = 5 },
   const base = Math.floor(places / players.length);
   const uneven = new Set(priority.slice(0, places - base * players.length));
   const share = (p) => base + (uneven.has(p) ? 1 : 0);
-  const adjust = {};
+  const moves = [];
   let i = 0;
   let j = priority.length - 1;
   while (i < j) {
@@ -157,10 +158,9 @@ export function catchUp(history, players, { blocks, blockSeconds, onCourt = 5 },
     if (total(ahead) - total(behind) < blockSeconds) break;
     if (share(behind) + 1 > base + 1) { i += 1; continue; }
     if (share(ahead) - 1 < base - 1) { j -= 1; continue; }
-    adjust[behind] = 1;
-    adjust[ahead] = -1;
+    moves.push([behind, ahead]);
     i += 1;
     j -= 1;
   }
-  return { priority, adjust };
+  return { priority, moves };
 }

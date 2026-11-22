@@ -128,11 +128,14 @@ test('repairRemaining holds the cap and drops players who are not available, wha
   assert.throws(() => repairRemaining({ grid: plan.grid, players: plan.players, available: [1, 2, 3, 4], fromBlock: 3 }), PlanError);
 });
 
-test('makePlan adjust: +1 and -1 move one block between two players; anything else is refused', () => {
-  const plan = makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', seed: 1, adjust: { 12: 1, 6: -1 } });
+test('makePlan moves: each [to, from] pair moves one block; a bad list is refused with PlanError', () => {
+  const plan = makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', seed: 1, moves: [[12, 6]] });
   const minutes = planStats(plan).minutes;
   assert.equal(minutes[12], 1200);
   assert.equal(minutes[6], 800);
-  assert.throws(() => makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', adjust: { 12: 1 } }), PlanError);
-  assert.throws(() => makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', adjust: { 12: 2, 6: -2 } }), PlanError);
+  const bad = [null, 3, 'x', {}, { 12: 1, 6: -1 }, [[12]], [[12, 6, 7]], [12, 6], [[12, 12]], [[12, 6], [12, 7]], [[12, 6], [11, 6]],
+    [['12', 6]], [[1.5, 6]], [[13, 6]], [[12, 0]]];
+  for (const moves of bad) {
+    assert.throws(() => makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', moves }), PlanError, JSON.stringify(moves));
+  }
 });

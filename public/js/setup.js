@@ -254,9 +254,9 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
     if (start.length !== ON_COURT || present.size < ON_COURT) return;
     try {
       const ids = players.filter((p) => present.has(p.id)).map((p) => p.id);
-      const { priority, adjust } = history.useHistory
-        ? catchUp(history, ids, SCHEDULES[schedule], seed) : { priority: [], adjust: {} };
-      plan = makePlan({ players: ids, start, schedule, seed, extraPriority: priority, adjust });
+      const { priority, moves } = history.useHistory
+        ? catchUp(history, ids, SCHEDULES[schedule], seed) : { priority: [], moves: [] };
+      plan = makePlan({ players: ids, start, schedule, seed, extraPriority: priority, moves });
     } catch (error) {
       if (!(error instanceof PlanError)) throw error;
       message = 'Er kon geen plan gemaakt worden. Probeer "Ander plan".';

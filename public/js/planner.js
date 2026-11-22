@@ -166,8 +166,9 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
 }
 
 // Tries a cap of 2 subs with the strict limits, then a cap of 3, then drops the stint limit, then the sit limit
-// (never the cap of 3; plan assumption A3).
-export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random }) {
+// (never the cap of 3; plan assumption A3). With `keepSitLimit`, the sit limit is never dropped: null
+// when no plan keeps it.
+export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random, keepSitLimit = false }) {
   const sitBlocks = Math.floor(MAX_SIT_SECONDS / blockSeconds);
   const stintBlocks = Math.max(1, Math.floor(MAX_STINT_SECONDS / blockSeconds));
   const stint = Math.max(stintBlocks, 3);
@@ -178,28 +179,50 @@ export function searchGrid({ prefix, players, available, targets, blocks, blockS
     { maxSubs: 3, maxSit: sitBlocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: false },
     { maxSubs: 3, maxSit: blocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: true },
   ];
-  for (const level of levels) {
+  for (const level of keepSitLimit ? levels.filter((l) => !l.sitLimitRelaxed) : levels) {
     const grid = fillGrid({ prefix, players, available, targets, blocks, ...level, random });
     if (grid) return { grid, sitLimitRelaxed: level.sitLimitRelaxed };
   }
+  if (keepSitLimit) return null;
   throw new PlanError('no plan found within the substitution limit of 3');
 }
 
-// `adjust` (optional, from the history's catch-up, decision #28) moves blocks between players: +1 or -1 per player id,
-// summing to 0.
-export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPriority = [], adjust = {} }) {
+// `moves` (optional, from the history's catch-up, decision #28): [to, from] pairs of present players, most important
+// first; each moves one block from `from` to `to`, and a player is in at most one pair. The plan takes as many moves
+// from the front as still fit the sub rule (#21: at most 3 subs, nobody sits more than 15:00), so catch-up never
+// relaxes a limit the plain plan keeps; when none fit, it is the plain plan.
+export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPriority = [], moves = [] }) {
   const { blocks, blockSeconds, blocksPerQuarter } = scheduleOf(schedule);
   checkPlayers(players, start);
-  const random = seededRandom(seed);
-  const targets = blockTargets(players, ON_COURT * blocks, random, extraPriority);
-  const moved = Object.entries(adjust).filter(([p]) => players.includes(Number(p)));
-  if (moved.reduce((sum, [, d]) => sum + d, 0) !== 0 || moved.some(([, d]) => d !== 1 && d !== -1)) {
-    throw new PlanError('catch-up must move whole blocks between players, +1 and -1 summing to 0');
-  }
-  for (const [p, d] of moved) targets[Number(p)] = Math.max(0, Math.min(blocks, targets[Number(p)] + d));
+  checkMoves(moves, players);
   const first = start.slice().sort((a, b) => a - b);
-  const { grid, sitLimitRelaxed } = searchGrid({ prefix: [first], players, targets, blocks, blockSeconds, random });
+  const attempt = (count, keepSitLimit) => {
+    const random = seededRandom(seed);
+    const targets = blockTargets(players, ON_COURT * blocks, random, extraPriority);
+    for (const [to, from] of moves.slice(0, count)) {
+      if (targets[from] < 1 || targets[to] >= blocks) return null;
+      targets[to] += 1;
+      targets[from] -= 1;
+    }
+    return searchGrid({ prefix: [first], players, targets, blocks, blockSeconds, random, keepSitLimit });
+  };
+  let found = null;
+  for (let count = moves.length; count > 0 && !found; count--) found = attempt(count, true);
+  const { grid, sitLimitRelaxed } = found ?? attempt(0, false);
   return { schedule, blocks, blockSeconds, blocksPerQuarter, players: players.slice(), start: first, grid, sitLimitRelaxed };
+}
+
+function checkMoves(moves, players) {
+  if (!Array.isArray(moves)) throw new PlanError('catch-up moves must be a list of [to, from] player pairs');
+  const seen = new Set();
+  for (const pair of moves) {
+    if (!Array.isArray(pair) || pair.length !== 2) throw new PlanError('each catch-up move is a [to, from] player pair');
+    for (const p of pair) {
+      if (!players.includes(p)) throw new PlanError(`catch-up move: player ${p} is not in the plan`);
+      if (seen.has(p)) throw new PlanError(`catch-up move: player ${p} is in more than one move`);
+      seen.add(p);
+    }
+  }
 }
 
 // Exchanges two players' rows. Both must be in the starting five, or both not, so the starting five stays as picked.
