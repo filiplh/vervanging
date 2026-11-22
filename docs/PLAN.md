@@ -11,7 +11,7 @@ Status: phase 0 · Built from: [grill 2026-11-22 whole product](grill/2026-11-22
 | --- | --- |
 | Time | No game clock: time is counted in fixed blocks; minutes = blocks played × block length (#4, #16) |
 | Schedules | Equal minutes: 12 blocks of 3:20. 5-minute blocks: 8 blocks of 5:00 (#6) |
-| Substitutions | Coach picks the starting five; then normally 2 changes per sub moment, at most 3, nobody sits more than 15:00 in a row (#20, #21, #22) |
+| Substitutions | Coach picks the starting five; then normally 2 changes per sub moment, at most 3 (a change may take off more when that is every player marked uit, #21), nobody sits more than 15:00 in a row (#20, #21, #22) |
 | Live | One "Wissel" button per block; "in the zone" keeps a player on and hands a block back later; "uit"/"terug"; undo (#8, #11, #12, #17) |
 | Data | One phone, no login, no sync; roster and per-match minutes stored on the phone (#5, #10, #14) |
 | Robustness | Every tap saved; screen kept awake; works offline (#15, #18) |
