@@ -1,0 +1,12 @@
+{
+  // Assets-only Worker: serves public/ and runs no script. Deployed by the factory's cloudflare-workers
+  // recipe (factory.yaml › deploy.app); the first release is the owner's step.
+  "name": "vervanging",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./public"
+  },
+  "workers_dev": true,
+  // This target has no preview environment.
+  "preview_urls": false
+}
