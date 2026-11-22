@@ -11,8 +11,9 @@ this file says how to build well here. Changing it is a human gate.
 | What | Where |
 | --- | --- |
 | Settings for the factory | `factory.yaml` |
-| Plan and scope | none yet |
-| Settled decisions (ADRs, decision log) | none yet |
+| Plan and scope | `docs/PLAN.md` |
+| Settled decisions (ADRs, decision log) | `docs/adr/` (index `docs/adr/README.md`); decisions table in `docs/PLAN.md` |
+| Glossary (the project's words, Dutch on screen, code names) | `docs/GLOSSARY.md` |
 | Spike write-ups | none yet |
 | Grill context (glossary, constraints and open questions the grill reads first) | `docs/grill/CONTEXT.md` (created by `factory-grill` when needed) |
 | Grill logs (one file per grill session) | `docs/grill/` (created by `factory-grill` when needed) |
