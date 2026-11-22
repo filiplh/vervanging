@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createStore } from './store.js';
 import { makePlan } from './planner.js';
 import { startMatch, wissel, minutesSoFar } from './match.js';
-import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory } from './live.js';
+import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory, createWakeLock } from './live.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
 
@@ -397,4 +397,126 @@ test('history: a match started after the last clear is caught up on reload', () 
   const history = storedHistory(data);
   assert.equal(history.clearedAt, '2026-11-22T12:00:00.000Z');
   assert.deepEqual(history.matches.map((m) => m.id), [setup.savedAt]);
+});
+
+// ---------- screen kept awake (#11) ----------
+
+// A fake Screen Wake Lock API: request() hands out sentinels that can be released by the page or by the browser.
+function fakeWakeLock({ refuse = false } = {}) {
+  const sentinels = [];
+  let resolveNext = null;
+  const api = {
+    held: () => sentinels.filter((x) => !x.released),
+    sentinels,
+    deferred: false,
+    finish() { resolveNext(); },
+    request(type) {
+      assert.equal(type, 'screen');
+      if (refuse) return Promise.reject(new Error('NotAllowedError'));
+      const sentinel = {
+        released: false, listeners: [],
+        addEventListener(t, fn) { if (t === 'release') this.listeners.push(fn); },
+        async release() { if (!this.released) { this.released = true; this.listeners.forEach((fn) => fn()); } },
+      };
+      sentinels.push(sentinel);
+      if (!api.deferred) return Promise.resolve(sentinel);
+      return new Promise((resolve) => { resolveNext = () => resolve(sentinel); });
+    },
+  };
+  return api;
+}
+
+function fakeDocument() {
+  const listeners = {};
+  return {
+    visibilityState: 'visible',
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+    become(state) { this.visibilityState = state; (listeners.visibilitychange || []).forEach((fn) => fn()); },
+  };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('wake lock: asked for when on, released when off', async () => {
+  const api = fakeWakeLock();
+  const lock = createWakeLock({ wakeLock: api }, fakeDocument());
+  await lock.set(true);
+  assert.equal(api.held().length, 1);
+  assert.equal(lock.held, true);
+  await lock.set(true);
+  assert.equal(api.sentinels.length, 1, 'asking again while held does nothing');
+  await lock.set(false);
+  await settle();
+  assert.equal(api.held().length, 0);
+  assert.equal(lock.held, false);
+});
+
+test('wake lock: asked for again when the page is visible again, only while wanted', async () => {
+  const api = fakeWakeLock();
+  const doc = fakeDocument();
+  const lock = createWakeLock({ wakeLock: api }, doc);
+  await lock.set(true);
+  doc.visibilityState = 'hidden';
+  await api.sentinels[0].release(); // the browser drops the lock when the page is hidden
+  doc.become('hidden');
+  await settle();
+  assert.equal(api.sentinels.length, 1, 'not asked for while hidden');
+  doc.become('visible');
+  await settle();
+  assert.equal(api.held().length, 1, 'asked for again');
+  assert.equal(lock.held, true);
+  await lock.set(false);
+  doc.become('hidden');
+  doc.become('visible');
+  await settle();
+  assert.equal(api.held().length, 0, 'not after the match');
+});
+
+test('wake lock: a lock that arrives after the match ended is released at once', async () => {
+  const api = fakeWakeLock();
+  api.deferred = true;
+  const lock = createWakeLock({ wakeLock: api }, fakeDocument());
+  const asked = lock.set(true);
+  await lock.set(false);
+  api.finish();
+  await asked;
+  await settle();
+  assert.equal(api.held().length, 0);
+  assert.equal(lock.held, false);
+});
+
+test('wake lock: no error and nothing shown where the API is missing or refuses', async () => {
+  for (const nav of [undefined, {}, { wakeLock: fakeWakeLock({ refuse: true }) }]) {
+    const lock = createWakeLock(nav, undefined);
+    await lock.set(true);
+    assert.equal(lock.held, false);
+    await lock.set(false);
+  }
+  const env = memoryStore();
+  env.store.save('matchSetup', setupOf());
+  const view = new FakeElement('main');
+  liveScreen(view, { store: env.store }); // the real lock, in Node without navigator.wakeLock
+  assert.equal(find(view, 'p', (e) => e.className === 'message')[0].text, '', 'no message');
+});
+
+test('live screen: keeps the screen awake while the match runs, not after the end, and again after undo', () => {
+  const awake = [];
+  const env = memoryStore();
+  env.store.save('matchSetup', setupOf());
+  const view = new FakeElement('main');
+  liveScreen(view, { store: env.store, keepAwake: (on) => awake.push(on) });
+  assert.equal(awake.at(-1), true, 'on when the match screen opens');
+  for (let b = 1; b <= 12; b++) wisselButton(view).fire('click');
+  assert.equal(h1(view), 'Einde match');
+  assert.equal(awake.at(-1), false, 'off at the end of the match');
+  button(view, 'Ongedaan maken').fire('click');
+  assert.equal(awake.at(-1), true, 'on again when the end is undone');
+
+  const reloaded = [];
+  liveScreen(new FakeElement('main'), { store: env.store, keepAwake: (on) => reloaded.push(on) });
+  assert.deepEqual(reloaded, [true], 'a reload mid-match asks again');
+
+  const missing = [];
+  liveScreen(new FakeElement('main'), { store: memoryStore().store, keepAwake: (on) => missing.push(on) });
+  assert.deepEqual(missing, [false], 'no match: not kept awake');
 });

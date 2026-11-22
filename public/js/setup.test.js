@@ -1,10 +1,15 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join, relative, basename } from 'node:path';
+import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 import { createStore } from './store.js';
 import { makePlan, planStats } from './planner.js';
 import {
   MAX_PLAYERS, normaliseRoster, checkPlayer, addPlayer, editPlayer, removePlayer, normaliseAttendance,
-  initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen,
+  initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen, isInstalled,
 } from './setup.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
@@ -242,14 +247,16 @@ const radios = (view) => find(view, 'input', (e) => e.attrs.type === 'radio');
 const rows = (view) => find(view, 'tbody')[0]?.children ?? [];
 const rowCells = (row) => row.children.slice(1, -1).map((c) => c.className).join(',');
 
-function openSetup({ players = 10, attendance, history } = {}) {
+function openSetup({ players = 10, attendance, history, installed } = {}) {
   const env = memoryStore();
   env.store.save('roster', rosterOf(players));
   if (attendance) env.store.save('attendance', attendance);
   if (history !== undefined) env.store.save('history', history);
   env.view = new FakeElement('main');
   env.started = [];
-  setupScreen(env.view, { store: env.store, onStart: (s) => env.started.push(s) });
+  const options = { store: env.store, onStart: (s) => env.started.push(s) };
+  if (installed !== undefined) options.installed = installed;
+  setupScreen(env.view, options);
   return env;
 }
 
@@ -459,4 +466,241 @@ test('setup screen: a damaged stored history is treated as empty', () => {
     pickFive(view);
     assert.equal(rows(view).length, 12);
   }
+});
+
+// ---------- home-screen hint (#11) ----------
+
+test('isInstalled: true on the iOS home screen or in standalone display mode, false in a browser tab', () => {
+  const media = (matches) => (query) => ({ matches: query === '(display-mode: standalone)' && matches });
+  assert.equal(isInstalled({ navigator: { standalone: true } }), true, 'iOS home screen');
+  assert.equal(isInstalled({ navigator: { standalone: false }, matchMedia: media(false) }), false, 'iOS Safari tab');
+  assert.equal(isInstalled({ navigator: {}, matchMedia: media(true) }), true, 'installed elsewhere');
+  assert.equal(isInstalled({ navigator: {}, matchMedia: media(false) }), false, 'browser tab elsewhere');
+  assert.equal(isInstalled({}), false, 'neither API');
+  assert.equal(isInstalled({ matchMedia: () => { throw new Error('no'); } }), false, 'a failing matchMedia');
+});
+
+const hints = (view) => find(view, 'p', (e) => e.className.split(' ').includes('install-hint'));
+
+test('setup screen: the home-screen hint shows in a browser tab and says why, and not when installed', () => {
+  for (const players of [12, 3]) {
+    const tab = openSetup({ players, installed: false }).view;
+    assert.equal(hints(tab).length, 1, `${players} players: one hint in a tab`);
+    assert.match(hints(tab)[0].text, /beginscherm/);
+    assert.match(hints(tab)[0].text, /zonder internet/);
+    assert.match(hints(tab)[0].text, /bewaard/);
+    assert.equal(hints(openSetup({ players, installed: true }).view).length, 0, `${players} players: no hint installed`);
+  }
+});
+
+// ---------- offline: service worker, manifest, icons (#11) ----------
+// These read the files in public/ (a separate pwa.test.js would fit better, but this issue owns only this test file
+// and live.test.js).
+
+const PUBLIC = fileURLToPath(new URL('..', import.meta.url));
+const readPublic = (path) => readFileSync(join(PUBLIC, path));
+
+// Every file the host serves from public/: what .assetsignore leaves (its patterns are simple globs on the file name).
+function servedFiles() {
+  const ignore = readPublic('.assetsignore').toString().split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
+    .map((glob) => new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`));
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+    (d.isDirectory() ? walk(join(dir, d.name)) : [relative(PUBLIC, join(dir, d.name)).split('\\').join('/')]));
+  return walk(PUBLIC).filter((f) => f !== '.assetsignore' && !ignore.some((re) => re.test(basename(f))));
+}
+
+// Runs sw.js in a sandbox with fake caches and fetch; returns its handlers and what it did. Two workers given the same
+// `stores` share one Cache Storage, as an old and a new version do in the browser; `server` gives each file's body.
+function loadServiceWorker({
+  source = readPublic('sw.js').toString(),
+  stores = new Map([['vervanging-old', new Map()], ['other-app', new Map()]]),
+  server = (url) => `body of ${url}`,
+} = {}) {
+  const listeners = {};
+  const calls = { skipWaiting: 0, claim: 0, added: [], deleted: [], opened: [], fetched: [] };
+  const origin = 'https://vervanging.test';
+  const cacheFor = (name) => {
+    if (!stores.has(name)) stores.set(name, new Map());
+    const entries = stores.get(name);
+    return {
+      addAll: async (requests) => {
+        for (const r of requests) { calls.added.push({ url: r.url, cache: r.cache }); entries.set(r.url, server(r.url)); }
+      },
+      match: async (key, { ignoreSearch = false } = {}) => {
+        let url = typeof key === 'string' ? key : key.url;
+        if (ignoreSearch) url = url.split('?')[0];
+        return entries.get(url);
+      },
+    };
+  };
+  const sandbox = {
+    URL,
+    Request: class { constructor(url, init = {}) { this.url = url; this.cache = init.cache; } },
+    caches: {
+      open: async (name) => { calls.opened.push(name); return cacheFor(name); },
+      keys: async () => [...stores.keys()],
+      delete: async (name) => { calls.deleted.push(name); return stores.delete(name); },
+    },
+    fetch: async (request) => { calls.fetched.push(request.url); return `network ${request.url}`; },
+    self: {
+      location: new URL('/sw.js', origin),
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      skipWaiting: () => { calls.skipWaiting++; },
+      clients: { claim: () => { calls.claim++; } },
+    },
+  };
+  const context = vm.createContext(sandbox);
+  vm.runInContext(source, context, { filename: 'sw.js' });
+  const value = (name) => vm.runInContext(name, context);
+  async function run(type, extra = {}) {
+    const waits = [];
+    let response;
+    listeners[type]({ ...extra, waitUntil: (p) => waits.push(p), respondWith: (p) => { response = p; } });
+    await Promise.all(waits);
+    return response === undefined ? undefined : await response;
+  }
+  const request = (path, init = {}) => ({ url: new URL(path, origin).href, method: 'GET', mode: 'cors', ...init });
+  return { listeners, calls, stores, origin, value, run, request };
+}
+
+test('service worker: caches exactly the files the page needs, and never a test file', () => {
+  const { value } = loadServiceWorker();
+  const assets = value('ASSETS');
+  const expected = servedFiles().filter((f) => f !== 'sw.js').map((f) => (f === 'index.html' ? './' : f));
+  assert.deepEqual([...assets].sort(), expected.sort(), 'ASSETS lists every served file (index.html as ./), nothing else');
+  assert.equal(new Set(assets).size, assets.length, 'no file twice');
+  assert.ok(!assets.some((a) => a.endsWith('.test.js')), 'no test file');
+  assert.ok(!assets.includes('sw.js'), 'the worker does not cache itself');
+});
+
+test('service worker: every file the page links or imports is in its list', () => {
+  const assets = new Set(loadServiceWorker().value('ASSETS'));
+  const html = readPublic('index.html').toString();
+  const refs = [...html.matchAll(/(?:href|src)="([^"#]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+  const manifest = JSON.parse(readPublic('manifest.webmanifest'));
+  refs.push(...manifest.icons.map((i) => i.src.replace(/^\//, '')));
+  for (const file of servedFiles().filter((f) => f.endsWith('.js') && f.startsWith('js/'))) {
+    for (const m of readPublic(file).toString().matchAll(/^import [^;]*? from '\.\/([^']+)'/gm)) refs.push(`js/${m[1]}`);
+  }
+  assert.ok(refs.includes('js/app.js') && refs.includes('js/planner.js') && refs.includes('styles.css'), 'the scan finds links and imports');
+  for (const ref of refs) assert.ok(assets.has(ref), `${ref} is cached`);
+});
+
+// The cache version sw.js must carry: sha256 over every cached file (its path, byte length and bytes, in ASSETS order)
+// and over sw.js itself without its VERSION line, first 16 hex characters. Any change to a cached file or to the worker
+// gives a new cache name, so a new version never writes into the cache the open app is using.
+const VERSION_LINE = /^const VERSION = '[^']*';\n/m;
+function cacheDigest(assets, read, swSource) {
+  const hash = createHash('sha256');
+  const add = (name, bytes) => { hash.update(`${name}\n${bytes.length}\n`); hash.update(bytes); };
+  for (const path of assets) add(path, read(path === './' ? 'index.html' : path));
+  add('sw.js', Buffer.from(swSource.replace(VERSION_LINE, '')));
+  return hash.digest('hex').slice(0, 16);
+}
+
+test('service worker: VERSION is the digest of the cached files and the worker, so a release always gets a new cache', () => {
+  const source = readPublic('sw.js').toString();
+  assert.equal(source.match(new RegExp(VERSION_LINE.source, 'gm'))?.length, 1, "sw.js has one line: const VERSION = '...';");
+  const assets = [...loadServiceWorker().value('ASSETS')];
+  const expected = cacheDigest(assets, readPublic, source);
+  assert.equal(loadServiceWorker().value('VERSION'), expected,
+    `public/sw.js must name the digest of the files it caches. Set its VERSION line to:\nconst VERSION = '${expected}';`);
+});
+
+test('service worker digest: changes with any cached byte, the list or the worker, not with the VERSION line alone', () => {
+  const files = { 'index.html': Buffer.from('<p>page</p>'), 'js/a.js': Buffer.from('a'), 'js/b.js': Buffer.from('b') };
+  const read = (path) => files[path];
+  const sw = "const VERSION = 'x';\nconst ASSETS = [];\n";
+  const base = cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw);
+  assert.match(base, /^[0-9a-f]{16}$/);
+  assert.equal(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw.replace("'x'", "'y'")), base, 'VERSION line excluded');
+  assert.notEqual(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, `${sw}// changed\n`), base, 'worker changed');
+  assert.notEqual(cacheDigest(['./', 'js/a.js'], read, sw), base, 'a file left out');
+  assert.notEqual(cacheDigest(['./', 'js/b.js', 'js/a.js'], read, sw), base, 'order');
+  files['js/b.js'] = Buffer.from('B');
+  assert.notEqual(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw), base, 'one byte of a file');
+  files['js/a.js'] = Buffer.from('ab');
+  files['js/b.js'] = Buffer.from('');
+  assert.notEqual(cacheDigest(['./', 'js/a.js', 'js/b.js'], read, sw), base, 'bytes moved between files');
+});
+
+test('service worker: an old and a new version keep separate caches; the open app keeps its files until the next start', async () => {
+  const stores = new Map();
+  const oldSource = readPublic('sw.js').toString();
+  const newSource = oldSource.replace(VERSION_LINE, "const VERSION = 'next-release';\n");
+  const old = loadServiceWorker({ source: oldSource, stores, server: (url) => `old ${url}` });
+  await old.run('install');
+  await old.run('activate');
+  const live = old.request('/js/live.js');
+  assert.equal(await old.run('fetch', { request: live }), `old ${live.url}`);
+
+  const next = loadServiceWorker({ source: newSource, stores, server: (url) => `new ${url}` });
+  await next.run('install'); // installed in the background, waiting: the old worker still controls the app
+  assert.equal(await old.run('fetch', { request: live }), `old ${live.url}`, 'mid-match: still the old file');
+  assert.equal(await old.run('fetch', { request: old.request('/', { mode: 'navigate' }) }), `old ${old.origin}/`);
+  assert.deepEqual([...stores.keys()].sort(), [old.value('CACHE'), next.value('CACHE')].sort(), 'two caches side by side');
+  assert.equal(next.calls.skipWaiting + next.calls.claim, 0, 'the new version does not take over by itself');
+
+  await next.run('activate'); // the next app start, once no page uses the old version
+  assert.deepEqual([...stores.keys()], [next.value('CACHE')], 'the old cache is removed');
+  assert.equal(await next.run('fetch', { request: live }), `new ${live.url}`);
+});
+
+test('service worker: install stores the files fresh in a versioned cache and does not take over the open app', async () => {
+  const { run, calls, value, origin } = loadServiceWorker();
+  await run('install');
+  const cache = value('CACHE');
+  assert.match(cache, /^vervanging-.+/);
+  assert.equal(cache, `vervanging-${value('VERSION')}`);
+  assert.deepEqual(calls.opened, [cache]);
+  assert.deepEqual(calls.added.map((a) => a.url).sort(), [...value('ASSETS')].map((a) => new URL(a, `${origin}/sw.js`).href).sort());
+  assert.ok(calls.added.every((a) => a.cache === 'reload'), 'bypasses the HTTP cache');
+  assert.equal(calls.skipWaiting, 0, 'a new version waits for the next app start');
+  assert.ok(!/skipWaiting|clients\.claim|\.reload\(|navigate\(/.test(readPublic('sw.js').toString().replace(/\/\/.*$/gm, '')),
+    'no skipWaiting, no claim, no page reload anywhere in the worker');
+});
+
+test('service worker: activating removes only the old caches of this app', async () => {
+  const { run, calls, stores, value } = loadServiceWorker();
+  await run('install');
+  await run('activate');
+  assert.deepEqual(calls.deleted, ['vervanging-old']);
+  assert.ok(stores.has(value('CACHE')) && stores.has('other-app'));
+  assert.equal(calls.claim, 0);
+});
+
+test('service worker: answers from the cache first, the page for / with any query, the network only for the rest', async () => {
+  const { run, calls, request, origin } = loadServiceWorker();
+  await run('install');
+  const page = `body of ${origin}/`;
+  assert.equal(await run('fetch', { request: request('/', { mode: 'navigate' }) }), page);
+  assert.equal(await run('fetch', { request: request('/?utm=x', { mode: 'navigate' }) }), page);
+  assert.equal(await run('fetch', { request: request('/index.html', { mode: 'navigate' }) }), page);
+  assert.equal(await run('fetch', { request: request('/js/live.js') }), `body of ${origin}/js/live.js`);
+  assert.equal(await run('fetch', { request: request('/icons/apple-touch-icon.png') }), `body of ${origin}/icons/apple-touch-icon.png`);
+  assert.deepEqual(calls.fetched, [], 'offline-ready: nothing went to the network');
+  assert.equal(await run('fetch', { request: request('/nope.txt') }), `network ${origin}/nope.txt`);
+  assert.equal(await run('fetch', { request: request('/js/live.js', { method: 'POST' }) }), undefined, 'not a GET: left alone');
+  assert.equal(await run('fetch', { request: { url: 'https://elsewhere.test/x.js', method: 'GET', mode: 'cors' } }), undefined,
+    'another origin: left alone');
+});
+
+test('manifest and page: installable as "Vervanging" in Dutch, standalone from /, with an apple-touch-icon', () => {
+  const manifest = JSON.parse(readPublic('manifest.webmanifest'));
+  assert.equal(manifest.name, 'Vervanging');
+  assert.equal(manifest.lang, 'nl');
+  assert.equal(manifest.display, 'standalone');
+  assert.equal(manifest.start_url, '/');
+  const html = readPublic('index.html').toString();
+  assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest">/);
+  const touch = html.match(/<link rel="apple-touch-icon" href="\/([^"]+)">/);
+  assert.ok(touch, 'apple-touch-icon link');
+  const pngSize = (path) => {
+    const png = readPublic(path);
+    assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${path} is a PNG`);
+    return `${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`;
+  };
+  assert.equal(pngSize(touch[1]), '180x180');
+  assert.ok(manifest.icons.some((i) => i.sizes === '192x192') && manifest.icons.some((i) => i.sizes === '512x512'));
+  for (const icon of manifest.icons) assert.equal(pngSize(icon.src.replace(/^\//, '')), icon.sizes, icon.src);
 });

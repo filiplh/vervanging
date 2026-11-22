@@ -193,7 +193,29 @@ export function rosterScreen(root, { store }) {
 
 // ---------- match setup screen ----------
 
-export function setupScreen(root, { store, onStart }) {
+// ---------- home-screen hint ----------
+
+// True when the app runs from the home screen (installed): iOS sets navigator.standalone, other browsers match the
+// display-mode media query of the manifest's "standalone".
+export function isInstalled(env = globalThis) {
+  if (env.navigator?.standalone === true) return true;
+  try {
+    return env.matchMedia?.('(display-mode: standalone)')?.matches === true;
+  } catch {
+    return false;
+  }
+}
+
+// Shown on the match setup screen in a browser tab: on the home screen the app opens without internet and the browser
+// keeps its saved data (⚠ iOS Safari may clear the data of a site that is not on the home screen; see docs/PLAN.md ›
+// Risks).
+export function installHint() {
+  return el('p', { className: 'note install-hint' },
+    'Tip: zet Vervanging op je beginscherm (in Safari: Deel › Zet op beginscherm). ',
+    'Dan werkt de app ook zonder internet en blijven je spelers en geschiedenis bewaard.');
+}
+
+export function setupScreen(root, { store, onStart, installed = isInstalled() }) {
   const roster = normaliseRoster(store.load('roster'));
   const players = roster.players.slice().sort(byNumber);
   const byId = new Map(players.map((p) => [p.id, p]));
@@ -407,20 +429,22 @@ export function setupScreen(root, { store, onStart }) {
 
   function render() {
     if (players.length < ON_COURT) {
-      root.replaceChildren(
+      root.replaceChildren(...[
         el('h1', {}, 'Match'),
         el('p', { className: 'note' }, `Voeg eerst minstens ${ON_COURT} spelers toe bij Spelers.`),
-        el('a', { className: 'button primary', href: '#spelers' }, 'Naar Spelers'));
+        el('a', { className: 'button primary', href: '#spelers' }, 'Naar Spelers'),
+        !installed && installHint()].filter(Boolean));
       return;
     }
-    root.replaceChildren(
+    root.replaceChildren(...[
       el('h1', {}, 'Match'),
+      !installed && installHint(),
       attendanceSection(),
       scheduleSection(),
       historySection(),
       opponentSection(),
       planSection(),
-    );
+    ].filter(Boolean));
   }
 
   render();
