@@ -1,0 +1,179 @@
+/* Mobile first: built for a phone 360 px wide, one hand; every tap target is at least 44 px. */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1b1f24;
+  --muted: #5b6470;
+  --line: #d5dae1;
+  --accent: #1f5f8b;
+  --accent-text: #ffffff;
+  --on: #2f8f4e;
+  --off: #e7eaee;
+  --danger: #b3261e;
+  --selected: #fff3c4;
+  --tap: 44px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121417;
+    --surface: #1c2025;
+    --text: #e8eaed;
+    --muted: #a0a8b3;
+    --line: #353b43;
+    --accent: #5fa8dc;
+    --accent-text: #0b1620;
+    --on: #48b06a;
+    --off: #2a2f36;
+    --danger: #f2a39d;
+    --selected: #4a4220;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow-x: hidden;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 0 16px calc(24px + env(safe-area-inset-bottom));
+}
+
+h1 { font-size: 1.4rem; margin: 16px 0 12px; }
+h2 { font-size: 1.1rem; margin: 20px 0 8px; }
+.count { font-size: 1rem; font-weight: normal; color: var(--muted); }
+.note { color: var(--muted); margin: 8px 0; }
+.message { min-height: 1.4em; margin: 8px 0; font-weight: 600; }
+.message:empty { min-height: 0; margin: 0; }
+.number { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* Tabs */
+.tabs {
+  position: sticky; top: 0; z-index: 1;
+  display: flex;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding-top: env(safe-area-inset-top);
+}
+.tabs a {
+  flex: 1;
+  min-height: var(--tap);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); text-decoration: none; font-weight: 600;
+  border-bottom: 3px solid transparent;
+}
+.tabs a[aria-current="page"] { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Buttons and fields */
+button, .button {
+  min-height: var(--tap);
+  min-width: var(--tap);
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  display: inline-flex; align-items: center; justify-content: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button.danger { color: var(--danger); }
+button:disabled { opacity: 0.4; cursor: default; }
+button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.field { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 0.95rem; }
+.field input {
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit; font-weight: normal; font-size: 16px; /* 16 px stops iOS from zooming in */
+  width: 100%;
+}
+
+.player-form { display: grid; grid-template-columns: 1fr 6.5rem; gap: 12px; }
+.form-actions { grid-column: 1 / -1; display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.player-form .form-actions { margin-top: 0; }
+.form-actions button, .form-actions .button { flex: 1; }
+
+/* Roster */
+.roster, .attendance { list-style: none; margin: 0; padding: 0; }
+.roster li, .attendance li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+.roster li.editing { background: var(--selected); }
+.player { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Attendance and starting five */
+.check { flex: 1; min-width: 0; min-height: var(--tap); display: flex; align-items: center; gap: 12px; cursor: pointer; }
+.check input, .choice input { width: 22px; height: 22px; margin: 0; flex: none; accent-color: var(--accent); }
+.toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+
+.choices { display: flex; flex-direction: column; gap: 8px; }
+.choice {
+  min-height: var(--tap);
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+/* Plan grid: fits 328 px (360 minus the gutters) without scrolling sideways */
+.plan {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  background: var(--surface);
+}
+.plan th, .plan td { position: relative; padding: 0; border-bottom: 1px solid var(--line); }
+.plan thead th { font-size: 0.7rem; font-weight: 600; color: var(--muted); height: 28px; text-align: center; }
+.plan .name { width: 34%; text-align: left; }
+.plan .min { width: 2.9rem; text-align: right; padding-right: 2px; font-variant-numeric: tabular-nums; }
+.plan .block { text-align: center; }
+.plan .q { border-left: 2px solid var(--line); }
+.plan tbody tr { height: var(--tap); }
+.plan tbody .name button {
+  width: 100%;
+  min-width: 0;
+  height: var(--tap);
+  padding: 0 4px;
+  border: 0; border-radius: 0;
+  background: transparent;
+  justify-content: flex-start;
+  font-size: 0.85rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: block; text-align: left;
+}
+.plan td.block::before {
+  content: ""; display: block;
+  height: 26px; margin: 0 1px;
+  border-radius: 3px;
+  background: var(--off);
+}
+.plan td.block.on::before { background: var(--on); }
+.plan tr.last-start th, .plan tr.last-start td { border-bottom: 2px solid var(--text); }
+.plan tr.selected th, .plan tr.selected td { background: var(--selected); }
