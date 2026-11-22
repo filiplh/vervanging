@@ -1,0 +1,183 @@
+import { test, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { createStore } from './store.js';
+import { makePlan } from './planner.js';
+import { startMatch, wissel } from './match.js';
+import { liveScreen, subTimeText, planOf, restoreMatch } from './live.js';
+
+// ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
+
+function memoryStore() {
+  const data = new Map();
+  const store = createStore({
+    getItem: (k) => (data.has(k) ? data.get(k) : null),
+    setItem: (k, v) => { data.set(k, String(v)); },
+    removeItem: (k) => { data.delete(k); },
+  });
+  return { store, data };
+}
+
+class FakeElement {
+  constructor(tag) {
+    this.tag = tag;
+    this.children = [];
+    this.attrs = {};
+    this.listeners = {};
+    this.className = '';
+    this.disabled = false;
+  }
+
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+
+  setAttribute(key, value) { this.attrs[key] = value; }
+
+  append(...nodes) { for (const n of nodes) this.children.push(typeof n === 'string' ? { text: n } : n); }
+
+  replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+
+  get text() { return this.children.map((c) => (c instanceof FakeElement ? c.text : c.text)).join(''); }
+
+  all() { return [this, ...this.children.filter((c) => c instanceof FakeElement).flatMap((c) => c.all())]; }
+
+  fire(type) { for (const fn of this.listeners[type] || []) fn({ preventDefault() {}, currentTarget: this, target: this }); }
+}
+
+beforeEach(() => {
+  globalThis.document = { createElement: (tag) => new FakeElement(tag) };
+});
+
+const find = (root, tag, pred = () => true) => root.all().filter((e) => e.tag === tag && pred(e));
+const button = (root, label) => find(root, 'button', (e) => e.text === label)[0];
+const listOf = (root, className) => find(root, 'ul', (e) => e.className.split(' ').includes(className))[0];
+const numbers = (ul) => (ul ? find(ul, 'li').map((li) => Number(find(li, 'span', (s) => s.className === 'number')[0].text.slice(1))) : []);
+const minuteRows = (root) => find(root, 'table', (e) => e.className === 'minutes')
+  .flatMap((t) => find(t, 'tbody')[0].children)
+  .map((tr) => ({ number: Number(find(tr, 'span', (s) => s.className === 'number')[0].text.slice(1)), minutes: tr.children[1].text }));
+
+// Players with id = number, so the screen's numbers can be compared with the plan's ids.
+function setupOf({ n = 8, schedule = 'equal', savedAt = '2026-11-22T10:00:00.000Z' } = {}) {
+  const players = Array.from({ length: n }, (_, i) => ({ id: i + 1, name: `Speler${i + 1}`, number: String(i + 1) }));
+  const ids = players.map((p) => p.id);
+  const plan = makePlan({ players: ids, start: [1, 2, 3, 4, 5], schedule, seed: 3 });
+  return { savedAt, opponent: 'BC Test', schedule, seed: 3, players, startingFive: [1, 2, 3, 4, 5], plan };
+}
+
+function open(setup = setupOf(), env = memoryStore()) {
+  env.store.save('matchSetup', setup);
+  const view = new FakeElement('main');
+  liveScreen(view, { store: env.store });
+  return { ...env, view, setup, reload() { const v = new FakeElement('main'); liveScreen(v, { store: env.store }); return v; } };
+}
+
+const h1 = (view) => find(view, 'h1')[0].text;
+const subLine = (view) => find(view, 'p', (e) => e.className === 'sub-time')[0]?.text;
+
+test('subTimeText: wissel op m:ss inside a quarter, einde kwart, einde match', () => {
+  let state = startMatch(planOf(setupOf()));
+  const lines = [];
+  for (let b = 0; b < 12; b++) { lines.push(subTimeText(state)); state = wissel(state); }
+  assert.deepEqual(lines, [
+    'Wissel op 6:40', 'Wissel op 3:20', 'Einde kwart', 'Wissel op 6:40', 'Wissel op 3:20', 'Einde kwart',
+    'Wissel op 6:40', 'Wissel op 3:20', 'Einde kwart', 'Wissel op 6:40', 'Wissel op 3:20', 'Einde match',
+  ]);
+  state = startMatch(planOf(setupOf({ schedule: 'five' })));
+  const five = [];
+  for (let b = 0; b < 8; b++) { five.push(subTimeText(state)); state = wissel(state); }
+  assert.deepEqual(five, ['Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde match']);
+});
+
+test('live screen: block, sub time, on court, off and on next, Wissel, Ongedaan maken and minutes', () => {
+  const { view, setup } = open();
+  const { grid } = setup.plan;
+  assert.match(h1(view), /^Blok 1 van 12/);
+  assert.equal(subLine(view), 'Wissel op 6:40');
+  assert.deepEqual(numbers(listOf(view, 'court')), grid[0]);
+  assert.deepEqual(numbers(listOf(view, 'off')), grid[0].filter((p) => !grid[1].includes(p)));
+  assert.deepEqual(numbers(listOf(view, 'on')), grid[1].filter((p) => !grid[0].includes(p)));
+  assert.ok(button(view, 'Wissel'));
+  assert.equal(button(view, 'Ongedaan maken').disabled, true, 'nothing to undo yet');
+  const rows = minuteRows(view);
+  assert.equal(rows.length, 8);
+  for (const r of rows) assert.equal(r.minutes, grid[0].includes(r.number) ? '3:20' : '0:00');
+});
+
+test('live screen: one tap per wissel moves one block, saves, and undo goes back', () => {
+  const { view, data, setup } = open();
+  button(view, 'Wissel').fire('click');
+  assert.match(h1(view), /^Blok 2 van 12/);
+  assert.equal(subLine(view), 'Wissel op 3:20');
+  assert.deepEqual(numbers(listOf(view, 'court')), setup.plan.grid[1]);
+  assert.equal(JSON.parse(data.get('vervanging.match.v1')).block, 2, 'saved after the tap');
+  button(view, 'Wissel').fire('click');
+  assert.equal(subLine(view), 'Einde kwart');
+  button(view, 'Ongedaan maken').fire('click');
+  assert.match(h1(view), /^Blok 2 van 12/);
+  assert.equal(button(view, 'Ongedaan maken').disabled, true, 'one step only');
+  assert.equal(JSON.parse(data.get('vervanging.match.v1')).block, 2, 'the undo is saved too');
+});
+
+test('live screen: a reload at any block comes back on the same block with the same minutes', () => {
+  const env = open();
+  let view = env.view;
+  for (let b = 1; b <= 12; b++) {
+    const before = { title: h1(view), minutes: minuteRows(view), court: numbers(listOf(view, 'court')), undo: button(view, 'Ongedaan maken').disabled };
+    view = env.reload();
+    assert.deepEqual({ title: h1(view), minutes: minuteRows(view), court: numbers(listOf(view, 'court')), undo: button(view, 'Ongedaan maken').disabled }, before, `block ${b}`);
+    button(view, 'Wissel').fire('click');
+  }
+  assert.equal(h1(env.reload()), 'Einde match', 'the ended match is restored as ended');
+});
+
+test('end-of-match screen lists every present player with minutes as m:ss, and undo reopens the last block', () => {
+  const env = open(setupOf({ n: 9, schedule: 'five' }));
+  for (let i = 0; i < 8; i++) button(env.view, 'Wissel').fire('click');
+  const { view } = env;
+  assert.equal(h1(view), 'Einde match');
+  const rows = minuteRows(view);
+  assert.deepEqual(rows.map((r) => r.number), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.ok(rows.every((r) => /^\d+:\d\d$/.test(r.minutes)), rows.map((r) => r.minutes).join(' '));
+  const total = rows.reduce((s, r) => { const [m, sec] = r.minutes.split(':').map(Number); return s + m * 60 + sec; }, 0);
+  assert.equal(total, 5 * 8 * 300, 'all 40 minutes × 5 places are given out');
+  assert.equal(find(view, 'a', (a) => a.attrs.href === '#match').length, 1, 'a way to a new match');
+  button(view, 'Ongedaan maken').fire('click');
+  assert.match(h1(view), /^Blok 8 van 8/);
+  assert.equal(subLine(view), 'Einde match');
+});
+
+test('live screen: a refused write shows a Dutch message and the tap still counts on screen', () => {
+  const env = open();
+  const data = new Map(env.data);
+  const store = createStore({ getItem: (k) => data.get(k) ?? null, setItem() { throw new Error('full'); }, removeItem() {} });
+  const view = new FakeElement('main');
+  liveScreen(view, { store });
+  button(view, 'Wissel').fire('click');
+  assert.match(h1(view), /^Blok 2/);
+  assert.ok(find(view, 'p', (p) => /Opslaan lukte niet/.test(p.text)).length);
+});
+
+test('live screen: a saved state of another setup or a damaged one starts at block 1', () => {
+  const setup = setupOf();
+  const old = wissel(wissel(startMatch(planOf(setup), 'an older setup')));
+  for (const raw of [old, { block: 5 }, '{not json']) {
+    const env = memoryStore();
+    if (raw === '{not json') env.data.set('vervanging.match.v1', raw);
+    else env.store.save('match', raw);
+    const { view } = open(setup, env);
+    assert.match(h1(view), /^Blok 1 van 12/);
+  }
+  const env = memoryStore();
+  assert.equal(restoreMatch(env.store, { ...setup, plan: { ...setup.plan, blockSeconds: 'x' } }).blockSeconds, 200,
+    'the block length comes from the schema, never from the saved plan');
+});
+
+test('live screen: a damaged saved setup shows a Dutch fallback instead of crashing', () => {
+  for (const damaged of [{ players: [null], startingFive: [1] }, { players: [], startingFive: 'x' }, '{not json', null]) {
+    const { store, data } = memoryStore();
+    if (damaged === '{not json') data.set('vervanging.matchSetup.v1', damaged);
+    else if (damaged !== null) store.save('matchSetup', damaged);
+    const view = new FakeElement('main');
+    assert.doesNotThrow(() => liveScreen(view, { store }));
+    assert.match(h1(view), /Geen match gevonden/);
+    assert.equal(find(view, 'a')[0].attrs.href, '#match');
+  }
+});

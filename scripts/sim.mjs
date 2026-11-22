@@ -1,8 +1,13 @@
 #!/usr/bin/env node
-// Command-line runner over the planner, so its behaviour can be checked from outside without a browser.
+// Command-line runner over the planner and the match engine, so their behaviour can be checked from outside without a
+// browser. Players are numbered 1..n.
 //   node scripts/sim.mjs plan --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>] [--json]
+//   node scripts/sim.mjs match --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
+//                              [--actions <wissel|undo,...>] [--json]
+//     Actions are comma-separated; "wissel*11" repeats an action 11 times. Prints the final match state.
 // Prints one JSON object on stdout. Invalid input: exit status 2, one line on stderr, nothing on stdout.
 import { makePlan, swapPlayers, planStats, PlanError } from '../public/js/planner.js';
+import { startMatch, applyAction, onCourt, minutesSoFar } from '../public/js/match.js';
 
 class UsageError extends Error {}
 
@@ -50,9 +55,36 @@ function planFrom(opts) {
   return plan;
 }
 
+// "wissel,wissel*3,undo" -> ['wissel', 'wissel', 'wissel', 'wissel', 'undo']
+function parseActions(text = '') {
+  const actions = [];
+  for (const item of String(text).split(',').filter((s) => s !== '')) {
+    const match = /^(wissel|undo)(?:\*(\d+))?$/.exec(item);
+    if (!match) throw new UsageError(`unknown action "${item}": use wissel or undo, optionally with *<count>`);
+    const count = match[2] === undefined ? 1 : Number(match[2]);
+    if (count < 1 || count > 1000) throw new UsageError(`action "${item}": the count must be 1 to 1000`);
+    for (let i = 0; i < count; i++) actions.push(match[1]);
+  }
+  return actions;
+}
+
+function runMatch(opts) {
+  const actions = parseActions(opts.actions);
+  let state = startMatch(planFrom(opts));
+  for (const action of actions) state = applyAction(state, action);
+  return {
+    block: state.block,
+    blocks: state.blocks,
+    ended: state.ended,
+    onCourt: onCourt(state),
+    minutes: minutesSoFar(state),
+  };
+}
+
 function main(argv) {
   const { command, opts } = parse(argv);
-  if (command !== 'plan') throw new UsageError(`unknown command "${command ?? ''}": use plan`);
+  if (command === 'match') return runMatch(opts);
+  if (command !== 'plan') throw new UsageError(`unknown command "${command ?? ''}": use plan or match`);
   const plan = planFrom(opts);
   const stats = planStats(plan);
   return {

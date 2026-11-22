@@ -64,7 +64,7 @@ export function initialAttendance(roster, raw) {
 }
 
 // A match setup read from the store, or null when it is missing or its shape is damaged, so no screen
-// (the #start placeholder now, the live screen in #7) ever renders from broken data.
+// (the live screen, live.js) ever renders from broken data.
 export function normaliseMatchSetup(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const { players: rawPlayers, startingFive, plan, schedule, opponent = '', seed, savedAt } = raw;
@@ -105,7 +105,7 @@ function newSeed() {
 
 // ---------- DOM helpers ----------
 
-function el(tag, props = {}, ...children) {
+export function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
     if (value == null || value === false) continue;
@@ -383,26 +383,4 @@ export function setupScreen(root, { store, onStart }) {
   }
 
   render();
-}
-
-// ---------- placeholder after "Start" ----------
-
-// Until the live screen (#7) exists, "Start" lands here: the setup is saved, nothing more happens yet.
-// A damaged saved setup shows a Dutch message and a way back instead of breaking the page.
-export function startedScreen(root, { store }) {
-  const setup = normaliseMatchSetup(store.load('matchSetup'));
-  if (!setup) {
-    root.replaceChildren(
-      el('h1', {}, 'Geen match gevonden'),
-      el('p', { className: 'note' }, 'De opgeslagen match kon niet gelezen worden. Stel de match opnieuw in.'),
-      el('a', { className: 'button primary', href: '#match' }, 'Naar de match'));
-    return;
-  }
-  const five = setup.players.filter((p) => setup.startingFive.includes(p.id)).sort(byNumber).map(playerLabel);
-  root.replaceChildren(
-    el('h1', {}, 'Match opgeslagen'),
-    setup.opponent && el('p', {}, `Tegen ${setup.opponent}.`),
-    el('p', {}, `Basisvijf: ${five.join(', ')}.`),
-    el('p', { className: 'note' }, 'Het wedstrijdscherm komt in een volgende versie.'),
-    el('a', { className: 'button', href: '#match' }, 'Terug naar de match'));
 }
