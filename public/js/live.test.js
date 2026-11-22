@@ -594,3 +594,17 @@ test('minutes at a glance: a player who went uit is marked out, and the end scre
   assert.equal(overviewCells(view), null, 'no overview after the end: the table is at the top there');
   assert.equal(minuteRows(view).length, 8);
 });
+
+test('history: a match with Extra minuten records the extra seconds apart', () => {
+  const env = open();
+  const { view, data, setup } = env;
+  const { grid } = setup.plan;
+  const off = grid[0].filter((p) => !grid[1].includes(p));
+  chips(view, 'Extra minuten')[0].fire('click');
+  wisselButton(view).fire('click');
+  endMatch(view, 11);
+  const stored = storedHistory(data);
+  const match = stored.matches.find((m) => m.id === setup.savedAt);
+  assert.deepEqual(match.extra, { [off[0]]: 200 });
+  assert.equal(match.seconds[off[0]] >= 200, true);
+});

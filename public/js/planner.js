@@ -166,8 +166,9 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
 }
 
 // Tries a cap of 2 subs with the strict limits, then a cap of 3, then drops the stint limit, then the sit limit
-// (never the cap of 3; plan assumption A3).
-export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random }) {
+// (never the cap of 3; plan assumption A3). `level` in the result says how far it went (0 to 3). With `maxLevel`, it
+// goes no further than that level and gives null when no plan is found there.
+export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random, maxLevel = null }) {
   const sitBlocks = Math.floor(MAX_SIT_SECONDS / blockSeconds);
   const stintBlocks = Math.max(1, Math.floor(MAX_STINT_SECONDS / blockSeconds));
   const stint = Math.max(stintBlocks, 3);
@@ -178,21 +179,52 @@ export function searchGrid({ prefix, players, available, targets, blocks, blockS
     { maxSubs: 3, maxSit: sitBlocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: false },
     { maxSubs: 3, maxSit: blocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: true },
   ];
-  for (const level of levels) {
+  for (const [index, level] of levels.entries()) {
+    if (maxLevel !== null && index > maxLevel) return null;
     const grid = fillGrid({ prefix, players, available, targets, blocks, ...level, random });
-    if (grid) return { grid, sitLimitRelaxed: level.sitLimitRelaxed };
+    if (grid) return { grid, sitLimitRelaxed: level.sitLimitRelaxed, level: index };
   }
   throw new PlanError('no plan found within the substitution limit of 3');
 }
 
-export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPriority = [] }) {
+// `moves` (optional, from the history's catch-up, decision #28): [to, from] pairs of present players, most important
+// first; each moves one block from `from` to `to`, and a player is in at most one pair. The plan takes as many moves
+// from the front as still plan within the limits the plain plan (without moves) keeps: the cap of 2 or 3 subs, the
+// stint limit and the 15:00 sit limit (#21), so catch-up never relaxes a limit the plain plan keeps; when none fit,
+// it is the plain plan.
+export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPriority = [], moves = [] }) {
   const { blocks, blockSeconds, blocksPerQuarter } = scheduleOf(schedule);
   checkPlayers(players, start);
-  const random = seededRandom(seed);
-  const targets = blockTargets(players, ON_COURT * blocks, random, extraPriority);
+  checkMoves(moves, players);
   const first = start.slice().sort((a, b) => a - b);
-  const { grid, sitLimitRelaxed } = searchGrid({ prefix: [first], players, targets, blocks, blockSeconds, random });
+  const attempt = (count, maxLevel = null) => {
+    const random = seededRandom(seed);
+    const targets = blockTargets(players, ON_COURT * blocks, random, extraPriority);
+    for (const [to, from] of moves.slice(0, count)) {
+      if (targets[from] < 1 || targets[to] >= blocks) return null;
+      targets[to] += 1;
+      targets[from] -= 1;
+    }
+    return searchGrid({ prefix: [first], players, targets, blocks, blockSeconds, random, maxLevel });
+  };
+  const plain = attempt(0);
+  let found = null;
+  for (let count = moves.length; count > 0 && !found; count--) found = attempt(count, plain.level);
+  const { grid, sitLimitRelaxed } = found ?? plain;
   return { schedule, blocks, blockSeconds, blocksPerQuarter, players: players.slice(), start: first, grid, sitLimitRelaxed };
+}
+
+function checkMoves(moves, players) {
+  if (!Array.isArray(moves)) throw new PlanError('catch-up moves must be a list of [to, from] player pairs');
+  const seen = new Set();
+  for (const pair of moves) {
+    if (!Array.isArray(pair) || pair.length !== 2) throw new PlanError('each catch-up move is a [to, from] player pair');
+    for (const p of pair) {
+      if (!players.includes(p)) throw new PlanError(`catch-up move: player ${p} is not in the plan`);
+      if (seen.has(p)) throw new PlanError(`catch-up move: player ${p} is in more than one move`);
+      seen.add(p);
+    }
+  }
 }
 
 // Exchanges two players' rows. Both must be in the starting five, or both not, so the starting five stays as picked.

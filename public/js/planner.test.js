@@ -127,3 +127,15 @@ test('repairRemaining holds the cap and drops players who are not available, wha
   assert.ok(maxSubsFrom(grid, 2) <= 3);
   assert.throws(() => repairRemaining({ grid: plan.grid, players: plan.players, available: [1, 2, 3, 4], fromBlock: 3 }), PlanError);
 });
+
+test('makePlan moves: each [to, from] pair moves one block; a bad list is refused with PlanError', () => {
+  const plan = makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', seed: 1, moves: [[12, 6]] });
+  const minutes = planStats(plan).minutes;
+  assert.equal(minutes[12], 1200);
+  assert.equal(minutes[6], 800);
+  const bad = [null, 3, 'x', {}, { 12: 1, 6: -1 }, [[12]], [[12, 6, 7]], [12, 6], [[12, 12]], [[12, 6], [12, 7]], [[12, 6], [11, 6]],
+    [['12', 6]], [[1.5, 6]], [[13, 6]], [[12, 0]]];
+  for (const moves of bad) {
+    assert.throws(() => makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', moves }), PlanError, JSON.stringify(moves));
+  }
+});

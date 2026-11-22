@@ -6,10 +6,17 @@ import { fileURLToPath } from 'node:url';
 import { makePlan, planStats } from './planner.js';
 import {
   emptyHistory, normaliseHistory, recordMatch, forgetMatch, hasMatch, clearHistory, totalSeconds, extraPriority,
-  startedAfterClear, seasonSummary,
+  startedAfterClear, seasonSummary, catchUp, catchUpSeconds,
 } from './history.js';
+import { SCHEDULES, maxSubsFrom, seededRandom } from './planner.js';
 
 const ids = (n) => Array.from({ length: n }, (_, i) => i + 1);
+// catchUp's [behind, ahead] moves as a block change per player id.
+const deltas = (moves) => {
+  const d = {};
+  for (const [to, from] of moves) { d[to] = (d[to] ?? 0) + 1; d[from] = (d[from] ?? 0) - 1; }
+  return d;
+};
 const sample = JSON.parse(readFileSync(new URL('../../scripts/fixtures/history-sample.json', import.meta.url), 'utf8'));
 
 test('normaliseHistory: damaged values give an empty history, bad entries and seconds are dropped', () => {
@@ -160,5 +167,111 @@ test('runner history: a missing or unreadable file exits 2 with one line about t
     assert.equal(run.stdout, '');
     assert.equal(run.stderr.trim().split('\n').length, 1);
     assert.match(run.stderr, /history/);
+  }
+});
+
+// ---------- catch-up (#34, decision #28) ----------
+
+const withMatches = (matches) => normaliseHistory({ useHistory: true, clearedAt: null, matches });
+const full = (n, secs, extra) => ({ id: `m${Math.random()}`, seconds: Object.fromEntries(ids(n).map((p) => [String(p), secs(p)])), ...(extra ? { extra } : {}) });
+
+test('recordMatch keeps extra seconds apart; old entries without them load; damaged extra is dropped', () => {
+  const h = recordMatch(emptyHistory(), 'a', { 1: 1200, 2: 800 }, { 1: 200, 2: 0, 9: 200 });
+  assert.deepEqual(h.matches[0].extra, { 1: 200 }, 'only players with seconds, above 0');
+  assert.equal(normaliseHistory({ matches: [{ id: 'x', seconds: { 1: 600 } }] }).matches[0].extra, undefined);
+  const damaged = normaliseHistory({ matches: [{ id: 'x', seconds: { 1: 600 }, extra: { 1: 'lots', 2: 200, 1.5: 3 } }] });
+  assert.equal(damaged.matches[0].extra, undefined);
+  const capped = normaliseHistory({ matches: [{ id: 'x', seconds: { 1: 600 }, extra: { 1: 900 } }] });
+  assert.deepEqual(capped.matches[0].extra, { 1: 600 }, 'extra is never more than the seconds');
+});
+
+test('catchUpSeconds leaves Extra minuten out; seasonSummary still counts them', () => {
+  const h = withMatches([{ id: 'a', seconds: { 1: 1200, 2: 1000 }, extra: { 1: 200 } }]);
+  assert.deepEqual(catchUpSeconds(h), { 1: 1000, 2: 1000 });
+  assert.deepEqual(seasonSummary(h).totals, { 1: 1200, 2: 1000 });
+});
+
+test('catchUp: a player one block or more behind gets +1, the furthest ahead -1; within a block nothing moves', () => {
+  const behind = withMatches([full(12, (p) => (p === 12 ? 2000 : 3000))]);
+  const { moves } = catchUp(behind, ids(12), SCHEDULES.equal, 1);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0][0], 12);
+  assert.notEqual(moves[0][1], 12);
+  const close = withMatches([full(12, (p) => (p === 12 ? 2900 : 3000))]);
+  assert.deepEqual(catchUp(close, ids(12), SCHEDULES.equal, 1).moves, [], 'less than one block apart');
+  assert.deepEqual(catchUp(withMatches([]), ids(12), SCHEDULES.equal, 1).moves, [], 'empty history');
+});
+
+test('catchUp: several players behind each get one block at most, never more than one per match', () => {
+  const h = withMatches([full(12, (p) => (p <= 3 ? 0 : 5000))]);
+  const { moves } = catchUp(h, ids(12), SCHEDULES.equal, 1);
+  const adjust = deltas(moves);
+  assert.deepEqual([1, 2, 3].map((p) => adjust[p]), [1, 1, 1]);
+  assert.ok(Object.values(adjust).every((d) => d === 1 || d === -1), 'nobody is in two moves');
+  assert.equal(moves.length, 3);
+});
+
+test('catchUp: a lead that is all Extra minuten is not taken back (rewards stay)', () => {
+  const h = withMatches([full(12, (p) => (p === 5 ? 1200 : 1000), { 5: 200 }), full(12, () => 1000)]);
+  assert.deepEqual(catchUp(h, ids(12), SCHEDULES.equal, 1).moves, []);
+});
+
+test('catchUp: a player who already has an uneven place gets no extra block on top', () => {
+  // 11 players, equal schedule: 60 places, base 5, five players get 6. The fewest-seconds players get the uneven places.
+  const h = withMatches([full(11, (p) => (p <= 6 ? 0 : 5000))]);
+  const { priority, moves } = catchUp(h, ids(11), SCHEDULES.equal, 1);
+  const adjust = deltas(moves);
+  const uneven = new Set(priority.slice(0, 5));
+  for (const p of uneven) assert.notEqual(adjust[p], 1, `player ${p} has an uneven place already`);
+});
+
+// The sub rule (#21) and the one-block limit for one catch-up plan.
+function assertCatchUpPlan(h, n, start, schedule, seed, label) {
+  const { priority, moves } = catchUp(h, ids(n), SCHEDULES[schedule], seed);
+  const plan = makePlan({ players: ids(n), start, schedule, seed, extraPriority: priority, moves });
+  const plain = makePlan({ players: ids(n), start, schedule, seed, extraPriority: priority });
+  assert.ok(maxSubsFrom(plan.grid) <= 3, `${label}: at most 3 subs`);
+  const stats = planStats(plan);
+  assert.ok(!plan.sitLimitRelaxed && stats.longestBenchSeconds <= 900, `${label}: nobody sits more than 15:00`);
+  const plainStats = planStats(plain);
+  const stintLimit = Math.max(600, 3 * plan.blockSeconds); // the planner's stint limit (searchGrid)
+  if (plainStats.longestStintSeconds <= stintLimit) {
+    assert.ok(stats.longestStintSeconds <= stintLimit, `${label}: no longer stint than the plain plan's limit`);
+  }
+  if (maxSubsFrom(plain.grid) <= 2) assert.ok(maxSubsFrom(plan.grid) <= 2, `${label}: still at most 2 subs`);
+  const before = plainStats.minutes;
+  for (const p of ids(n)) {
+    assert.ok(Math.abs(stats.minutes[p] - before[p]) <= plan.blockSeconds, `${label}: player ${p} moves at most one block`);
+  }
+  return { plan, plain, moves };
+}
+
+test('catch-up plans keep the sub rule for 8 to 12 players, both schedules, random histories and starting fives', () => {
+  const random = seededRandom(42);
+  for (const schedule of ['equal', 'five']) {
+    for (let n = 8; n <= 12; n++) {
+      for (let k = 0; k < 10; k++) {
+        const h = withMatches([full(n, () => Math.floor(random() * 6) * SCHEDULES[schedule].blockSeconds)]);
+        // half the runs start with the five players furthest ahead (the ones who give blocks), half with a random five
+        const order = ids(n).sort((a, b) => (k % 2 ? random() - 0.5 : (h.matches[0].seconds[b] - h.matches[0].seconds[a])));
+        assertCatchUpPlan(h, n, order.slice(0, 5), schedule, k + 1, `${schedule} ${n} history ${k}`);
+      }
+    }
+  }
+});
+
+test('catch-up keeps the stint limit the plain plan keeps (re-review of #40: 8 players, five schedule)', () => {
+  const h = normaliseHistory({ matches: [{ id: 'past', seconds: { 1: 3000, 2: 3000, 3: 3000, 4: 3000, 5: 3000 } }] });
+  const { plan, plain } = assertCatchUpPlan(h, 8, [1, 2, 3, 4, 5], 'five', 1, '8 players');
+  assert.ok(planStats(plain).longestStintSeconds <= 900, 'the plain plan keeps the stint limit');
+  assert.ok(planStats(plan).longestStintSeconds <= 900, 'so the catch-up plan does too');
+});
+
+test('catch-up takes only the moves that still fit the sit limit (review of #40: all four givers in the starting five)', () => {
+  const h = normaliseHistory({ matches: [{ id: 'past', seconds: { 1: 3000, 2: 3000, 3: 3000, 4: 3000 } }] });
+  for (let seed = 1; seed <= 5; seed++) {
+    const { moves, plan, plain } = assertCatchUpPlan(h, 12, [1, 2, 3, 4, 5], 'five', seed, `seed ${seed}`);
+    assert.equal(moves.length, 4, 'catchUp asks for four moves');
+    assert.notDeepEqual(plan.grid, plain.grid, `seed ${seed}: at least one move still fits`);
   }
 });
