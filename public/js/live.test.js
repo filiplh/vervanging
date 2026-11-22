@@ -1,5 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createStore } from './store.js';
 import { makePlan } from './planner.js';
 import { startMatch, wissel, minutesSoFar } from './match.js';
@@ -534,6 +535,49 @@ test('live screen: Extra minuten next to In the zone; the note says the block is
   assert.deepEqual(saved.extra, [off[0]]);
   button(view, 'Ongedaan maken').fire('click');
   assert.deepEqual(JSON.parse(data.get('vervanging.match.v1')).extra, []);
+});
+
+// ---------- names next to the zone buttons (#46) ----------
+
+// Each row of a list: its class, the player's name as shown, and the labels of its buttons in order.
+const rows = (ul) => find(ul, 'li').map((li) => ({
+  className: li.className,
+  first: li.children[0],
+  chips: find(li, 'span', (s) => s.className === 'chips')[0],
+  buttons: find(li, 'button').map((b) => b.text),
+}));
+
+test('live screen: every Eruit row shows the player\'s name on its own line above In the zone and Extra minuten', () => {
+  for (const n of [11, 15]) {
+    const { view, setup } = open(setupOf({ n }));
+    const byId = new Map(setup.players.map((p) => [p.id, p]));
+    const off = rows(listOf(view, 'off'));
+    assert.ok(off.length > 0, `someone is due off with ${n} players`);
+    for (const row of off) {
+      assert.equal(row.className, 'with-chips', 'the row wraps: name on its own line, buttons under it');
+      assert.equal(row.first.className, 'player', 'the name comes first in the row');
+      const number = Number(find(row.first, 'span', (s) => s.className === 'number')[0].text.slice(1));
+      assert.equal(row.first.text, `#${number} ${byId.get(number).name}`, 'the full name is in the row');
+      assert.ok(row.chips, 'the buttons sit in their own group');
+      assert.deepEqual(find(row.chips, 'button').map((b) => b.text), ['In the zone', 'Extra minuten']);
+    }
+    for (const row of rows(listOf(view, 'on'))) assert.equal(row.className, '', 'no wrap on Erin before a zone choice');
+    chips(view, 'In the zone')[0].fire('click');
+    for (const row of rows(listOf(view, 'on'))) {
+      assert.equal(row.className, 'with-chips', 'Erin rows wrap while Op de bank is shown');
+      assert.equal(row.first.className, 'player');
+      assert.match(row.first.text, /^#\d+ Speler\d+$/);
+      assert.deepEqual(row.buttons, ['Op de bank']);
+    }
+  }
+});
+
+test('styles: a name row with buttons wraps, and its name takes the full width of the column', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const rule = (selector) => css.match(new RegExp(`${selector.replace(/[.*]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+  assert.match(rule('.names li.with-chips'), /flex-wrap:\s*wrap/);
+  assert.match(rule('.names li.with-chips .player'), /flex-basis:\s*100%/);
+  assert.match(rule('.names li.with-chips .player'), /white-space:\s*normal/, 'a long name wraps instead of being cut');
 });
 
 // ---------- minutes at a glance (#32) ----------

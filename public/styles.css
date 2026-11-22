@@ -218,6 +218,13 @@ button.chip[aria-pressed="true"] { background: var(--selected); border-color: va
 /* Extra minuten (#31) */
 button.chip.extra[aria-pressed="true"] { border-color: var(--on); }
 
+/* A name row with buttons under Eruit and Erin (#46): the name gets the full column width on its own line, and the
+   buttons wrap under it, so the name stays readable in a half-width column on a phone */
+.names li.with-chips { flex-wrap: wrap; gap: 4px; padding: 4px 0; }
+.names li.with-chips .player { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+.names li .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.names li .chips button.chip { margin-left: 0; }
+
 /* Minutes at a glance (#32): every player in one dense grid at the top, six cells a row, so twelve players fit in
    two rows on a phone 360 px wide or more (328 px between the gutters: cells of about 51 px) */
 .overview {
