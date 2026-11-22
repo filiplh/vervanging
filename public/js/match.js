@@ -102,7 +102,12 @@ export function normaliseMatchState(raw, plan, setupSavedAt = null) {
   const point = (p) => p && typeof p === 'object' && Number.isInteger(p.block) && p.block >= 1 && p.block <= fresh.blocks
     && typeof p.ended === 'boolean' && (!p.ended || p.block === fresh.blocks);
   if (!point(raw)) return null;
-  if (raw.previous != null && !point(raw.previous)) return null;
+  if (raw.previous != null) {
+    // The only history a wissel leaves: the active block just before this one, or, after the end, the active last
+    // block. Anything else (a skipped or forward block, an ended point) would make undo jump, so it is refused.
+    const expected = raw.ended ? fresh.blocks : raw.block - 1;
+    if (!point(raw.previous) || raw.previous.ended !== false || raw.previous.block !== expected) return null;
+  }
   const previous = raw.previous == null ? null : { block: raw.previous.block, ended: raw.previous.ended };
   return { ...fresh, block: raw.block, ended: raw.ended, previous };
 }

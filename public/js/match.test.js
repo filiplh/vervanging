@@ -136,8 +136,23 @@ test('normaliseMatchState refuses damaged states and states of another setup', (
     { ...good, ended: true }, // ended before the last block
     { ...good, previous: { block: 99, ended: false } },
     { ...good, previous: 'x' },
+    { ...good, previous: { block: 10, ended: false } }, // forward history: undo would jump ahead
+    { ...good, previous: { block: 1, ended: false } }, // skipped history: block 4 back to block 1
+    { ...good, previous: { block: 4, ended: false } }, // the current block itself
+    { ...good, previous: { block: 3, ended: true } }, // an ended point before the last block
+    { ...good, block: 1, previous: { block: 1, ended: false } }, // history at block 1, where no wissel happened
   ];
   for (const raw of damaged) assert.equal(normaliseMatchState(raw, plan, 'saved-1'), null, JSON.stringify(raw)?.slice(0, 80));
   assert.equal(normaliseMatchState(good, planFor('equal', 12, 2), 'saved-1'), null, 'another plan');
   assert.deepEqual(normaliseMatchState({ ...good, previous: undefined }, plan, 'saved-1').previous, null);
+  // An ended match: its history must be the active last block, never an ended point or another block.
+  const done = roundTrip(times(startMatch(plan, 'saved-1'), 12));
+  assert.deepEqual(normaliseMatchState(done, plan, 'saved-1'), done);
+  for (const previous of [{ block: 12, ended: true }, { block: 11, ended: false }, { block: 5, ended: false }]) {
+    assert.equal(normaliseMatchState({ ...done, previous }, plan, 'saved-1'), null, JSON.stringify(previous));
+  }
+  // The reviewer's reproduction: block 3 (two wissels) with previous block 10 must not restore, so undo never jumps.
+  const two = roundTrip(times(startMatch(plan, 'saved-1'), 2));
+  assert.deepEqual(normaliseMatchState(two, plan, 'saved-1'), two);
+  assert.equal(normaliseMatchState({ ...two, previous: { block: 10, ended: false } }, plan, 'saved-1'), null);
 });
