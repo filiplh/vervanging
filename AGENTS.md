@@ -86,9 +86,10 @@ Never present it as fact.
 
 A write-up that judges impact for the owner to act on (a spike, a UI or UX review, an audit) keeps what was seen or
 measured apart from what is judged. One note at the top says that the judged parts (why it matters, the priority) are
-for the owner to confirm; that note replaces a `⚠` on each judged sentence, but a claim about an untested device or
-platform keeps its own `⚠`. A reviewer raises a missing split as one finding for the whole write-up, not one per
-sentence (#42 took three review rounds over it). PR reviews and bug reports keep their own priority rules.
+for the owner to confirm, including how users would behave; that note replaces a `⚠` on each judged sentence, but a
+claim about an untested device or platform keeps its own `⚠`. A reviewer raises a missing split as one finding for the
+whole write-up, not one per sentence (#42 took three review rounds over it). PR reviews and bug reports keep their own
+priority rules.
 
 ## Human gates
 
