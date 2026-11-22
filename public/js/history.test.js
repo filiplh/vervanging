@@ -225,6 +225,8 @@ test('catch-up plans keep the sub rule for 8 to 12 players, both schedules, rand
         const { priority, adjust } = catchUp(h, ids(n), SCHEDULES[schedule], k + 1);
         const plan = makePlan({ players: ids(n), start: [1, 2, 3, 4, 5], schedule, seed: k + 1, extraPriority: priority, adjust });
         assert.ok(maxSubsFrom(plan.grid) <= 3, `${schedule} ${n} history ${k}`);
+        const stats = planStats(plan);
+        assert.ok(!plan.sitLimitRelaxed && stats.longestBenchSeconds <= 900, `${schedule} ${n} history ${k}: sits at most 15:00`);
         const minutes = Object.values(planStats(plan).minutes).map((m) => m / plan.blockSeconds);
         assert.ok(Math.max(...minutes) - Math.min(...minutes) <= 3, minutes.join(' '));
       }
