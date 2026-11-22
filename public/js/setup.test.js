@@ -4,7 +4,7 @@ import { createStore } from './store.js';
 import { makePlan, planStats } from './planner.js';
 import {
   MAX_PLAYERS, normaliseRoster, checkPlayer, addPlayer, editPlayer, removePlayer, normaliseAttendance,
-  initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen, startedScreen,
+  initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen,
 } from './setup.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
@@ -375,28 +375,4 @@ test('setup screen: Start with refused storage shows a message and does not leav
   button(view, 'Start').fire('click');
   assert.equal(started.length, 0);
   assert.match(pageText(view), /Opslaan lukte niet/);
-});
-
-// ---------- placeholder after Start ----------
-
-test('started screen: shows the saved basisvijf and opponent', () => {
-  const { store } = memoryStore();
-  store.save('matchSetup', validSetup());
-  const view = new FakeElement('main');
-  startedScreen(view, { store });
-  assert.match(pageText(view), /Match opgeslagen/);
-  assert.match(pageText(view), /Tegen BC Test/);
-  assert.match(pageText(view), /Basisvijf: #1 Speler1, #2 Speler2, #3 Speler3, #4 Speler4, #5 Speler5/);
-});
-
-test('started screen: a damaged saved setup shows a Dutch fallback instead of crashing', () => {
-  for (const damaged of [{ players: [null], startingFive: [1] }, { players: [], startingFive: 'x' }, '{not json', null]) {
-    const { store, data } = memoryStore();
-    if (damaged === '{not json') data.set('vervanging.matchSetup.v1', damaged);
-    else if (damaged !== null) store.save('matchSetup', damaged);
-    const view = new FakeElement('main');
-    assert.doesNotThrow(() => startedScreen(view, { store }));
-    assert.match(pageText(view), /Geen match gevonden/);
-    assert.equal(find(view, 'a')[0].attrs.href, '#match');
-  }
 });

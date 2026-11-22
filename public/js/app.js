@@ -1,7 +1,8 @@
 // Entry point: picks the screen from the URL hash (#spelers, #match, #start) and draws it into <main>.
 
 import { createStore } from './store.js';
-import { rosterScreen, setupScreen, startedScreen, normaliseRoster } from './setup.js';
+import { rosterScreen, setupScreen, normaliseRoster } from './setup.js';
+import { liveScreen } from './live.js';
 import { ON_COURT } from './planner.js';
 
 const store = createStore();
@@ -19,8 +20,12 @@ function show() {
     else link.removeAttribute('aria-current');
   }
   if (name === 'spelers') rosterScreen(view, { store });
-  else if (name === 'start') startedScreen(view, { store });
-  else setupScreen(view, { store, onStart: () => { location.hash = '#start'; } });
+  else if (name === 'start') liveScreen(view, { store });
+  else {
+    // A new "Start" begins a new match: the previous match state is dropped (the live screen also refuses a state
+    // that belongs to another setup).
+    setupScreen(view, { store, onStart: () => { store.remove('match'); location.hash = '#start'; } });
+  }
   window.scrollTo(0, 0);
 }
 
