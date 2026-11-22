@@ -2,8 +2,8 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore } from './store.js';
 import { makePlan } from './planner.js';
-import { startMatch, wissel } from './match.js';
-import { liveScreen, subTimeText, planOf, restoreMatch } from './live.js';
+import { startMatch, wissel, minutesSoFar } from './match.js';
+import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory } from './live.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
 
@@ -251,4 +251,150 @@ test('live screen: no In the zone button for a player who is out', () => {
   assert.equal(chips(view, 'In the zone').length, numbers(listOf(view, 'off')).length);
   assert.ok(find(view, 'p', (p) => p.className === 'note replaced').length === 1, 'a line says who came in for whom');
   assert.ok(before >= off.length - 1);
+});
+
+// ---------- team history (decision #10) ----------
+
+const storedHistory = (data) => JSON.parse(data.get('vervanging.history.v1') ?? 'null');
+const endMatch = (view, blocks) => { for (let i = 0; i < blocks; i++) wisselButton(view).fire('click'); };
+
+test('history: ending the match records each player\'s seconds once, under the setup\'s savedAt', () => {
+  const env = open(setupOf({ n: 9, schedule: 'five' }));
+  endMatch(env.view, 7);
+  assert.equal(storedHistory(env.data), null, 'nothing is recorded before the end');
+  wisselButton(env.view).fire('click');
+  assert.equal(h1(env.view), 'Einde match');
+  const history = storedHistory(env.data);
+  assert.equal(history.matches.length, 1);
+  assert.equal(history.matches[0].id, env.setup.savedAt);
+  const state = JSON.parse(env.data.get('vervanging.match.v1'));
+  assert.deepEqual(history.matches[0].seconds, JSON.parse(JSON.stringify(minutesSoFar(state))));
+  assert.equal(Object.values(history.matches[0].seconds).reduce((a, b) => a + b, 0), 5 * 8 * 300);
+  // Reloading the end screen does not add it again.
+  env.reload();
+  env.reload();
+  assert.equal(storedHistory(env.data).matches.length, 1);
+});
+
+test('history: undoing the end removes the match; ending again records it once, with the new minutes', () => {
+  const env = open(setupOf({ n: 9, schedule: 'five' }));
+  endMatch(env.view, 8);
+  button(env.view, 'Ongedaan maken').fire('click');
+  assert.match(h1(env.view), /^Blok 8 van 8/);
+  assert.deepEqual(storedHistory(env.data).matches, [], 'an undone end leaves no entry');
+  const view = env.reload(); // undo after a reload works the same
+  wisselButton(view).fire('click');
+  assert.equal(storedHistory(env.data).matches.length, 1);
+  button(view, 'Ongedaan maken').fire('click');
+  wisselButton(view).fire('click');
+  assert.equal(storedHistory(env.data).matches.length, 1, 'never a duplicate');
+});
+
+test('history: earlier matches stay, the switch is kept, and a damaged stored history is replaced cleanly', () => {
+  const env = open(setupOf({ n: 9, schedule: 'five' }));
+  env.store.save('history', { useHistory: true, matches: [{ id: 'earlier', seconds: { 1: 1200 } }, null, 'x'] });
+  endMatch(env.view, 8);
+  const history = storedHistory(env.data);
+  assert.equal(history.useHistory, true);
+  assert.deepEqual(history.matches.map((m) => m.id), ['earlier', env.setup.savedAt]);
+  env.data.set('vervanging.history.v1', '{broken');
+  button(env.view, 'Ongedaan maken').fire('click');
+  wisselButton(env.view).fire('click');
+  assert.deepEqual(storedHistory(env.data).matches.map((m) => m.id), [env.setup.savedAt]);
+});
+
+test('history: syncHistory without a savedAt records nothing', () => {
+  const { store, data } = memoryStore();
+  let state = startMatch(planOf(setupOf({ schedule: 'five' })));
+  for (let i = 0; i < 8; i++) state = wissel(state);
+  assert.equal(syncHistory(store, { savedAt: null }, state), true);
+  assert.equal(data.has('vervanging.history.v1'), false);
+});
+
+// A store over `data` that refuses writes to the history while `refuse.history` is true (a full browser storage).
+function flakyStore(data, refuse) {
+  return createStore({
+    getItem: (k) => (data.has(k) ? data.get(k) : null),
+    setItem: (k, v) => {
+      if (refuse.history && k === 'vervanging.history.v1') throw new Error('QuotaExceededError');
+      data.set(k, String(v));
+    },
+    removeItem: (k) => { data.delete(k); },
+  });
+}
+
+const saveFailedShown = (view) => find(view, 'p', (p) => /Opslaan lukte niet/.test(p.text)).length > 0;
+
+test('history: a refused history write at the end is caught up on reload, once', () => {
+  const setup = setupOf({ n: 9, schedule: 'five' });
+  const data = new Map();
+  const refuse = { history: true };
+  const env = open(setup, { store: flakyStore(data, refuse), data });
+  endMatch(env.view, 8);
+  assert.equal(h1(env.view), 'Einde match');
+  assert.ok(saveFailedShown(env.view), 'the refused write is shown');
+  assert.equal(storedHistory(data), null, 'the match state was saved, the history was not');
+
+  let view = env.reload(); // still refused: the message stays
+  assert.equal(h1(view), 'Einde match');
+  assert.ok(saveFailedShown(view));
+  assert.equal(storedHistory(data), null);
+
+  refuse.history = false;
+  view = env.reload();
+  assert.equal(saveFailedShown(view), false);
+  const history = storedHistory(data);
+  assert.deepEqual(history.matches.map((m) => m.id), [setup.savedAt]);
+  const state = JSON.parse(data.get('vervanging.match.v1'));
+  assert.deepEqual(history.matches[0].seconds, JSON.parse(JSON.stringify(minutesSoFar(state))));
+  env.reload();
+  env.reload();
+  assert.equal(storedHistory(data).matches.length, 1, 'later reloads add nothing');
+});
+
+test('history: a refused removal after an undo of the end is caught up on reload', () => {
+  const data = new Map();
+  const refuse = { history: false };
+  const env = open(setupOf({ n: 9, schedule: 'five' }), { store: flakyStore(data, refuse), data });
+  endMatch(env.view, 8);
+  refuse.history = true;
+  button(env.view, 'Ongedaan maken').fire('click');
+  assert.equal(storedHistory(data).matches.length, 1, 'the removal was refused');
+  refuse.history = false;
+  const view = env.reload();
+  assert.match(h1(view), /^Blok 8 van 8/);
+  assert.deepEqual(storedHistory(data).matches, []);
+});
+
+test('history: after Wis geschiedenis, reopening an old end screen does not refill it', () => {
+  const setup = setupOf({ n: 9, schedule: 'five', savedAt: '2026-11-22T10:00:00.000Z' });
+  const env = open(setup);
+  endMatch(env.view, 8);
+  assert.equal(storedHistory(env.data).matches.length, 1);
+  // "Wis geschiedenis" on the setup screen, after this match's Start.
+  env.store.save('history', { useHistory: true, clearedAt: '2026-11-22T12:00:00.000Z', matches: [] });
+  env.reload();
+  env.reload();
+  assert.deepEqual(storedHistory(env.data).matches, [], 'not refilled');
+  // Undo and end again is a new end: the match is recorded again on purpose.
+  const view = env.reload();
+  button(view, 'Ongedaan maken').fire('click');
+  wisselButton(view).fire('click');
+  assert.deepEqual(storedHistory(env.data).matches.map((m) => m.id), [setup.savedAt]);
+});
+
+test('history: a match started after the last clear is caught up on reload', () => {
+  const setup = setupOf({ n: 9, schedule: 'five', savedAt: '2026-11-22T13:00:00.000Z' });
+  const data = new Map();
+  const refuse = { history: false };
+  const store = flakyStore(data, refuse);
+  store.save('history', { useHistory: false, clearedAt: '2026-11-22T12:00:00.000Z', matches: [] });
+  refuse.history = true;
+  const env = open(setup, { store, data });
+  endMatch(env.view, 8);
+  refuse.history = false;
+  env.reload();
+  const history = storedHistory(data);
+  assert.equal(history.clearedAt, '2026-11-22T12:00:00.000Z');
+  assert.deepEqual(history.matches.map((m) => m.id), [setup.savedAt]);
 });

@@ -8,6 +8,7 @@ import {
   startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar,
   normaliseMatchState, proposedBench, replacements, MatchError,
 } from './match.js';
+import { normaliseHistory, recordMatch, forgetMatch, hasMatch, startedAfterClear } from './history.js';
 
 const SAVE_FAILED = 'Opslaan lukte niet: de browser weigert opslag.';
 
@@ -36,6 +37,33 @@ export function restoreMatch(store, setup) {
   return normaliseMatchState(store.load('match'), plan, setup.savedAt) ?? startMatch(plan, setup.savedAt);
 }
 
+// Keeps the team history (decision #10) in line with the match after an action: an ended match is recorded under
+// its setup's savedAt (replacing an earlier entry, so ending, undoing and ending again never counts it twice), and a
+// match that is no longer ended (undo of the end) is removed again. A reload changes nothing: only actions call this.
+// True when the history needed no write or was written.
+export function syncHistory(store, setup, state) {
+  if (!setup.savedAt) return true; // a setup without savedAt cannot be told apart from another, so it is not recorded
+  const history = normaliseHistory(store.load('history'));
+  if (state.ended) return store.save('history', recordMatch(history, setup.savedAt, minutesSoFar(state)));
+  if (!hasMatch(history, setup.savedAt)) return true;
+  return store.save('history', forgetMatch(history, setup.savedAt));
+}
+
+// Run when the live screen opens: catches up a history write that the browser refused earlier, while the match state
+// itself was saved. An ended match missing from the history is recorded, unless "Wis geschiedenis" ran after its
+// Start (an old end screen must not refill a cleared history); a match that is no longer ended but still in the
+// history (a refused removal after an undo) is removed. True when nothing was needed or the write worked.
+export function repairHistory(store, setup, state) {
+  if (!setup.savedAt) return true;
+  const history = normaliseHistory(store.load('history'));
+  const recorded = hasMatch(history, setup.savedAt);
+  if (state.ended && !recorded && startedAfterClear(history, setup.savedAt)) {
+    return store.save('history', recordMatch(history, setup.savedAt, minutesSoFar(state)));
+  }
+  if (!state.ended && recorded) return store.save('history', forgetMatch(history, setup.savedAt));
+  return true;
+}
+
 export function liveScreen(root, { store }) {
   const setup = normaliseMatchSetup(store.load('matchSetup'));
   if (!setup) {
@@ -47,14 +75,15 @@ export function liveScreen(root, { store }) {
   }
   const byId = new Map(setup.players.map((p) => [p.id, p]));
   let state = restoreMatch(store, setup);
-  let message = '';
+  let message = repairHistory(store, setup, state) ? '' : SAVE_FAILED;
   let zone = null; // in the zone, chosen but not yet applied: { keep, bench }
 
   // Applies one engine action, saves the new state and redraws; an action the engine refuses shows its reason.
   function act(step) {
     try {
       state = step();
-      message = store.save('match', state) ? '' : SAVE_FAILED;
+      const saved = store.save('match', state);
+      message = syncHistory(store, setup, state) && saved ? '' : SAVE_FAILED;
     } catch (error) {
       if (!(error instanceof MatchError)) throw error;
       message = 'Dat kan nu niet.';
