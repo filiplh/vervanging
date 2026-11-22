@@ -41,6 +41,10 @@ first paragraph of the setup screen ("Tip: zet Vervanging op je beginscherm …"
 Priorities: **P1** can cost the coach the match flow or the minutes record during a game. **P2** slows the coach down
 or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is under half a day, **M** is about a day.
 
+⚠ Each "Seen" line is what the walk, the measurements or the code showed. Each "Why it matters" line is a judgement
+of the risk from the coach's seat. None of it was observed with coaches during a match, so the priorities are a
+proposal for the owner to confirm.
+
 ### P1-1 · Live: the names under "Eruit" are gone
 
 - **Element:** `.names.off li .player` in "Bij de volgende wissel › Eruit", on every block that has someone due off.
@@ -68,7 +72,7 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
   brings the match back at block 3; nothing inside the app does. On the setup screen,
   "Start" runs `store.remove('match')` with no question asked, so a coach who taps it to get back loses the match.
 - **Why it matters:** decision #18 ("never lose a match") holds for a reload of `#start`, but not for the two ways a
-  coach really leaves the screen: a stray tap on the tab bar, and the phone dropping the app while the coach checks
+  coach is likely to leave the screen (⚠ a judgement, not observed): a stray tap on the tab bar, and the phone dropping the app while the coach checks
   the scoreboard or takes a call, so the app starts again from the icon. ⚠ The installed iOS app has no address bar
   and no back button; whether iOS reopens a home-screen app at `start_url` or at the last URL after it drops it from
   memory could not be checked here (see below).
@@ -190,8 +194,8 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
   ([light](2026-ui-review/06a-match-ruil-gekozen-light.png), [dark](2026-ui-review/06a-match-ruil-gekozen-dark.png)).
   The yellow is 1.11:1 against white in light mode. After a refused swap, the message repeats the instruction above
   it almost word for word ([screenshot](2026-ui-review/07-match-ruil-fout-light.png)).
-- **Why it matters:** the coach cannot tell whether the first tap took, and after a refused swap the screen does not
-  say which player is wrong.
+- **Why it matters:** the only sign that the first tap took is the pale row, at 1.11:1 in light mode; ⚠ in a hall it
+  may be missed (not tried on a device). After a refused swap the screen does not say which player is wrong.
 - **Fix (S):** after the first tap, write "#4 Lotte gekozen. Tik de speler aan om mee te ruilen." in `.message`, and
   name both players in the refusal (⚠ copy to confirm).
 
@@ -285,7 +289,7 @@ extra minuten. No "Avoid" word shows on screen.
 - **The installed home-screen app:** standalone mode, the install hint's absence when installed, the status-bar
   colour, and ⚠ whether iOS reopens a dropped home-screen app at `start_url` or at the last URL (this decides how bad
   P1-2 is in practice).
-- **Real iPhone Safari rendering:** fonts (Chrome used the macOS system font, as Safari would, but sizes may differ),
+- **Real iPhone Safari rendering:** fonts (Chrome used the macOS system font; ⚠ Safari's rendering of it was not compared),
   ⚠ double-tap handling (P2-1), ⚠ autocorrect on names (P3-9), and ⚠ readability in a bright hall of the contrast points
   (P2-4, P3-1, P3-6).
 - **15 players:** the run used 11. With 15 the overview takes three rows and the setup page grows by about 400 px.
