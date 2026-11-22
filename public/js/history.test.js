@@ -233,7 +233,13 @@ function assertCatchUpPlan(h, n, start, schedule, seed, label) {
   assert.ok(maxSubsFrom(plan.grid) <= 3, `${label}: at most 3 subs`);
   const stats = planStats(plan);
   assert.ok(!plan.sitLimitRelaxed && stats.longestBenchSeconds <= 900, `${label}: nobody sits more than 15:00`);
-  const before = planStats(plain).minutes;
+  const plainStats = planStats(plain);
+  const stintLimit = Math.max(600, 3 * plan.blockSeconds); // the planner's stint limit (searchGrid)
+  if (plainStats.longestStintSeconds <= stintLimit) {
+    assert.ok(stats.longestStintSeconds <= stintLimit, `${label}: no longer stint than the plain plan's limit`);
+  }
+  if (maxSubsFrom(plain.grid) <= 2) assert.ok(maxSubsFrom(plan.grid) <= 2, `${label}: still at most 2 subs`);
+  const before = plainStats.minutes;
   for (const p of ids(n)) {
     assert.ok(Math.abs(stats.minutes[p] - before[p]) <= plan.blockSeconds, `${label}: player ${p} moves at most one block`);
   }
@@ -252,6 +258,13 @@ test('catch-up plans keep the sub rule for 8 to 12 players, both schedules, rand
       }
     }
   }
+});
+
+test('catch-up keeps the stint limit the plain plan keeps (re-review of #40: 8 players, five schedule)', () => {
+  const h = normaliseHistory({ matches: [{ id: 'past', seconds: { 1: 3000, 2: 3000, 3: 3000, 4: 3000, 5: 3000 } }] });
+  const { plan, plain } = assertCatchUpPlan(h, 8, [1, 2, 3, 4, 5], 'five', 1, '8 players');
+  assert.ok(planStats(plain).longestStintSeconds <= 900, 'the plain plan keeps the stint limit');
+  assert.ok(planStats(plan).longestStintSeconds <= 900, 'so the catch-up plan does too');
 });
 
 test('catch-up takes only the moves that still fit the sit limit (review of #40: all four givers in the starting five)', () => {

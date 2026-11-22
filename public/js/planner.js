@@ -166,9 +166,9 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
 }
 
 // Tries a cap of 2 subs with the strict limits, then a cap of 3, then drops the stint limit, then the sit limit
-// (never the cap of 3; plan assumption A3). With `keepSitLimit`, the sit limit is never dropped: null
-// when no plan keeps it.
-export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random, keepSitLimit = false }) {
+// (never the cap of 3; plan assumption A3). `level` in the result says how far it went (0 to 3). With `maxLevel`, it
+// goes no further than that level and gives null when no plan is found there.
+export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random, maxLevel = null }) {
   const sitBlocks = Math.floor(MAX_SIT_SECONDS / blockSeconds);
   const stintBlocks = Math.max(1, Math.floor(MAX_STINT_SECONDS / blockSeconds));
   const stint = Math.max(stintBlocks, 3);
@@ -179,24 +179,25 @@ export function searchGrid({ prefix, players, available, targets, blocks, blockS
     { maxSubs: 3, maxSit: sitBlocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: false },
     { maxSubs: 3, maxSit: blocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: true },
   ];
-  for (const level of keepSitLimit ? levels.filter((l) => !l.sitLimitRelaxed) : levels) {
+  for (const [index, level] of levels.entries()) {
+    if (maxLevel !== null && index > maxLevel) return null;
     const grid = fillGrid({ prefix, players, available, targets, blocks, ...level, random });
-    if (grid) return { grid, sitLimitRelaxed: level.sitLimitRelaxed };
+    if (grid) return { grid, sitLimitRelaxed: level.sitLimitRelaxed, level: index };
   }
-  if (keepSitLimit) return null;
   throw new PlanError('no plan found within the substitution limit of 3');
 }
 
 // `moves` (optional, from the history's catch-up, decision #28): [to, from] pairs of present players, most important
 // first; each moves one block from `from` to `to`, and a player is in at most one pair. The plan takes as many moves
-// from the front as still fit the sub rule (#21: at most 3 subs, nobody sits more than 15:00), so catch-up never
-// relaxes a limit the plain plan keeps; when none fit, it is the plain plan.
+// from the front as still plan within the limits the plain plan (without moves) keeps: the cap of 2 or 3 subs, the
+// stint limit and the 15:00 sit limit (#21), so catch-up never relaxes a limit the plain plan keeps; when none fit,
+// it is the plain plan.
 export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPriority = [], moves = [] }) {
   const { blocks, blockSeconds, blocksPerQuarter } = scheduleOf(schedule);
   checkPlayers(players, start);
   checkMoves(moves, players);
   const first = start.slice().sort((a, b) => a - b);
-  const attempt = (count, keepSitLimit) => {
+  const attempt = (count, maxLevel = null) => {
     const random = seededRandom(seed);
     const targets = blockTargets(players, ON_COURT * blocks, random, extraPriority);
     for (const [to, from] of moves.slice(0, count)) {
@@ -204,11 +205,12 @@ export function makePlan({ players, start, schedule = 'equal', seed = 1, extraPr
       targets[to] += 1;
       targets[from] -= 1;
     }
-    return searchGrid({ prefix: [first], players, targets, blocks, blockSeconds, random, keepSitLimit });
+    return searchGrid({ prefix: [first], players, targets, blocks, blockSeconds, random, maxLevel });
   };
+  const plain = attempt(0);
   let found = null;
-  for (let count = moves.length; count > 0 && !found; count--) found = attempt(count, true);
-  const { grid, sitLimitRelaxed } = found ?? attempt(0, false);
+  for (let count = moves.length; count > 0 && !found; count--) found = attempt(count, plain.level);
+  const { grid, sitLimitRelaxed } = found ?? plain;
   return { schedule, blocks, blockSeconds, blocksPerQuarter, players: players.slice(), start: first, grid, sitLimitRelaxed };
 }
 
