@@ -13,8 +13,8 @@ tokens in `public/styles.css` were run through the WCAG contrast formula. Screen
 [`2026-ui-review/`](2026-ui-review/), saved at half the device resolution to keep them small.
 
 **Short answer.** Two P1s, both on the live screen: the names of the players due off vanish as soon as the In the
-zone and Extra minuten buttons are drawn next to them, and once the coach leaves a running match there is no way back
-to it. Fix those two, plus the double tap on Wissel, before the phase 2 exit. The rest is polish.
+zone and Extra minuten buttons are drawn next to them, and once the coach leaves a running match the app offers no
+way back to it, while "Start" on the setup screen drops it without asking. Fix those two, plus the double tap on Wissel, before the phase 2 exit. The rest is polish.
 
 ## Screens walked
 
@@ -57,14 +57,15 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
   (`.names.off li { flex-wrap: wrap }`, `.names.off .player { flex-basis: 100% }`). Do the same for the "Erin" rows
   while "Op de bank" is shown. P2-4 below removes one of the two chips, which also helps.
 
-### P1-2 · No way back to a running match, and Start drops it without asking
+### P1-2 · No way back to a running match inside the app, and Start drops it without asking
 
 - **Element:** the tabs `.tabs a[data-view="match"]` and `[data-view="spelers"]` on the live screen, `defaultView()` in
   `public/js/app.js`, and the "Start" button on the Match screen.
 - **Seen:** at block 3, one tap on the "Match" tab opens the setup screen
   ([screenshot](2026-ui-review/24-match-tab-tijdens-match-light.png)). It has no link to `#start`, although the match
   is still saved. Opening the app at `/` (as the home-screen icon does: `start_url` is `/`) also lands on the setup
-  screen, not on the match. Only typing `#start` by hand brought the match back, at block 3. On the setup screen,
+  screen, not on the match. In the browser tab, Back (the existing hashchange handler) or typing `#start` by hand
+  brings the match back at block 3; nothing inside the app does. On the setup screen,
   "Start" runs `store.remove('match')` with no question asked, so a coach who taps it to get back loses the match.
 - **Why it matters:** decision #18 ("never lose a match") holds for a reload of `#start`, but not for the two ways a
   coach really leaves the screen: a stray tap on the tab bar, and the phone dropping the app while the coach checks
@@ -78,8 +79,10 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
 ### P2-1 · Live: a double tap on Wissel plays two wissels
 
 - **Element:** `button.wissel` ("Wissel", and "Einde match" on the last block).
-- **Seen:** two touches 120 ms apart on Wissel took the match from block 1 to **block 3**. The button is redrawn in
-  the same spot at once and takes the second tap.
+- **Seen:** two scripted touches 120 ms apart on Wissel took the match from block 1 to **block 3**. The button is
+  redrawn in the same spot at once and takes the second tap. In code, each click applies, saves and redraws with no
+  guard (`act` in `public/js/live.js`). No screenshot can show the two-tap sequence; for the button and its spot, see
+  [block 1](2026-ui-review/10-live-blok1-light.png) (context, before the taps).
 - **Why it matters:** a coach in a hurry taps twice, or taps again because nothing seemed to happen (see P2-2). One
   block is then skipped: the wrong players come on, and the minutes go wrong until the coach notices and taps
   Ongedaan maken. Ongedaan maken undoes one step, so a double tap on the second-to-last wissel also ends the match.
@@ -88,15 +91,17 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
 - **Fix (S):** ignore a second Wissel tap within about 600 ms of the first (a timestamp in `liveScreen`), and set
   `touch-action: manipulation` on buttons.
 
-### P2-2 · Live: no sign that a tap worked, and Ongedaan maken does not say what it undoes
+### P2-2 · Live: no explicit confirmation that a tap worked, and Ongedaan maken does not say what it undoes
 
 - **Element:** `.message` on the live screen (filled only on an error), `button.undo` ("Ongedaan maken"), and buttons
   in general (no `:active` style).
-- **Seen:** after Wissel, Uit or Terug the screen is just redrawn. The only change is the block number and the lists
-  ([before](2026-ui-review/10-live-blok1-light.png), [after](2026-ui-review/14-live-na-extra-light.png)). Buttons
+- **Seen:** after Wissel, Uit or Terug the screen is redrawn: the block heading, the overview totals and the lists
+  change ([before](2026-ui-review/10-live-blok1-light.png), [after](2026-ui-review/14-live-na-extra-light.png)), so
+  the new state is visible. But no message says what was done (a successful action clears `.message`), and buttons
   show no pressed state.
-- **Why it matters:** in a loud hall, with eyes going between the court and the phone, the coach cannot tell whether
-  the tap took. That is what leads to the double tap of P2-1. Ongedaan maken is a blind undo: the coach cannot see
+- **Why it matters:** in a loud hall, with eyes going between the court and the phone, the coach has to compare the
+  lists to tell whether the tap took. ⚠ That this invites the double tap of P2-1 is our reading; it was not tested
+  with coaches. Ongedaan maken is a blind undo: the coach cannot see
   whether it will undo the wissel or the Uit they made just before.
 - **Fix (S):** after each action, write one line in `.message`, for example "Wissel gedaan: blok 3, #11 Hanne en #13
   Elise erin." or "#4 Lotte uit, #12 Sara erin." (⚠ copy to confirm), and give buttons an `:active` style.
@@ -214,24 +219,36 @@ or invites a mistaken tap that can be undone. **P3** is polish. Sizes: **S** is 
 ### P3-9 · Spelers: the first-name field allows autocorrect
 
 - **Element:** `input[name="name"]` (`autocapitalize="words"`, no `autocorrect` or `spellcheck`).
-- **Seen:** in code. ⚠ iOS may "correct" names such as Fien or Lien to dictionary words; not tried on a device.
+- **Seen:** in code (`public/js/setup.js`, the Voornaam input). The field is the one in
+  [Spelers, empty](2026-ui-review/01-spelers-leeg-light.png) (context: a screenshot cannot show autocorrect).
+  ⚠ iOS may "correct" names such as Fien or Lien to dictionary words; not tried on a device.
 - **Why it matters:** a corrected name has to be fixed by hand through Wijzig.
 - **Fix (S):** add `autocorrect="off"` and `spellcheck="false"` to the first-name input.
 
 ### P3-10 · Small copy and markup points
 
-- **Element:** see each point.
-- **Seen and why:** the "In the zone" buttons and notes are English inside `lang="nl"`, so VoiceOver reads them with
-  Dutch sounds (mark them `lang="en"`). The setup message 'Probeer "Ander plan".' uses straight quotes (Dutch: „Ander
-  plan”). "Dat kan nu niet." gives no next step. `<meta name="theme-color">` is the light accent `#1f5f8b` in dark
-  mode as well, so ⚠ the status bar may show a blue band over the dark page.
+- **Element and seen, per point:**
+  - `button.chip` and `.zone-note` on the live screen ([zone](2026-ui-review/12-live-zone-light.png)): "In the zone"
+    is English inside `lang="nl"`, so ⚠ VoiceOver may read it with Dutch sounds (not tested with VoiceOver). Mark it
+    `lang="en"`.
+  - `.message` on the Match screen, text 'Er kon geen plan gemaakt worden. Probeer "Ander plan".' (`setup.js`):
+    straight quotes, where Dutch uses „Ander plan”. Code only: it shows only when no plan can be made, which the walk
+    did not reach; the place is the message line above the plan in [plan](2026-ui-review/05-match-plan-light.png).
+  - `.message` on the live screen, text "Dat kan nu niet." (`act` in `live.js`, on a refused action): no next step.
+    Code only: the walk did not trigger a refused action; the place is the line above the buttons in
+    [block 1](2026-ui-review/10-live-blok1-light.png).
+  - `<meta name="theme-color">` in `public/index.html`: the light accent `#1f5f8b` in dark mode as well, so ⚠ the
+    status bar may show a blue band over the dark page ([dark page](2026-ui-review/10-live-blok1-dark.png); headless
+    Chrome draws no status bar, so not seen).
+- **Why it matters:** each is small, but together they make the app read less finished, and a refusal with no next
+  step leaves the coach guessing.
 - **Fix (S):** one ticket for the four: `lang="en"` on the term, curly quotes, a next step in the refusal (⚠ copy to
   confirm), and a second `theme-color` meta with `media="(prefers-color-scheme: dark)"`.
 
 ## Where each check came from
 
 **Walking the flows in the browser** (screenshots, measured boxes, scripted taps): P1-1 (name width measured 0 px),
-P1-2 (tab tap, start at `/`, resume only via `#start`), P2-1 (two taps 120 ms apart → block 3), P2-2, P2-3, P2-4
+P1-2 (tab tap, start at `/`, no in-app way back; browser Back or `#start` resumes), P2-1 (two taps 120 ms apart → block 3), P2-2, P2-3, P2-4
 (chip boxes and gaps), P3-1, P3-2, P3-3, P3-4, P3-5, P3-6, P3-7, P3-8. Contrast numbers come from the WCAG formula
 applied to the tokens in `styles.css`, with opacity 0.4 blended in for disabled buttons.
 
