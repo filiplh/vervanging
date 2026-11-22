@@ -129,7 +129,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
   const byId = new Map(setup.players.map((p) => [p.id, p]));
   let state = restoreMatch(store, setup);
   let message = repairHistory(store, setup, state) ? '' : SAVE_FAILED;
-  let zone = null; // in the zone, chosen but not yet applied: { keep, bench }
+  let zone = null; // in the zone or extra minuten, chosen but not yet applied: { keep, bench, extra }
 
   // Applies one engine action, saves the new state and redraws; an action the engine refuses shows its reason.
   function act(step) {
@@ -145,8 +145,8 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
     render();
   }
 
-  function toggleZone(keep) {
-    zone = zone && zone.keep === keep ? null : { keep, bench: proposedBench(state) };
+  function toggleZone(keep, extra = false) {
+    zone = zone && zone.keep === keep && zone.extra === extra ? null : { keep, bench: proposedBench(state), extra };
     render();
   }
 
@@ -207,10 +207,16 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
         el('h2', { id: 'h-next' }, 'Bij de volgende wissel'),
         el('div', { className: 'change' },
           el('div', {}, el('h3', {}, 'Eruit'), change.off.length
-            ? nameList(change.off, 'off', (id) => !isOut(id) && el('button', {
-              type: 'button', className: 'chip', 'aria-pressed': zone && zone.keep === id ? 'true' : 'false',
-              onclick: () => toggleZone(id),
-            }, 'In the zone'))
+            ? nameList(change.off, 'off', (id) => !isOut(id) && [
+              el('button', {
+                type: 'button', className: 'chip', 'aria-pressed': zone && zone.keep === id && !zone.extra ? 'true' : 'false',
+                onclick: () => toggleZone(id, false),
+              }, 'In the zone'),
+              el('button', {
+                type: 'button', className: 'chip extra', 'aria-pressed': zone && zone.keep === id && zone.extra ? 'true' : 'false',
+                onclick: () => toggleZone(id, true),
+              }, 'Extra minuten'),
+            ])
             : el('p', { className: 'note' }, 'Niemand')),
           el('div', {}, el('h3', {}, 'Erin'), change.on.length
             ? nameList(change.on, 'on', (id) => zone && el('button', {
@@ -218,13 +224,16 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
               onclick: () => chooseBench(id),
             }, 'Op de bank'))
             : el('p', { className: 'note' }, 'Niemand'))),
-        zone && el('p', { className: 'zone-note' },
-          name(zone.keep), ' blijft in the zone op het veld, ', name(zone.bench), ' blijft op de bank.')),
+        zone && (zone.extra
+          ? el('p', { className: 'zone-note' },
+            name(zone.keep), ' speelt een extra blok (extra minuten, niet teruggegeven), ', name(zone.bench), ' blijft op de bank.')
+          : el('p', { className: 'zone-note' },
+            name(zone.keep), ' blijft in the zone op het veld, ', name(zone.bench), ' blijft op de bank.'))),
       status(),
       el('div', { className: 'live-actions' },
         el('button', {
           type: 'button', className: 'primary wissel',
-          onclick: () => act(() => wissel(state, zone ? { keep: zone.keep, bench: zone.bench } : {})),
+          onclick: () => act(() => wissel(state, zone ? { keep: zone.keep, bench: zone.bench, extra: zone.extra } : {})),
         }, subTime(state).kind === 'endMatch' ? 'Einde match' : 'Wissel'),
         undoButton()),
       minutesTable('Minuten tot nu'),

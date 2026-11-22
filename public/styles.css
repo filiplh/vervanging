@@ -214,3 +214,6 @@ button.chip[aria-pressed="true"] { background: var(--selected); border-color: va
 .minutes td.act { text-align: right; width: 1%; white-space: nowrap; }
 .minutes tr.out th, .minutes tr.out td.min { color: var(--muted); text-decoration: line-through; }
 .tag { font-size: 0.85rem; color: var(--danger); font-weight: 600; }
+
+/* Extra minuten (#31) */
+button.chip.extra[aria-pressed="true"] { border-color: var(--on); }

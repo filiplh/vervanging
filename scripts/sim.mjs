@@ -8,12 +8,13 @@
 //   node scripts/sim.mjs match --players <n> --start <a,b,c,d,e> --schedule <equal|five> [--seed <n>] [--swap <a,b>]
 //                              [--actions <action,...>] [--json]
 //     Actions are comma-separated: wissel, undo ("wissel*11" repeats one 11 times), wissel:keep=P (in the zone:
-//     P stays on, the proposed incoming player stays off), wissel:keep=P:bench=Q (Q stays off), uit=P (P leaves at
+//     P stays on, the proposed incoming player stays off), wissel:keep=P:bench=Q (Q stays off), wissel:keep=P:extra
+//     and wissel:keep=P:extra:bench=Q (Extra minuten: P keeps the block, nothing is given back), uit=P (P leaves at
 //     once; on court, a replacement comes on, the block still counts for P) and terug=P (from the next block on).
 //     Prints the final match state; onCourt shows the current block as it is on court.
 // Prints one JSON object on stdout. Invalid input: exit status 2, one line on stderr, nothing on stdout.
 import { makePlan, swapPlayers, planStats, PlanError } from '../public/js/planner.js';
-import { startMatch, applyAction, onCourt, minutesSoFar, MatchError } from '../public/js/match.js';
+import { startMatch, applyAction, onCourt, minutesSoFar, extraSeconds, MatchError } from '../public/js/match.js';
 import { normaliseHistory, extraPriority } from '../public/js/history.js';
 import { readFileSync } from 'node:fs';
 
@@ -91,9 +92,9 @@ function parseActions(text = '') {
       for (let i = 0; i < count; i++) actions.push({ type: m[1] });
       continue;
     }
-    m = /^wissel:keep=(\d+)(?::bench=(\d+))?$/.exec(item);
+    m = /^wissel:keep=(\d+)(:extra)?(?::bench=(\d+))?$/.exec(item);
     if (m) {
-      actions.push({ type: 'wissel', keep: Number(m[1]), bench: m[2] === undefined ? null : Number(m[2]) });
+      actions.push({ type: 'wissel', keep: Number(m[1]), extra: m[2] !== undefined, bench: m[3] === undefined ? null : Number(m[3]) });
       continue;
     }
     m = /^(uit|terug)=(\d+)$/.exec(item);
@@ -101,7 +102,7 @@ function parseActions(text = '') {
       actions.push({ type: m[1], player: Number(m[2]) });
       continue;
     }
-    throw new UsageError(`unknown action "${item}": use wissel, undo (optionally with *<count>), wissel:keep=P[:bench=Q], uit=P or terug=P`);
+    throw new UsageError(`unknown action "${item}": use wissel, undo (optionally with *<count>), wissel:keep=P[:extra][:bench=Q], uit=P or terug=P`);
   }
   return actions;
 }
@@ -123,6 +124,7 @@ function runMatch(opts) {
     ended: state.ended,
     onCourt: onCourt(state),
     minutes: minutesSoFar(state),
+    extraSeconds: extraSeconds(state),
   };
 }
 

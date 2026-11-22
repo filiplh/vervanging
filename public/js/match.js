@@ -9,6 +9,7 @@
 
 import {
   replanRemaining, repairRemaining, evenTargets, blockCounts, maxSubsFrom, MAX_SUBS, ON_COURT, PlanError,
+  seededRandom,
 } from './planner.js';
 
 export const MATCH_VERSION = 2;
@@ -20,7 +21,7 @@ const copyGrid = (grid) => grid.map((court) => court.slice());
 const copyPairs = (pairs) => pairs.map(([a, b]) => [a, b]);
 const snapshot = (state) => ({
   block: state.block, ended: state.ended, grid: copyGrid(state.grid), out: state.out.slice(),
-  replaced: copyPairs(state.replaced),
+  replaced: copyPairs(state.replaced), extra: (state.extra ?? []).slice(),
 });
 
 // The current block as it is on court: a player marked uit there has left at once and a replacement came on
@@ -53,6 +54,7 @@ export function startMatch(plan, setupSavedAt = null) {
     grid: copyGrid(grid),
     out: [],
     replaced: [],
+    extra: [], // one entry per block a player got through Extra minuten (decision #25)
     block: 1,
     ended: false,
     previous: null,
@@ -91,7 +93,7 @@ export function proposedBench(state) {
 // default) stays off. The benched player gets back the zone player's next planned block where the benched player is
 // not on yet. When that would break the sub cap, the blocks after the next one are replanned to the original totals;
 // with no later block, the difference stays.
-function keepOn(state, keep, bench) {
+function keepOn(state, keep, bench, extra = false) {
   const change = nextChange(state);
   if (!change) throw new MatchError('no change left: this is the last block');
   if (state.out.includes(keep)) throw new MatchError(`player ${keep} is out and cannot stay on`);
@@ -104,6 +106,7 @@ function keepOn(state, keep, bench) {
   kept[next] = sorted(kept[next].filter((p) => p !== q).concat(keep));
   const fixed = next + 1; // blocks 1..next+1 are now fixed
   if (fixed >= state.blocks) return kept; // the last change: the difference stays
+  if (extra) return extraOn(state, kept, keep, totals, fixed);
 
   for (let k = fixed; k < state.blocks; k++) {
     if (!kept[k].includes(keep) || kept[k].includes(q)) continue;
@@ -128,17 +131,94 @@ function keepOn(state, keep, bench) {
     ?? repairRemaining({ grid: kept, players: state.players, available: available(state), fromBlock: fixed });
 }
 
+// Extra minuten (decision #25): the kept player plays the block on top and gives nothing back. Their match total
+// becomes the planned total plus one block (never more); the places left after the next block go to the other
+// available players, fewest blocks first, under the sub rule. Ties are tried in several orders, then with the others
+// up to two blocks apart; only when no plan fits does the last-resort repair run, after which the kept player is
+// swapped out of later blocks until their total is exactly planned plus one (where the sub rule allows it).
+function extraOn(state, kept, keep, totals, fixed) {
+  const avail = available(state);
+  const prefix = blockCounts(kept.slice(0, fixed), state.players);
+  const left = state.blocks - fixed;
+  const target = Math.min(totals[keep] + 1, prefix[keep] + left);
+  const others = avail.filter((p) => p !== keep);
+  const shareOut = (order, spread) => {
+    const targets = Object.fromEntries(state.players.map((p) => [p, prefix[p]]));
+    targets[keep] = target;
+    let places = ON_COURT * left - (target - prefix[keep]);
+    while (places > 0) {
+      let best = null;
+      for (const p of order) {
+        if (targets[p] - prefix[p] >= left) continue;
+        if (best === null || targets[p] < targets[best] - (spread - 1)) best = p;
+      }
+      if (best === null) return null;
+      targets[best] += 1;
+      places -= 1;
+    }
+    return targets;
+  };
+  const random = seededRandom(state.block * 31 + keep);
+  const orders = [others.slice().sort((a, b) => a - b)];
+  for (let i = 0; i < 12; i++) orders.push(others.slice().sort(() => random() - 0.5));
+  for (const spread of [1, 2]) {
+    for (const order of orders) {
+      const targets = shareOut(order, spread);
+      if (!targets) continue;
+      try {
+        return replanRemaining({
+          grid: kept, players: state.players, available: avail, fromBlock: fixed, targets,
+          blockSeconds: state.blockSeconds, seed: state.block,
+        });
+      } catch (error) {
+        if (!(error instanceof PlanError)) throw error;
+      }
+    }
+  }
+  const repaired = repairRemaining({ grid: kept, players: state.players, available: avail, fromBlock: fixed });
+  return holdTotal(repaired, keep, target, fixed, avail, state);
+}
+
+// Swaps `keep` out of later blocks (latest first) for an available bench player with the fewest blocks, while their
+// total is above `target` and the sub rule still holds, so a reward is never more than the one block recorded.
+function holdTotal(grid, keep, target, fixed, avail, state) {
+  let out = copyGrid(grid);
+  for (let k = out.length - 1; k >= fixed && blockCounts(out, state.players)[keep] > target; k--) {
+    if (!out[k].includes(keep)) continue;
+    const counts = blockCounts(out, state.players);
+    const bench = avail.filter((p) => p !== keep && !out[k].includes(p)).sort((a, b) => counts[a] - counts[b] || a - b);
+    for (const p of bench) {
+      const swapped = copyGrid(out);
+      swapped[k] = sorted(swapped[k].filter((q) => q !== keep).concat(p));
+      if (capHolds(actualGrid(swapped, state.block, state.replaced), state.block - 1, state.out)) {
+        out = swapped;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 // "wissel": on to the next block; at the last block it ends the match. After the end it changes nothing.
-// `keep` (and optionally `bench`) apply in the zone at this change.
-export function wissel(state, { keep = null, bench = null } = {}) {
+// `keep` (and optionally `bench`) apply in the zone at this change; with `extra`, as Extra minuten (decision #25).
+export function wissel(state, { keep = null, bench = null, extra = false } = {}) {
   if (state.ended) return state;
   const previous = snapshot(state);
   if (state.block >= state.blocks) {
     if (keep != null) throw new MatchError('no change left: this is the last block');
     return { ...state, ended: true, previous }; // the last block's replacements stay: they finished the match
   }
-  const grid = keep == null ? state.grid : keepOn(state, keep, bench);
-  return { ...state, grid, block: state.block + 1, replaced: [], previous };
+  if (extra && keep == null) throw new MatchError('extra minuten needs a player to keep on');
+  const grid = keep == null ? state.grid : keepOn(state, keep, bench, extra);
+  const extraList = (state.extra ?? []).concat(extra ? [keep] : []);
+  return { ...state, grid, block: state.block + 1, replaced: [], extra: extraList, previous };
+}
+
+// Seconds each player got through Extra minuten in this match.
+export function extraSeconds(state) {
+  const seconds = Object.fromEntries(state.players.map((p) => [p, 0]));
+  for (const p of state.extra ?? []) seconds[p] += state.blockSeconds;
+  return seconds;
 }
 
 // Re-spreads the blocks after the current one over the players who are not out (uit and terug, decision #11).
@@ -231,8 +311,11 @@ export function terug(state, player) {
 // "undo": back to the state before the last action, one step only. With nothing to undo it changes nothing.
 export function undo(state) {
   if (!state.previous) return state;
-  const { block, ended, grid, out, replaced } = state.previous;
-  return { ...state, block, ended, grid: copyGrid(grid), out: out.slice(), replaced: copyPairs(replaced), previous: null };
+  const { block, ended, grid, out, replaced, extra } = state.previous;
+  return {
+    ...state, block, ended, grid: copyGrid(grid), out: out.slice(), replaced: copyPairs(replaced),
+    extra: (extra ?? []).slice(), previous: null,
+  };
 }
 
 export function canUndo(state) {
@@ -243,7 +326,7 @@ export function canUndo(state) {
 // { type: 'terug', player }; the strings 'wissel' and 'undo' also work.
 export function applyAction(state, action) {
   const a = typeof action === 'string' ? { type: action } : action;
-  if (a.type === 'wissel') return wissel(state, { keep: a.keep ?? null, bench: a.bench ?? null });
+  if (a.type === 'wissel') return wissel(state, { keep: a.keep ?? null, bench: a.bench ?? null, extra: a.extra === true });
   if (a.type === 'undo') return undo(state);
   if (a.type === 'uit') return uit(state, a.player);
   if (a.type === 'terug') return terug(state, a.player);
@@ -327,6 +410,13 @@ function validReplaced(p, fresh) {
   return true;
 }
 
+// The Extra minuten list: absent (a state saved before #25), or one player of this match per extra block, at most
+// one per change.
+function validExtra(extra, fresh) {
+  if (extra === undefined) return true;
+  return Array.isArray(extra) && extra.length < fresh.blocks && extra.every((p) => fresh.players.includes(p));
+}
+
 const samePrefix = (a, b, blocks) => JSON.stringify(a.slice(0, blocks)) === JSON.stringify(b.slice(0, blocks));
 
 // Version 1 states (before in the zone, uit and terug) followed the plan's grid and had no one out.
@@ -355,7 +445,7 @@ export function normaliseMatchState(stored, plan, setupSavedAt = null) {
   if (JSON.stringify(raw.base) !== JSON.stringify(fresh.base)) return null;
   const point = (p) => p && typeof p === 'object' && Number.isInteger(p.block) && p.block >= 1 && p.block <= fresh.blocks
     && typeof p.ended === 'boolean' && (!p.ended || p.block === fresh.blocks)
-    && validGrid(p.grid, fresh) && validOut(p.out, fresh) && validReplaced(p, fresh);
+    && validGrid(p.grid, fresh) && validOut(p.out, fresh) && validReplaced(p, fresh) && validExtra(p.extra, fresh);
   if (!point(raw)) return null;
   // The first block is the coach's starting five and never changes.
   if (JSON.stringify(sorted(raw.grid[0])) !== JSON.stringify(sorted(fresh.grid[0]))) return null;
@@ -377,10 +467,17 @@ export function normaliseMatchState(stored, plan, setupSavedAt = null) {
     const allowed = raw.ended ? [fresh.blocks] : [raw.block - 1, raw.block];
     if (!allowed.includes(prev.block)) return null;
     if (!samePrefix(prev.grid, raw.grid, prev.block)) return null;
+    // Extra minuten only grow by one entry at a wissel; other actions leave the list as it was.
+    const now = raw.extra ?? [];
+    const before = prev.extra ?? [];
+    const grew = now.length === before.length + 1 && prev.block === raw.block - 1;
+    if (JSON.stringify(now.slice(0, before.length)) !== JSON.stringify(before) || (now.length !== before.length && !grew)) {
+      return null;
+    }
   }
   const previous = raw.previous == null ? null : snapshot(raw.previous);
   return {
-    ...fresh, grid: copyGrid(raw.grid), out: raw.out.slice(), replaced: copyPairs(raw.replaced), block: raw.block,
-    ended: raw.ended, previous,
+    ...fresh, grid: copyGrid(raw.grid), out: raw.out.slice(), replaced: copyPairs(raw.replaced),
+    extra: (raw.extra ?? []).slice(), block: raw.block, ended: raw.ended, previous,
   };
 }
