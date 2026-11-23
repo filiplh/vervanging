@@ -844,6 +844,14 @@ test('confirmation: Wissel writes the new block and who came on, in jersey order
   assert.equal(messageText(view), `Wissel gedaan: blok 3. Erin: ${cameOnIds(s1, s2).map(playerLabel).join(', ')}.`);
 });
 
+test('confirmation: a Wissel that brings nobody on (exactly five players) leaves out the Erin part', () => {
+  const { view } = open(setupOf({ n: 5 }));
+  wisselButton(view).fire('click');
+  assert.equal(messageText(view), 'Wissel gedaan: blok 2.');
+  wisselButton(view).fire('click');
+  assert.equal(messageText(view), 'Wissel gedaan: blok 3.');
+});
+
 test('confirmation: Uit on court names the replacement; Uit of a bench player leaves out the erin part', () => {
   const { view, setup } = open();
   const s0 = startMatch(planOf(setup), setup.savedAt);
