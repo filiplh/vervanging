@@ -20,6 +20,8 @@ this file says how to build well here. Changing it is a human gate.
 | Role files | `.factory/roles/<role>.md` (one per role in `factory.yaml` › `roles`; none without roles) |
 | What the reviewer checks beyond the core protocol | `.factory/review-checklist.md` |
 | The project's own skills | `.claude/skills/<name>/` (`.agents/skills` points there) |
+| The native iPhone app (phase 3) | `ios/` |
+| Shared examples (the match rules' exact expected outputs, run by the web and the Swift tests) | `shared/examples/` |
 | Holdout scenarios (only the validator reads them) | `acceptance/` (optional: a person creates it when needed) |
 
 Core skills find the plan, the decisions, the spike write-ups and the grill files through this table, not through
@@ -44,6 +46,12 @@ Core skills find the plan, the decisions, the spike write-ups and the grill file
 - Tests: Node's built-in test runner (`node --test`), on Node 22, pinned in `.node-version` (CI and the deploy build
   read it).
 - Local serving: Python's `http.server` (`commands.serve`), so nothing is installed.
+- The native iPhone app (phase 3, ADR-003) lives in `ios/`: Swift and SwiftUI with the system's Liquid Glass, built
+  with Xcode 27.2, minimum iOS 27.0. The rules are a pure Swift package that imports only Foundation; the screens use
+  it and never compute rules themselves. No third-party Swift packages without a person's approval (see Dependencies).
+- The match rules exist twice while the web app lives: `public/js` and the Swift package. Both test suites run the
+  shared examples in `shared/examples/` and must give exactly the same output. During phase 3 the JS rules change only
+  for bug fixes, and each fix lands in Swift too, with an updated example (plan decision #36).
 
 The commands every agent uses are in `factory.yaml` › `commands` (`setup`, `verify`, `serve`, `checks`). Run them
 from the repo root of your worktree; never invent another way to run the tests.

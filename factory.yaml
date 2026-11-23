@@ -14,7 +14,7 @@ project:
   # name: defaults to the part of `repo` after the slash
   languages: [nl]  # BCP 47 tags of user-facing text; the first is the main language
 
-mode: solo              # solo (the default: one issue at a time, no lead) or team
+mode: team              # solo (one issue at a time, no lead) or team; team from phase 3 (plan decision #47)
 
 commands:
   # The one command every change must pass. Pass the worker cap on to the test runner, for example
@@ -32,10 +32,11 @@ commands:
 # work_kinds:                       # merged onto the core table; add the hard parts of this product
 #   <kind>: deep | standard | light
 
-# roles:                            # team mode needs at least one; each gets .factory/roles/<name>.md and agent:<name>
-#   <name>:
-#     owns: ["<glob>"]
-#     skills: [<project skill>]
+roles:                              # team mode needs at least one; each gets .factory/roles/<name>.md and agent:<name>
+  ios:                              # the native iPhone app (plan decisions #29, #47)
+    owns: ["ios/**"]
+  web:                              # the web app, the shared examples and the scripts that export them
+    owns: ["public/**", "shared/**", "scripts/**", "wrangler.jsonc"]
 
 # models: leave out; the core tables apply. Override single entries only with a reason.
 
