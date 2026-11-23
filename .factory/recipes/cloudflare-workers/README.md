@@ -182,7 +182,10 @@ there.
    [False holds and refusals](#false-holds-and-refusals). Holding changes nothing, opens or updates one
    `status:needs-human` issue with the reasons, the release notes and, for a migration or H7 hold, the checklist
    (rehearsed on real-shaped data, backup before), and ends green. Your approval names this commit's full SHA; the
-   run then links it on each held pull request and on the issue.
+   run then links it on the issue and on each held pull request. The release job notes it on the issue; a small job
+   of its own, `Release approval link`, comments it on the held pull requests, beside the build. The deploy waits
+   for that job: with held pull requests, nothing is deployed unless it passed, so a failed or cancelled comment
+   stops the release before anything changes.
 
    **The version.** The same run of the release checker ends with the version this release gets (the contract's
    rule 5): from the highest version ever recorded for the target, a breaking change raises the major, any `feat` the
@@ -286,8 +289,11 @@ live.
 
 - **Secrets never share a job with third-party code** (deploy contract, rule 6). The jobs that run the project's
   setup and build (`Preview build`, `Release build`) hold no secret and can only read the repo. `Release version`
-  holds no secret either and runs no project code: its token may write contents, to create the version's tag. The
-  test guard allows that one job only, exactly as reviewed. The jobs that hold
+  holds no secret either and runs no project code: its token may write contents, to create the version's tag.
+  `Release approval link` holds no secret, checks out nothing and runs one step through GitHub's API: its token may
+  write to pull requests, to comment the approval on each held one. That scope can also edit a pull request's
+  description, where H7 hold lines are read, so the `Release` job, which runs the pinned wrangler, keeps pull
+  requests read-only. The test guard allows those two jobs only, exactly as reviewed. The jobs that hold
   the secrets (`Preview`, `Release`, `Release deploy`, `Rollback`) run no project install, build or lifecycle
   script. They run only GitHub's own pinned actions (checkout, setup-node without a package cache,
   download-artifact), the recipe's scripts from the commit's checkout, the core's release checker from the live commit

@@ -19,6 +19,7 @@ expensive model, and rarely the highest effort.
 | Grill, plan, tickets | their own settings: their decisions are the most expensive to undo | `models.agents.grill`, `.plan`, `.tickets` |
 | Bug hunters | their own settings; the process and domain hunters run higher | `models.agents.hunter`, `.process_hunter`, `.domain_hunter` |
 | [Architecture review](../../.claude/agents/factory-architect.md) | its own setting | `models.agents.architecture_review` |
+| [Maintenance lane](../../.claude/skills/factory-maintain/SKILL.md) | its own setting: it scans and files, and every fix it files is built on its own tier | `models.agents.maintenance` |
 | Helper for search and lookups | the smallest model | `models.helpers.search` |
 | Helper for reading and summarising | a mid model at low effort, medium when needed | `models.helpers.read` |
 | Helper that makes a decision | its parent's model and effort, never a helper model | the parent |
@@ -34,6 +35,12 @@ The tier comes from the issue's `tier:*` label. The label comes from the issue's
 2. **Every ticket carries a tier.** Every issue gets exactly one `tier:deep`, `tier:standard` or `tier:light` label when
    it is created, follow-ups and bugs included. `factory claim` refuses an issue without one, and the runtime adapter
    refuses to start an agent without a model and effort.
+   **An `agent:human` issue too.** It gets the tier of the work kind of the change the person does or approves,
+   like any other ticket: the rule then holds with no exception, and when a person hands the issue to the agents (the
+   `agent:human` label goes), it is ready to claim with no relabel. Size differs: an `agent:human` ticket gets no
+   `size:*` label, because size measures agent work that must fit one context, while the tier names the model that
+   would build the change. `factory claim` still refuses an issue while it is `agent:human`. This rule is the one
+   place for it; factory-tickets points here.
 3. **Escalate, never degrade.** Move the issue one step up `models.escalation`, from its current build model, when:
    - a review says "needs rework" for lack of depth (a design flaw, missed edge cases, wrong domain reasoning), not for
      a slip any model makes;

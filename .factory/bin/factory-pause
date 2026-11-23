@@ -7,6 +7,7 @@
 #
 # Options:
 #   -R, --repo OWNER/NAME      the repository (default: the one gh finds from the current directory)
+#                              run outside a checkout, it needs --repo; without it a failed read says so
 #   --from FILE                status, agent-token mode only: judge this broker export instead of calling the broker
 #   -q, --quiet                status: print nothing, only the exit code
 #   -h, --help                 this text
@@ -98,6 +99,17 @@ judge() {
   [ "$(printf '%s\n' "$1" | grep -c .)" -eq 1 ] \
     || die "several open issues labelled $STATUS; there must be one. Nothing changed; a person keeps one"
   n=${1%% *} p=${1#* }
+}
+
+# in_checkout: true when the working folder or a folder above it holds .git, where git and gh look for the repository.
+# Asked only after a read failed, to say why: gh may still find the repository another way (GH_REPO).
+in_checkout() {
+  d=$(pwd -P) || return 1
+  while :; do
+    [ ! -e "$d/.git" ] && [ ! -L "$d/.git" ] || return 0
+    [ -n "$d" ] && [ "$d" != / ] || return 1
+    d=${d%/*}
+  done
 }
 
 # report: the status line and exit code for n and p.
@@ -192,10 +204,15 @@ with <N> the status issue, and then checks with factory-pause status"
       || die "--from $from is older than $FRESH_MINUTES minutes; read the status issue again"
     json=$(cat "$from") || die "cannot read $from; cannot tell"
   else
-    json=$("$fg" issue-list --label "$STATUS" --state open --limit 2) || die "could not read the status issue \
+    json=$("$fg" issue-list --label "$STATUS" --state open --limit 2) || {
+      in_checkout || die "could not read the status issue: $(pwd) is not inside a git checkout, and in \
+agent-token mode the broker reads only the checkout's own repository. Run factory-pause status inside the project's \
+checkout"
+      die "could not read the status issue \
 (factory-github failed). Inside the sandbox it refuses calls from scripts; run it yourself as a plain command:
   $bin/factory-github issue-list --label $STATUS --state open --limit 2 --out pause.json
 then: factory-pause status --from <the path it printed>"
+    }
   fi
   # A list of issues, each with a number and a list of labels; anything else is an error, not an empty answer.
   out=$(printf '%s\n' "$json" | jq -r --arg p "$PAUSED" '
@@ -217,7 +234,11 @@ ghr() { if [ -n "$repo" ]; then gh "$@" -R "$repo"; else gh "$@"; fi; }
 
 lookup() {
   out=$(ghr issue list --label "$STATUS" --state open --limit 2 --json number,labels \
-    --jq ".[] | \"\\(.number) \\(any(.labels[]; .name == \"$PAUSED\"))\"") || die "could not read the status issue (gh failed)"
+    --jq ".[] | \"\\(.number) \\(any(.labels[]; .name == \"$PAUSED\"))\"") || {
+    [ -n "$repo" ] || in_checkout || die "could not read the status issue: $(pwd) is not inside a git checkout, so gh \
+cannot tell which repository to read. Run factory-pause inside the project's checkout, or pass --repo OWNER/NAME"
+    die "could not read the status issue (gh failed)"
+  }
   judge "$out" gh
 }
 

@@ -1,6 +1,6 @@
 ---
 name: factory-update
-description: Moves this repo to a new factory core version and opens one PR, "chore: update factory <old> → <new>", with the diff. Compares .factory/core.lock (version, upstream, file hashes) with the new core from the factory source, lists locally edited core files first and stops until the person decides to keep, upstream or discard each one, then replaces the core with factory-install's own copy and lock logic, pins the new version in factory.yaml, and writes a PR body with the changed, added and removed core files, new factory.yaml keys with their defaults and any human-gate change. Never edits overlay files, never merges, and changes nothing when there is nothing new. Use when the user says "/factory-update", "update the factory", "pull the new core", "upgrade the factory to <version>", or when a factory release should reach this repo.
+description: Moves a repo to a new factory core version and opens one update PR with the diff. Compares .factory/core.lock with the new core, lists locally edited core files first and stops until the person decides to keep, upstream or discard each one, pins the new version in factory.yaml, and lists what changed in the PR body. Never edits overlay files and never merges. Use when the user says "/factory-update", "update the factory", "pull the new core" or "upgrade the factory", or when a factory release should reach this repo. For a first install use factory-init.
 ---
 
 # Update the factory core

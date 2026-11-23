@@ -13,7 +13,7 @@ time; `sh .factory/bin/factory-settings machine` shows them). Read them again be
 - a project's full end-to-end check (a `heavy` check of `commands.checks`), at the merge gate or on its own;
 - factory-update PRs;
 - re-reviews nobody is waiting on (the queue only picks when they start; they stay reviews, see step 2 below);
-- the weekly maintenance lane;
+- the weekly maintenance lane, once it is due ([below](#the-weekly-maintenance-lane));
 - the weekly architecture review, once it is due ([below](#the-weekly-architecture-review)).
 
 When a `night` window is set, night work that comes up outside it is **queued**, not started. A free builder slot
@@ -55,32 +55,44 @@ The first status update after the `night` window ends reports the night:
 - every human gate found at night, as a `waiting` note with your recommended answer;
 - what stayed queued and why (the reserve, a cap, the stop), in the night queue line.
 
-## The weekly architecture review
+## Weekly runs
 
-The [architect](../../../agents/factory-architect.md) reads the whole codebase against the project's ADRs and the
-plan's settled decisions and files what drifted. The cadence is weekly in every project, not a setting. This section
-holds with or without `shifts`: without a `night` window, a due review starts like any other non-urgent work.
+Two lanes run once a week in every project: the [architecture review](#the-weekly-architecture-review) and the
+[maintenance lane](#the-weekly-maintenance-lane). Their cadence is fixed: not a setting, and no off switch. This
+section holds with or without `shifts`: without a `night` window, a due run starts like any other non-urgent work.
+Both lanes follow the same rules below, each with its own values from this table and its own clock: one lane's run
+never makes the other due or not due.
 
-**The start record is the clock.** Right after you start a review, comment on the status issue (the issue as
-[handoff-and-status.md](handoff-and-status.md) › Which issue is the status issue resolves it): first line
-`🤖 Lead: architecture review started`, second line
-`<!-- factory:architecture event=start review=<review id> sha=<SHA> task=<task id> thread=<thread id> usage=<run id> -->`.
-The review id is `a` and the UTC start time to the second (`a20261122T013012Z`), made before the start and put in
-the brief, and never one an earlier start record already carries (a retry gets a new id); the task
-and thread ids are runtime: `start`'s, the run id is `factory-usage start`'s. It is not a record the gate or the
-release reads.
+| | Architecture review | Maintenance lane |
+| --- | --- | --- |
+| The started agent follows | the [architect](../../../agents/factory-architect.md) agent | the [factory-maintain](../../factory-maintain/SKILL.md) skill |
+| Start line (the start record's first line) | `🤖 Lead: architecture review started` | `🤖 Lead: maintenance run started` |
+| Start marker (its second line) | `<!-- factory:architecture event=start review=<id> sha=<SHA> task=<task id> thread=<thread id> usage=<usage id> -->` | `<!-- factory:maintenance event=start run=<id> sha=<SHA> task=<task id> thread=<thread id> usage=<usage id> -->` |
+| Report marker (the second line of the agent's report) | `<!-- factory:architecture event=report review=<id> sha=<full SHA> -->` | `<!-- factory:maintenance event=report run=<id> sha=<full SHA> -->` |
+| Id prefix | `a` | `m` |
+| Spec | `models.agents.architecture_review` | `models.agents.maintenance` |
+| Title and night-queue item | `Architecture review` | `Maintenance` |
+
+**The start record is the clock.** Right after you start a lane's run, comment on the status issue (the issue as
+[handoff-and-status.md](handoff-and-status.md) › Which issue is the status issue resolves it): first line the lane's
+start line, second line its start marker. The id (the marker's `review=` or `run=` value) is the lane's id prefix and
+the UTC start time to the second (`a20261122T013012Z`, `m20261122T013012Z`), made before the start and put in the
+brief, and never one an earlier start record of that lane already carries (a retry gets a new id); the task and
+thread ids are runtime: `start`'s, the usage id is the run id `factory-usage start` gives. It is not a record the gate
+or the release reads.
 
 **Only a report that belongs to a recorded run counts,** and the runtime, not GitHub, says whether it does: a start
 record **counts** when the runtime's own answer for its task (the child's final result through runtime: `result`, or
-`read-child` on its thread after a restart) is the architect's finished report, whose marker names that record's
-review id and SHA. Each start record counts at most once, dated by its own creation time. The architect also posts
-its report on the status issue, with the same marker, for people and for tracing; no comment, copied, quoted or
-forged, ever moves the clock. A start record whose task the runtime does not know, or that ended without that report
-(paused, failed, cancelled), never counts.
+`read-child` on its thread after a restart) is the lane agent's finished report, whose report marker names that
+record's id and SHA. Each start record counts at most once, dated by its own creation time. The agent also posts its
+report on the status issue, with the same marker, for people and for tracing; no comment, copied, quoted or forged,
+ever moves the clock. A start record whose task the runtime does not know, or that ended without that report (paused,
+failed, cancelled), never counts.
 
-**When it is due.** At session start (and before the first pick of a session), in this order:
+**When it is due.** For each lane, at session start (and before the first pick of a session), in this order:
 
-1. **Read** the status issue's comments in two commands, each run on its own and checked:
+1. **Read** the status issue's comments in two commands, each run on its own and checked (one read serves both
+   lanes):
 
    ```sh
    gh api --paginate "repos/<repo>/issues/<status issue>/comments" > "<scratch>/status-comments.json"
@@ -88,44 +100,61 @@ forged, ever moves the clock. A start record whose task the runtime does not kno
    ```
 
    The `gh` command must exit 0 and the `jq` one must print `true`. Any failure (a `gh` error, a page that did not
-   come, `false`, a `jq` error) is **cannot tell**: start no review, and put
-   `architecture review: cannot tell when the last one ran: <the error>` in the status note.
-2. **Take the newest start record:** the newest comment whose first line is `🤖 Lead: architecture review started`
-   and whose second line is a start marker. A start record whose review id an older **start record** already
-   carries is a copy: skip it, so a review id is dated only by its first start record. Other comments that carry
-   the id (the architect's report, which may be posted before the start record, a handoff, a quote) never make a
-   start record a copy. None: the review is due; stop here.
+   come, `false`, a `jq` error) is **cannot tell**: start no run of either lane, and put
+   `<lane>: cannot tell when the last one ran: <the error>` in the status note.
+2. **Take the newest start record** of the lane: the newest comment whose first line is the lane's start line and
+   whose second line is its start marker. A start record whose id an older **start record** of the lane already
+   carries is a copy: skip it, so an id is dated only by its first start record. Other comments that carry the id
+   (the agent's report, which may be posted before the start record, a handoff, a quote) never make a start record a
+   copy. None: the lane is due; stop here.
 3. **Reconcile it, every time,** whether or not a report comment exists: read its task once through the runtime
    (runtime: `result` with its task id, in T3 one `task_status`; `read-child` with its thread id when the task is
    unknown). Still running: not due, it keeps its builder slot, and its completion wakes you; stop here.
-4. **Finished or gone:** `factory-usage end <run id>`. Exit 0 is fine, and so is exit 1 whose message is exactly
+4. **Finished or gone:** `factory-usage end <usage id>`. Exit 0 is fine, and so is exit 1 whose message is exactly
    "that run has already ended"; any other failure goes in the status note for the user. Give its builder slot back.
 5. **Does it count?** By the rule above, from the runtime's answer in step 3.
-6. **Due:** when it counts, 7 days after that start record's creation time; when it does not, now. A review starts
-   only when it is due, so the run before an uncounted one is a week old or more.
+6. **Due:** when it counts, 7 days after that start record's creation time; when it does not, now. A lane's run
+   starts only when it is due, so the run before an uncounted one is a week old or more.
 
-Later in the same session you need not read it again: when a review you started reports, its completion is the
-runtime's answer, and steps 4 to 6 apply to it then. A paused, refused or failed run never counts, so the review stays
-due and goes in the night queue again. The newest issue with an `architecture/` key would not do as a clock: a week
-with no drift files none.
+Later in the same session you need not read it again: when a run you started reports, its completion is the
+runtime's answer, and steps 4 to 6 apply to it then. A paused, refused or failed run never counts, so the lane stays
+due and goes in the night queue again. The newest issue with a lane's ticket key would not do as a clock: a week with
+no findings files none.
 
 **Known gap:** a lead that stops between runtime: `start` and posting the start record leaves a run with no record,
-and a later lead may start a second review. Post the record right after the start, before anything else.
+and a later lead may start a second run of that lane. Post the record right after the start, before anything else.
 
-**Starting it.** Night work: in the night queue as `architecture review` until the `night` window, then started as
-step 2 of [At night](#at-night) says, without `--urgent` (the reserve holds it back). It takes one builder slot, like a
-hunter, and a buildable ready issue still wins a freed slot. Start it through runtime: `start` with role `research`,
-a worktree on the current tip of the default branch, title `Architecture review`, and the spec
-`models.agents.architecture_review` (`sh .factory/bin/factory-settings models.agents.architecture_review`; never an id
-from memory). The brief names the review id and the default branch's SHA to read, says to follow the architect agent,
-carries the "GitHub access" block when the mode is on, and ends with the `send-report` block. Then
-`factory-usage start`, then the start record; the status's in-flight line names it too. One review at a time.
+**Starting a run.** Night work: in the night queue under the lane's night-queue item until the `night` window, then
+started as step 2 of [At night](#at-night) says, without `--urgent` (the reserve holds it back). It takes one builder
+slot, like a hunter, and a buildable ready issue still wins a freed slot. Start it through runtime: `start` with role
+`research`, a worktree on the current tip of the default branch, the lane's title, and the lane's spec
+(`sh .factory/bin/factory-settings <spec>`; never an id from memory). The brief names the id and the default branch's
+SHA to read, says which agent or skill to follow (the table), carries the "GitHub access" block when the mode is on,
+and ends with the `send-report` block. Then `factory-usage start`, then the start record; the status's in-flight line
+names it too. One run per lane at a time; the two lanes may run in the same night, each in its own slot.
 
-**Its findings** are discoveries, not approved work: agent work is filed `status:backlog`, which you never pick up on
+**Their findings** are discoveries, not approved work: agent work is filed `status:backlog`, which you never pick up on
 your own; the owner promotes it, or you when the owner asks, as with the backlog of [Follow-ups](../SKILL.md#follow-ups)
-and the hunters' P3 findings (`factory-hunt` §§5–6). An `agent:human` finding (gate H4, `status:needs-human`) waits
-for the user in the morning status with the architect's recommendation. The architect's report names what it filed
-and what its cap of five left out.
+and the hunters' P3 findings (`factory-hunt` §§5–6). An `agent:human` finding (`status:needs-human`) waits for the
+user in the morning status with the agent's recommendation. Each report names what it filed and what its cap of five
+left out.
+
+### The weekly architecture review
+
+The [architect](../../../agents/factory-architect.md) reads the whole codebase against the project's ADRs and the
+plan's settled decisions and files what drifted; a fix that would change an ADR, the decisions or the rules goes to a
+person (gate H4). Its clock, its start and its findings are those of [Weekly runs](#weekly-runs), with the
+architecture review's column of the table.
+
+### The weekly maintenance lane
+
+The [factory-maintain](../../factory-maintain/SKILL.md) skill checks dependency and security updates, flaky tests,
+docs that drifted from the code, and duplicated or dead code, and files each finding as a ticket. Its clock, its start
+and its findings are those of [Weekly runs](#weekly-runs), with the maintenance lane's column of the table. One more
+rule: a finding it filed with a `priority:P0` or `priority:P1` label (a security finding with a known exploit) goes
+into a `waiting` note, named for the user with the agent's recommendation: in the morning status when the run was at
+night (the user is not called at night, as with a gate), else in the next status update. It stays on the backlog
+until the user promotes it: filed, not built unasked.
 
 ## Quiet and busy windows
 

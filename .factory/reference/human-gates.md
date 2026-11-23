@@ -58,3 +58,17 @@ Every other unresolved gate, and an H7 whose merge is the release, is **merge-bl
   and adds the handoff line under "Needs human" (see `factory-reviewer`).
 - **Whoever runs the board** (the lead, or the person in solo mode) sets `status:needs-human` on the issue and asks
   the user in one short message. Nothing on that issue merges until the approval is linked.
+
+## Commands a person pastes
+
+When a gate, an approval or a setup step hands the user commands to paste into their own terminal, write the block so
+it runs the same in any shell. In a real gate test, an interactive zsh broke a pasted block on each point below:
+`#` comments became errors, a command held in a variable was not split into words, a prompt swallowed the rest of
+the block, a placeholder line was skipped and a pager ate the next pasted character.
+
+- No `#` comments inside the block; explain in the text around it.
+- A block that relies on word splitting starts with a line `bash`, so the rest runs in bash.
+- A command that may prompt or open a pager goes last, on its own, or runs without the pager (`git --no-pager`,
+  `GH_PAGER=cat`).
+- Every value is filled in; no placeholder is left for the person to edit.
+- Ask the person to remove tokens, account ids and email addresses from any output before sharing it.

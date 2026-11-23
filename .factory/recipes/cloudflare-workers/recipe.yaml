@@ -103,6 +103,7 @@ ci_jobs:
   - Preview build (__FACTORY_TARGET__)
   - Preview (__FACTORY_TARGET__)
   - Release (__FACTORY_TARGET__)
+  - Release approval link (__FACTORY_TARGET__)
   - Release build (__FACTORY_TARGET__)
   - Release deploy (__FACTORY_TARGET__)
   - Release version (__FACTORY_TARGET__)

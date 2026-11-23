@@ -15,14 +15,16 @@ this page says how factory-init supplies them.
 | `UPSTREAM` | `owner/name` of the factory repo the core comes from (SKILL.md, step 1.2) | `.factory/core.lock` › `upstream:` | the existing lock's `upstream:`; required on a fresh install |
 | `LANGUAGES` | BCP 47 tags of user-facing text, comma-separated, the main language first (`xx, xx-YY`) | `project.languages`; `AGENTS.md` writes them as a list of tags | required |
 | `MODE` | `solo` or `team` | `mode` | `solo` |
-| `SETUP` | the setup command, one line | `commands.setup`, and `SETUP` in the CI workflows | the `setup:` line is left out of `factory.yaml`; CI's Setup step skips |
-| `VERIFY` | the verify command, one line | `commands.verify`, and the CI `verify` job | required |
+| `SETUP` | the setup command, one line | `commands.setup`, and `SETUP` in the CI workflows | the `setup:` line is left out of `factory.yaml`; CI's Setup step skips (also the case for a repo with no stack yet) |
+| `VERIFY` | the verify command, one line; for a repo with no stack yet, exactly the placeholder `sh .factory/bin/factory-install no-stack-verify --target .` ([questions.md](questions.md#a-repo-with-no-stack-yet)) | `commands.verify`, and the CI `verify` job | required |
 | `PROJECT_NAME` | the short name | `AGENTS.md`'s title | the part of `REPO` after the slash |
-| `CODE_LANGUAGE` | the language of code, comments, commits and PR text, as words | `AGENTS.md` › Language | required |
+| `CODE_LANGUAGE` | the language of code, comments, commits and PR text: the language's English name, one or two words, capitalised, as it ends the sentence "… PR text: <name>." (`English`, `Brazilian Portuguese`); never a sentence or a BCP 47 tag | `AGENTS.md` › Language | required |
 | `UNCONFIRMED_MARKER` | the marker for unverified claims, such as `⚠` | `AGENTS.md` › Unconfirmed claims | required |
 | `PLAN_PATH`, `DECISIONS_PATH`, `SPIKES_PATH` | a repo path each; written as inline code | `AGENTS.md` › Where things live | "none yet" |
 | `STRING_CATALOGUE` | the repo paths of the string catalogue (a folder or file each), one per line, when the repo has one ([detect.md](detect.md) › Languages; on a re-run, the catalogue row of `AGENTS.md` › Where things live) | `AGENTS.md` › Where things live and Language, `.factory/review-checklist.md` › User-facing text: text comes from the catalogue, with `.factory/voice.md` for tone when it exists | no catalogue: both say new text matches the existing copy, and neither names `.factory/voice.md` |
 | `TEST_WORKERS` | `limits.test_workers` from `~/.factory/machine.yaml` when that file exists | `FACTORY_TEST_WORKERS` in CI | `2` |
+
+The browser tool (question 6b) is not a file here: no template takes it. SKILL.md step 5 writes it into `AGENTS.md`.
 
 ## Brownfield
 
@@ -106,10 +108,12 @@ Role, area and target names are lower case: letters, digits, `-` and `_`. Team m
 | `SANDBOX_WRITE` | folders outside the worktree the toolchain writes (its caches), one per line, starting with `~/` or `/` | none |
 
 Both are proposals from [detect.md](detect.md), confirmed by the person (question 9). They go into
-`.claude/settings.json` and `.codex/config.toml`, merged with what is there, and only through the sandbox templates
-the source ships (`core/templates/claude-settings.json`, `core/templates/codex-config.toml`). When the source has
-neither, the helper writes nothing from them: leave both files out, do not ask question 9, and list the detected
-hosts and caches in the PR as "not written by this core version" ([questions.md](questions.md)).
+`.claude/settings.json` and `.codex/config.toml`, merged with what is there, and only through a template the source
+ships (`core/templates/claude-settings.json`, `core/templates/codex-config.toml`) that has a sandbox section: the
+list's placeholder (`__FACTORY_SANDBOX_DOMAINS__`, `__FACTORY_SANDBOX_WRITE__`). A template that only registers hooks
+writes no list. When no template takes a list, leave its file out, do not ask for it (question 9), and list the
+detected hosts and caches in the PR as "not written by this core version" ([questions.md](questions.md)). A list
+given all the same is reported by the apply as `skipped  SANDBOX_<LIST>` and not written.
 
 ## Deploy targets and packs
 

@@ -1,6 +1,6 @@
 ---
 name: factory-plan
-description: Turns one or more finished grill decision logs into the project's plan of attack and its architecture decision records (ADRs), proposed as one pull request the user approves. Every decision links back to its log entry; assumptions keep how they will be tested; parked items keep an owner; `Term:` decisions update the glossary; the ADR index stays current; and the plan ends in phases, each with an exit test. Changes to an existing plan, ADR or settled decision are a human gate (H4): proposed, never merged silently. Hands off to factory-tickets. Use after factory-grill, or when the user says "write the plan", "turn the decisions into a plan", "write the ADRs", "update the plan from the grill".
+description: Turns finished grill decision logs into the project's plan of attack and its architecture decision records (ADRs), proposed as one pull request the user approves. Every decision links back to its log entry, and the plan ends in phases that each have an exit test. Changes to an existing plan, ADR or settled decision are a human gate (H4) and are proposed, never merged silently. Use after factory-grill, or when the user says "write the plan", "turn the decisions into a plan", "write the ADRs" or "update the plan from the grill". Hands off to factory-tickets and creates no issues itself.
 ---
 
 # Planning from the decisions
@@ -180,7 +180,10 @@ Then:
 1. **Ask the user** in one short message: the PR link, the H4 line, and the questions. Ask nothing the trace table
    already answers.
 2. **The PR follows the project's review flow** like any other: an independent review on a different model, then the
-   gate. Its H4 gate stays open until the user's approval for this PR is linked; address review findings and the
+   gate. A plan PR has no issue and no tier and is never documentation-only (it edits the rules file and settled
+   decisions), so it gets the full review on the standard tier's first reviewer; the re-review is narrow. Which reviewer, which
+   brief and how a re-review is scoped are in [briefs.md › Plan PR](../../../.factory/reference/briefs.md#plan-pr).
+   Its H4 gate stays open until the user's approval for this PR is linked; address review findings and the
    user's comments with new commits on the same branch.
 3. **Never merge it yourself**, and never ask anyone to merge it before the user approved. Whoever merges (the user, or
    the lead after the approval is linked) does so through the normal gate.

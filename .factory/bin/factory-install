@@ -3,11 +3,12 @@
 # overwrites a file the project owns, never deletes anything, and a second run with the same inputs changes nothing.
 #
 #   factory-install apply  --source DIR --target DIR --values DIR [--report FILE] [--proposals DIR] [--dry-run]
-#                          [--update-from VERSION [--keep PATH]... [--discard PATH]...]
+#                          [--source-stamp FILE] [--update-from VERSION [--keep PATH]... [--discard PATH]...]
 #   factory-install labels --source DIR --repo OWNER/NAME --values DIR [--keep-existing [--use-factory NAME]...] [--dry-run]
 #   factory-install status-issue --repo OWNER/NAME [--adopt N] [--not-status N[,N...]] [--dry-run]
 #   factory-install pin    OWNER/REPO TAG
 #   factory-install check  --target DIR
+#   factory-install no-stack-verify --target DIR
 #   factory-install fs-tool id PATH | fs-tool flush ROOT ROOT_ID GUARD_ID KIND QUEUE
 #
 # apply         Writes the overlay files from the core templates (only where missing), copies the core into the
@@ -19,6 +20,14 @@
 #               the factory's CI is proposed instead of installed when the repo has its own CI (CI_WORKFLOWS), and a
 #               project skill or agent under a name the core owns (factory-*) stops the install. --proposals DIR
 #               (outside the target) receives each proposed file and its unified diff, for the install PR.
+#               --report FILE (outside the target) receives the report lines.
+#               --source-stamp FILE (outside the target) holds the run to one core version: the dry run writes the
+#               source's version and a digest of the files it reads (plugin.json, core/, runtime/, recipes/, packs/,
+#               without tests and caches) to FILE, and the real run with the same FILE refuses (exit 5, nothing
+#               written in the target) when either differs: the source changed since the dry run, so the dry run is
+#               run again. Every real run also takes
+#               that digest at its start and again right before it writes into the target, and refuses (exit 5) when
+#               the source changed in between, so one run never mixes the files of two core versions.
 #               --update-from VERSION is the version change factory-update runs (against its staging copy): the
 #               lock must record exactly VERSION and factory.yaml must already pin the source's version. A core file
 #               that is still the old core's copy (its sha256 is the old lock's) is replaced by the new core's; a
@@ -37,6 +46,10 @@
 #               says it is not one.
 # pin           Resolves a GitHub Action's release tag to its commit and prints "<owner>/<repo>@<sha> # <tag>".
 # check         Compares the core files with .factory/core.lock and looks for unfilled placeholders.
+# no-stack-verify  The verify of a repo with no stack yet. It runs check, but only while factory.yaml's
+#               commands.verify is still exactly this placeholder, read fail-closed with factory-doctor.py's YAML
+#               reader; once it names a real command, it fails (exit 1), so a CI workflow still rendered with the
+#               placeholder goes red instead of passing as the project's verify.
 # fs-tool       The descriptor-relative writer below (fs_tool), for factory-update's commit and rollback.
 #
 # --source is the factory source: the folder that holds core/, runtime/ (and recipes/, packs/ when they exist) and
@@ -53,7 +66,8 @@
 # for .codex/config.toml; gh for labels, status-issue and pin.
 # Exit codes: 0 done; 1 error, nothing half-written; 2 bad usage; 3 done, but some core files differ from the core
 # or need a person (listed as "differs"); 4 the project pins another core version (that is factory-update's job), or
-# the lock does not record the --update-from version.
+# the lock does not record the --update-from version; 5 the source changed since the dry run (--source-stamp) or
+# during the run: nothing was written in the target, the dry run is run again.
 # shellcheck disable=SC2030,SC2031 # apply's dry pass runs apply_run in a subshell with DRY=1 on purpose
 set -eu
 unset CDPATH
@@ -63,7 +77,7 @@ newline='
 '
 
 die() { printf '%s\n' "$prog: $*" >&2; exit 1; }
-usage() { sed -n '5,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '5,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 hash_file() {
   if command -v sha256sum > /dev/null 2>&1; then sha256sum < "$1" | cut -d' ' -f1
@@ -74,13 +88,13 @@ hash_file() {
 [ $# -gt 0 ] || usage
 cmd=$1; shift
 SOURCE='' TARGET='' VALUES='' REPORT='' REPO='' DRY=0 PROPOSALS='' PROPOSE_WRITE=1 KEEP_LABELS=0 USE_FACTORY='' ADOPT='' NOT_STATUS=''
-UPDATE_FROM='' DECISIONS=''
+UPDATE_FROM='' DECISIONS='' SOURCE_STAMP='' SOURCE_VERSION='' SOURCE_DIGEST=''
 case $cmd in
   pin)
     [ $# -eq 2 ] || usage ;;
   fs-tool)
     case ${1:-} in id) [ $# -eq 2 ] || usage ;; flush) [ $# -eq 6 ] || usage ;; *) usage ;; esac ;;
-  apply | labels | status-issue | check)
+  apply | labels | status-issue | check | no-stack-verify)
     while [ $# -gt 0 ]; do
       case $1 in
         --source) [ $# -ge 2 ] || usage; SOURCE=$2; shift ;;
@@ -89,6 +103,7 @@ case $cmd in
         --report) [ $# -ge 2 ] || usage; REPORT=$2; shift ;;
         --repo) [ $# -ge 2 ] || usage; REPO=$2; shift ;;
         --proposals) [ $# -ge 2 ] || usage; PROPOSALS=$2; shift ;;
+        --source-stamp) [ $# -ge 2 ] || usage; SOURCE_STAMP=$2; shift ;;
         --keep-existing) KEEP_LABELS=1 ;;
         --use-factory)
           [ $# -ge 2 ] || usage
@@ -106,10 +121,10 @@ case $cmd in
       esac
       shift
     done ;;
-  -h | --help) sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h | --help) sed -n '2,70p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) printf '%s\n' "$prog: unknown command $cmd" >&2; usage ;;
 esac
-[ "$cmd" = apply ] || [ -z "$UPDATE_FROM$DECISIONS" ] || usage
+[ "$cmd" = apply ] || [ -z "$UPDATE_FROM$DECISIONS$SOURCE_STAMP" ] || usage
 [ -z "$USE_FACTORY" ] || { [ "$cmd" = labels ] && [ "$KEEP_LABELS" = 1 ]; } || usage
 
 abs_dir() { (cd -P "$1" 2> /dev/null && pwd -P) || die "not a folder: $1"; }
@@ -961,6 +976,7 @@ queue_remove() {
 
 # flush_writes: the queued writes, the proposals' and then the target's (a pass has only one of the two).
 flush_writes() {
+  [ "$DRY" = 1 ] || [ ! -s "$WORK/target.queue" ] || source_unchanged "the source changed during this run"
   if [ -s "$WORK/proposals.queue" ]; then
     fs_tool flush "$PROPOSALS" "$PROPOSALS_ID" "$TARGET_ID" proposal "$WORK/proposals.queue" || exit 1
   fi
@@ -1587,11 +1603,62 @@ read_version() {
   printf '%s' "$_rv_v"
 }
 
-# "src|dest" lines for every file of a source folder, tests and caches left out.
-emit_tree() { # emit_tree <folder relative to the source> <destination prefix>
+# source_files DIR: the files of a source folder (relative to the source) that the install reads, as ./<path> lines,
+# sorted: tests, caches and .DS_Store left out. emit_tree copies from it and source_digest hashes it, so one list
+# decides both.
+source_files() {
   [ -d "$SOURCE/$1" ] || return 0
   (cd -P "$SOURCE/$1" && find . -type f ! -name '*.test.*' ! -name '.DS_Store' ! -name '*.pyc' \
-    ! -path '*/tests/*' ! -path '*/__pycache__/*' | LC_ALL=C sort) > "$WORK/tree"
+    ! -path '*/tests/*' ! -path '*/__pycache__/*' | LC_ALL=C sort)
+}
+
+# source_digest: one sha256 over what the install reads from the source: plugin.json and the source_files of core/
+# (its templates and helper included), runtime/, recipes/ and packs/. Each file adds its path, whether it is executable
+# and its content, in a fixed order; a file that cannot be read adds that it cannot. A link inside those folders is
+# refused first: source_files lists real files only, while the copy would follow a linked folder, so a link's target
+# could change without the digest seeing it. The install copies real files only.
+source_digest() {
+  for _sd_d in core runtime recipes packs; do
+    [ -d "$SOURCE/$_sd_d" ] || continue
+    _sd_l=$(cd -P "$SOURCE/$_sd_d" && find . -type l | LC_ALL=C sort | head -n 1) || return 1
+    if [ -n "$_sd_l" ]; then
+      printf '%s\n' "$prog: unsupported link in the source: $_sd_d/${_sd_l#./}; the install copies real files only" >&2
+      return 1
+    fi
+  done
+  {
+    [ ! -e "$SOURCE/.claude-plugin/plugin.json" ] || echo .claude-plugin/plugin.json
+    for _sd_d in core runtime recipes packs; do source_files "$_sd_d" | sed "s|^\./|$_sd_d/|"; done
+  } | python3 -c '
+import hashlib, os, sys
+root = sys.argv[1]
+digest = hashlib.sha256()
+for rel in sys.stdin.read().splitlines():
+    full = os.path.join(root, rel)
+    try:
+        with open(full, "rb") as f:
+            body = hashlib.sha256(f.read()).hexdigest()
+        kind = "x" if os.access(full, os.X_OK) else "f"
+    except OSError:
+        body, kind = "-", "unreadable"
+    digest.update(("%s\0%s\0%s\n" % (rel, kind, body)).encode("utf-8", "surrogateescape"))
+print(digest.hexdigest())
+' "$SOURCE"
+}
+
+# source_unchanged WHY: the source still has the version and digest this run started with; otherwise exit 5 before
+# anything is written in the target.
+source_unchanged() {
+  _su_v=$(read_version); _su_d=$(source_digest) || die "cannot read the source $SOURCE"
+  [ "$_su_v" = "$SOURCE_VERSION" ] && [ "$_su_d" = "$SOURCE_DIGEST" ] && return 0
+  if [ "$_su_v" != "$SOURCE_VERSION" ]; then _su_w="core $SOURCE_VERSION, now $_su_v"; else _su_w="core $_su_v, but its files changed"; fi
+  printf '%s\n' "$prog: $1 ($_su_w): rerun the dry run; nothing was written in the target" >&2
+  exit 5
+}
+
+# "src|dest" lines for every file of a source folder, tests and caches left out.
+emit_tree() { # emit_tree <folder relative to the source> <destination prefix>
+  source_files "$1" > "$WORK/tree"
   while IFS= read -r _et_f; do
     _et_f=${_et_f#./}
     case $_et_f in *[[:space:]\|]*) die "unsupported file name in the core: $1/$_et_f" ;; esac
@@ -1689,6 +1756,17 @@ sandbox() {
     report skipped .claude/settings.json "this core version has no sandbox templates"
     return 0
   fi
+  # A sandbox template is one with a sandbox section: the placeholder that takes a list. A template without it (a
+  # settings file that only registers hooks) still merges, but writes nothing of that list, so an answer given for
+  # it is reported as not written (factory-init skips question 9 by the same test).
+  for _l in DOMAINS WRITE; do
+    [ -n "$(val_lines "SANDBOX_$_l")" ] || continue
+    _has=0
+    for _t in "$_ct" "$_xt"; do
+      if [ -f "$_t" ] && grep -q "__FACTORY_SANDBOX_${_l}__" "$_t"; then _has=1; fi
+    done
+    [ "$_has" = 1 ] || report skipped "SANDBOX_$_l" "no sandbox template in this source has a sandbox section that takes it; not written"
+  done
   command -v python3 > /dev/null 2>&1 || die "python3 is needed to merge the sandbox settings"
   # The TOML merge must parse its result, so it needs tomllib (Python 3.11+); FACTORY_INSTALL_TOML_PYTHON overrides
   # the search (empty: none), for tests.
@@ -2032,6 +2110,38 @@ apply() {
     proposals_outside
     PROPOSALS_ID=$(fs_tool id "$PROPOSALS") || exit 1
   fi
+  # The report is written while the passes render, before the source check and outside the checked writer, so it
+  # must be outside the target: a refused run then leaves the target exactly as it was.
+  if [ -n "$REPORT" ]; then
+    case $(basename "$REPORT") in . | .. | /) die "bad report path: $REPORT" ;; esac
+    REPORT=$(abs_dir "$(dirname "$REPORT")")/$(basename "$REPORT")
+    case $REPORT in "$TARGET" | "$TARGET"/*) die "the report must be outside the target: $REPORT; nothing was written" ;; esac
+    [ ! -L "$REPORT" ] || die "the report is a symlink; not writing through it: $REPORT"
+    [ ! -d "$REPORT" ] || die "the report is a folder, not a file: $REPORT"
+  fi
+  # The source's version and digest, once: every pass checks against them before it writes into the target.
+  SOURCE_VERSION=$(read_version); SOURCE_DIGEST=$(source_digest) || die "cannot read the source $SOURCE"
+  if [ -n "$SOURCE_STAMP" ]; then
+    case $(basename "$SOURCE_STAMP") in . | .. | /) die "bad source stamp: $SOURCE_STAMP" ;; esac
+    SOURCE_STAMP=$(abs_dir "$(dirname "$SOURCE_STAMP")")/$(basename "$SOURCE_STAMP")
+    case $SOURCE_STAMP in "$TARGET" | "$TARGET"/*) die "the source stamp must be outside the target: $SOURCE_STAMP" ;; esac
+    [ ! -L "$SOURCE_STAMP" ] || die "the source stamp is a symlink; not using it: $SOURCE_STAMP"
+    [ ! -e "$SOURCE_STAMP" ] || [ -f "$SOURCE_STAMP" ] || die "the source stamp is not a file: $SOURCE_STAMP"
+    if [ "$DRY" = 0 ]; then
+      [ -f "$SOURCE_STAMP" ] || die "no source stamp at $SOURCE_STAMP: run the dry run with --source-stamp first; nothing was written"
+      _st_v=$(sed -n 's/^version: //p' "$SOURCE_STAMP" | head -n 1)
+      _st_d=$(sed -n 's/^digest: //p' "$SOURCE_STAMP" | head -n 1)
+      [ -n "$_st_v" ] && [ -n "$_st_d" ] || die "the source stamp $SOURCE_STAMP has no version: or digest: line: rerun the dry run; nothing was written"
+      if [ "$_st_v" != "$SOURCE_VERSION" ]; then
+        printf '%s\n' "$prog: the source changed since the dry run (the dry run saw core $_st_v, the source is now $SOURCE_VERSION): rerun the dry run; nothing was written in the target" >&2
+        exit 5
+      fi
+      if [ "$_st_d" != "$SOURCE_DIGEST" ]; then
+        printf '%s\n' "$prog: the source changed since the dry run (still core $SOURCE_VERSION, but its files differ): rerun the dry run; nothing was written in the target" >&2
+        exit 5
+      fi
+    fi
+  fi
   # A silent dry pass first renders and checks everything, the proposals' paths included (without writing them), so
   # an error never leaves a half-done install and no proposal is written through a symlink. It runs before a
   # --dry-run too when there are proposals to write.
@@ -2056,6 +2166,12 @@ apply() {
       *) cat "$_err" >&2; rm -f "$_err"; printf '%s\n' "$prog: nothing was written in the target" >&2; exit "$_rc" ;;
     esac
     PROPOSE_WRITE=0
+  fi
+  # The dry run's stamp, for the real run to compare with.
+  if [ "$DRY" = 1 ] && [ -n "$SOURCE_STAMP" ]; then
+    [ ! -L "$SOURCE_STAMP" ] || die "the source stamp is a symlink; not writing through it: $SOURCE_STAMP"
+    printf '# factory-install source stamp: the dry run saw this source; the real run refuses when it changed.\nversion: %s\ndigest: %s\n' \
+      "$SOURCE_VERSION" "$SOURCE_DIGEST" > "$SOURCE_STAMP" || die "cannot write the source stamp $SOURCE_STAMP"
   fi
   apply_run
 }
@@ -2581,12 +2697,92 @@ check() {
   return $_rc
 }
 
+# The placeholder verify of a repo with no stack yet (factory-init, questions.md › A repo with no stack yet). Its
+# command is exactly NO_STACK_VERIFY. It passes only while factory.yaml still says so, read fail-closed with the
+# core's YAML subset reader (factory-doctor.py, next to this script, as factory.py loads it): factory.yaml must be a
+# regular file, not a symlink (never followed); the reader must accept it; `commands` must be a mapping whose `verify`
+# is a string equal to NO_STACK_VERIFY; and no other mapping anywhere holds a `verify` key. Anything else (a real
+# command, a file the reader refuses, a missing file or reader) counts as a real verify and fails.
+NO_STACK_VERIFY='sh .factory/bin/factory-install no-stack-verify --target .'
+no_stack_verify() {
+  [ -n "$TARGET" ] || usage
+  TARGET=$(abs_dir "$TARGET")
+  command -v python3 > /dev/null 2>&1 || die "python3 (standard library only) is needed"
+  _here=$(cd -P "$(dirname "$0")" && pwd -P) || die "cannot find the folder of $0"
+  _nsv=0
+  python3 -I -B - "${_here}/factory-doctor.py" "$TARGET/factory.yaml" "$NO_STACK_VERIFY" <<'PY' || _nsv=$?
+import importlib.util, os, stat, sys
+reader, path, want = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def no(reason):
+    sys.stderr.write("factory-install: factory.yaml: %s\n" % reason)
+    sys.exit(1)
+
+
+def stray(node, at):
+    """True when a mapping other than commands holds a `verify` key (a second verify is never guessed between)."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if (k == "verify" and at + (k,) != ("commands", "verify")) or stray(v, at + (k,)):
+                return True
+    elif isinstance(node, list):
+        return any(stray(v, at + (None,)) for v in node)
+    return False
+
+
+try:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        no("missing")
+    if stat.S_ISLNK(st.st_mode):
+        no("a symlink, which is not followed")
+    if not stat.S_ISREG(st.st_mode):
+        no("not a regular file")
+    try:
+        spec = importlib.util.spec_from_file_location("factory_doctor", reader)
+        doctor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(doctor)
+    except BaseException:  # noqa: B036
+        no("the YAML reader factory-doctor.py next to factory-install could not be loaded")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, encoding="utf-8") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            no("not a regular file")
+        text = f.read()
+    try:
+        doc = doctor.Reader(text).parse()   # load_yaml's reader, on the file opened without following a link
+    except doctor.Refused as e:
+        no("the YAML reader refuses it (%s)" % doctor.redact(str(e)))
+    commands = doc.get("commands") if isinstance(doc, dict) else None
+    if not isinstance(commands, dict) or not isinstance(commands.get("verify"), str):
+        no("commands is not a mapping with a string verify")
+    if stray(doc, ()):
+        no("a verify key outside commands")
+    sys.exit(0 if commands["verify"] == want else 1)
+except SystemExit:
+    raise
+except BaseException:  # noqa: B036 (a read or decode error: never a traceback, never green)
+    no("could not be read")
+PY
+  if [ "$_nsv" != 0 ]; then
+    printf '%s\n' "$prog: factory.yaml › commands.verify is no longer the no-stack placeholder, but this run still runs it." \
+      "  The stack's real verify must run here instead: render the CI workflow's SETUP and VERIFY with the commands in" \
+      "  factory.yaml (AGENTS.md › Stack says which ticket does that). This placeholder never counts as the project's verify." >&2
+    exit 1
+  fi
+  echo "verify: no stack yet; this placeholder checks only the factory install, not the project"
+  check
+}
+
 case $cmd in
   apply) apply ;;
   labels) labels ;;
   status-issue) status_issue ;;
   pin) pin "$1" "$2" ;;
   check) check ;;
+  no-stack-verify) no_stack_verify ;;
   fs-tool)
     command -v python3 > /dev/null 2>&1 || die "python3 (standard library only) is needed"
     fs_tool "$@" ;;
