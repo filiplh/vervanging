@@ -6,11 +6,12 @@ import { join, relative, basename } from 'node:path';
 import vm from 'node:vm';
 import { createHash } from 'node:crypto';
 import { createStore } from './store.js';
-import { makePlan, planStats } from './planner.js';
+import { makePlan, planStats, SCHEDULES } from './planner.js';
+import { liveScreen } from './live.js';
 import {
   MAX_PLAYERS, normaliseRoster, checkPlayer, addPlayer, editPlayer, removePlayer, normaliseAttendance,
   initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen, isInstalled,
-  formatDuration, seasonNote,
+  formatDuration, seasonNote, hasRunningMatch,
 } from './setup.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
@@ -447,6 +448,120 @@ test('setup screen: Start with refused storage shows a message and does not leav
   button(view, 'Start').fire('click');
   assert.equal(started.length, 0);
   assert.match(pageText(view), /Opslaan lukte niet/);
+});
+
+// ------// ---------- Start with a running match (#47, P1-2 in docs/spikes/2026-ui-review.md) ----------
+
+const REPLACE_QUESTION = 'De lopende match stoppen en een nieuwe beginnen?';
+
+// The live screen (#start) as app.js opens it after Start, which first removes the old match state.
+function openLive(env) {
+  const view = new FakeElement('main');
+  liveScreen(view, { store: env.store, keepAwake() {} });
+  return view;
+}
+const liveTitle = (view) => find(view, 'h1')[0].text;
+const tapWissel = (view) => find(view, 'button', (e) => e.className.split(' ').includes('wissel'))[0].fire('click');
+
+// A first Start on the setup screen, then the live screen with no tap yet: only the setup is saved, no match state.
+function startedUntouched() {
+  const env = openSetup({ players: 11 });
+  pickFive(env.view);
+  button(env.view, 'Start').fire('click');
+  env.store.remove('match');
+  const live = openLive(env);
+  assert.equal(env.store.load('match'), null, 'opening the live screen saves no match state');
+  return { env, live };
+}
+
+// Plays the started match to its end on the live screen, as the coach does with Wissel.
+function playToEnd(env, live) {
+  for (let taps = 0; liveTitle(live) !== 'Einde match'; taps++) {
+    assert.ok(taps < 20, 'the match ends');
+    tapWissel(live);
+  }
+  assert.equal(env.store.load('match').ended, true);
+}
+
+// A second setup screen on the same store, where the coach picks the other schedule and taps Start.
+function startAgain(env, answer) {
+  const asked = [];
+  globalThis.window = { confirm: (q) => { asked.push(q); return answer; } };
+  const view = new FakeElement('main');
+  const started = [];
+  setupScreen(view, { store: env.store, onStart: (s) => started.push(s) });
+  radios(view)[1].fire('change');
+  pickFive(view);
+  button(view, 'Start').fire('click');
+  return { view, asked, started };
+}
+
+test('hasRunningMatch: only when the live screen would resume a match that has not ended', () => {
+  const first = openSetup();
+  assert.equal(hasRunningMatch(first.store), false, 'no setup saved yet');
+  const { env, live } = startedUntouched();
+  assert.equal(hasRunningMatch(env.store), true, 'started, no tap yet');
+  tapWissel(live);
+  assert.equal(hasRunningMatch(env.store), true, 'saved match in play');
+  playToEnd(env, live);
+  assert.equal(hasRunningMatch(env.store), false, 'ended match');
+  env.store.save('matchSetup', { damaged: true });
+  assert.equal(hasRunningMatch(env.store), false, 'a damaged setup resumes nothing');
+});
+
+test('setup screen: Start after a started match with no tap yet asks; no keeps it and the live screen resumes it', () => {
+  const { env } = startedUntouched();
+  const before = new Map(env.data);
+  const savedAt = env.raw('matchSetup').savedAt;
+
+  const { view, asked, started } = startAgain(env, false);
+  assert.deepEqual(asked, [REPLACE_QUESTION]);
+  assert.equal(started.length, 0, 'no: the new match is not started');
+  assert.deepEqual(new Map(env.data), before, 'no: no stored key changed');
+  assert.ok(button(view, 'Start'), 'still on the setup screen');
+  const live = openLive(env);
+  assert.notEqual(liveTitle(live), 'Geen match gevonden');
+  assert.equal(env.raw('matchSetup').savedAt, savedAt, 'the live screen resumes the first match');
+  assert.equal(env.raw('matchSetup').schedule, 'equal');
+});
+
+test('setup screen: Start with a saved match in play asks first; no keeps it and stays on setup', () => {
+  const { env, live } = startedUntouched();
+  tapWissel(live);
+  assert.equal(env.raw('match').block, 2);
+  const before = new Map(env.data);
+
+  const { view, asked, started } = startAgain(env, false);
+  assert.deepEqual(asked, [REPLACE_QUESTION]);
+  assert.equal(started.length, 0, 'no: the new match is not started');
+  assert.deepEqual(new Map(env.data), before, 'no: no stored key changed');
+  assert.ok(button(view, 'Start'), 'still on the setup screen');
+});
+
+test('setup screen: Start with a running match and yes saves the new setup and starts it', () => {
+  for (const tap of [false, true]) {
+    const { env, live } = startedUntouched();
+    if (tap) tapWissel(live);
+    const { asked, started } = startAgain(env, true);
+    assert.deepEqual(asked, [REPLACE_QUESTION]);
+    assert.equal(started.length, 1);
+    assert.equal(env.raw('matchSetup').schedule, 'five', 'the new setup replaced the old one');
+  }
+});
+
+test('setup screen: a first-ever Start, or one after a finished match and Nieuwe match, starts at once without asking', () => {
+  const first = startAgain(openSetup(), false);
+  assert.deepEqual(first.asked, [], 'first-ever Start');
+  assert.equal(first.started.length, 1);
+
+  const { env, live } = startedUntouched();
+  playToEnd(env, live);
+  const nieuwe = find(live, 'a', (e) => e.text === 'Nieuwe match')[0];
+  assert.equal(nieuwe.attrs.href, '#match', 'Nieuwe match opens the setup screen and removes nothing');
+  const { asked, started } = startAgain(env, false);
+  assert.deepEqual(asked, [], 'an ended match is not asked about');
+  assert.equal(started.length, 1);
+  assert.equal(env.raw('matchSetup').schedule, 'five');
 });
 
 // ---------- team history on the setup screen (decision #10) ----------

@@ -3,6 +3,9 @@
 
 import { makePlan, swapPlayers, planStats, PlanError, ON_COURT, SCHEDULES } from './planner.js';
 import { normaliseHistory, clearHistory, catchUp, seasonSummary } from './history.js';
+// live.js imports this module too. The cycle is safe: neither module uses the other's bindings while it loads, only
+// inside functions that run later.
+import { restoreMatch } from './live.js';
 
 export const MAX_PLAYERS = 15;
 const MAX_NAME = 20;
@@ -112,6 +115,14 @@ export function seasonNote(matches) {
 
 export function playerLabel(p) {
   return `#${p.number} ${p.name}`;
+}
+
+// True when the live screen (#start) would resume a match that has not ended: a valid saved setup with a saved match
+// that has not ended, or with no usable saved match, which restoreMatch starts at block 1. A new Start would replace
+// it, so it asks first (P1-2 in docs/spikes/2026-ui-review.md). No setup yet, a damaged one or an ended match: false.
+export function hasRunningMatch(store) {
+  const setup = normaliseMatchSetup(store.load('matchSetup'));
+  return setup != null && !restoreMatch(store, setup).ended;
 }
 
 function newSeed() {
@@ -326,6 +337,9 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
   }
 
   function startMatch() {
+    // Asked before anything is saved, so a "no" keeps the running match and its setup untouched.
+    if (hasRunningMatch(store)
+      && !window.confirm('De lopende match stoppen en een nieuwe beginnen?')) return;
     const setup = {
       savedAt: new Date().toISOString(),
       opponent: opponent.trim(),
