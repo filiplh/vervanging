@@ -101,6 +101,8 @@ button, .button {
 }
 button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
 button.danger { color: var(--danger); }
+.install-hint .message { display: block; margin-top: 8px; }
+.install-hint button { display: flex; margin-top: 8px; }
 button:disabled { opacity: 0.4; cursor: default; }
 /* A pressed state, so a tap visibly lands (#50) */
 button:active:not(:disabled), .button:active { background: var(--off); transform: translateY(1px); }

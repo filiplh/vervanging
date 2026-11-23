@@ -248,11 +248,13 @@ export function isInstalled(env = globalThis) {
 
 // Shown on the match setup screen in a browser tab: on the home screen the app opens without internet and the browser
 // keeps its saved data (⚠ iOS Safari may clear the data of a site that is not on the home screen; see docs/PLAN.md ›
-// Risks).
-export function installHint() {
+// Risks). "Begrepen" calls `onDismiss`; `failed` adds a line when saving that choice did not work (#57).
+export function installHint({ onDismiss, failed = false } = {}) {
   return el('p', { className: 'note install-hint' },
     'Tip: zet Vervanging op je beginscherm (in Safari: Deel › Zet op beginscherm). ',
-    'Dan werkt de app ook zonder internet en blijven je spelers en geschiedenis bewaard.');
+    'Dan werkt de app ook zonder internet en blijven je spelers en geschiedenis bewaard.',
+    failed && el('span', { className: 'message', role: 'alert' }, 'Opslaan lukte niet: de browser weigert opslag.'),
+    onDismiss && el('button', { type: 'button', onclick: onDismiss }, 'Begrepen'));
 }
 
 export function setupScreen(root, { store, onStart, installed = isInstalled() }) {
@@ -268,6 +270,15 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
   let plan = null;
   let selected = null;
   let message = '';
+  // The tip stays hidden once dismissed on this device; a save that fails keeps it shown, so nothing is lost (#57).
+  let showTip = !installed && store.load('installTip') !== true;
+  let tipFailed = false;
+
+  function dismissTip() {
+    if (store.save('installTip', true)) showTip = false;
+    else tipFailed = true;
+    render();
+  }
 
   function replan() {
     selected = null;
@@ -483,13 +494,13 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
         backToMatch,
         el('p', { className: 'note' }, `Voeg eerst minstens ${ON_COURT} spelers toe bij Spelers.`),
         el('a', { className: 'button primary', href: '#spelers' }, 'Naar Spelers'),
-        !installed && installHint()].filter(Boolean));
+        showTip && installHint({ onDismiss: dismissTip, failed: tipFailed })].filter(Boolean));
       return;
     }
     root.replaceChildren(...[
       el('h1', {}, 'Match'),
       backToMatch,
-      !installed && installHint(),
+      showTip && installHint({ onDismiss: dismissTip, failed: tipFailed }),
       attendanceSection(),
       scheduleSection(),
       historySection(),
