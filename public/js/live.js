@@ -120,7 +120,17 @@ export function keepScreenAwake(on) {
 // would otherwise take it as a second wissel, skipping a block, or ending the match from block 11 (#49).
 export const DOUBLE_TAP_MS = 600;
 
+// iOS Safari applies :active (the pressed state of buttons, #50) only when a touchstart listener exists on the page; an
+// empty passive one is enough. ⚠ Not checked on a real iPhone.
+let touchListening = false;
+function listenForTouch() {
+  if (touchListening) return;
+  touchListening = true;
+  globalThis.document?.addEventListener?.('touchstart', () => {}, { passive: true });
+}
+
 export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Date.now }) {
+  listenForTouch();
   const setup = normaliseMatchSetup(store.load('matchSetup'));
   if (!setup) {
     keepAwake(false);
@@ -133,15 +143,25 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   const byId = new Map(setup.players.map((p) => [p.id, p]));
   let state = restoreMatch(store, setup);
   let message = repairHistory(store, setup, state) ? '' : SAVE_FAILED;
+  let confirmed = false; // true when `message` is a confirmation line, not an error
   let zone = null; // in the zone or extra minuten, chosen but not yet applied: { keep, bench, extra }
   let lastWisselAt = -Infinity; // when the last Wissel tap that counted came, on the `now` clock
 
   // Applies one engine action, saves the new state and redraws; an action the engine refuses shows its reason.
-  function act(step) {
+  // A successful action writes its confirmation line (#50), made by `confirm` from the state before and after; a
+  // refused write or action keeps its error text instead. The line stays until the next action replaces it (a tap on
+  // In the zone or Op de bank keeps it); a reload starts without it.
+  function act(step, confirm) {
+    const before = state;
+    confirmed = false;
     try {
       state = step();
       const saved = store.save('match', state);
-      message = syncHistory(store, setup, state) && saved ? '' : SAVE_FAILED;
+      if (!(syncHistory(store, setup, state) && saved)) message = SAVE_FAILED;
+      else {
+        message = confirm(before, state);
+        confirmed = message !== '';
+      }
     } catch (error) {
       if (!(error instanceof MatchError)) throw error;
       message = 'Dat kan nu niet.';
@@ -154,8 +174,21 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
     const at = now();
     if (at - lastWisselAt < DOUBLE_TAP_MS) return;
     lastWisselAt = at;
-    act(() => wissel(state, zone ? { keep: zone.keep, bench: zone.bench, extra: zone.extra } : {}));
+    act(() => wissel(state, zone ? { keep: zone.keep, bench: zone.bench, extra: zone.extra } : {}), wisselLine);
   }
+
+  // The confirmation lines (#50), worded as the owner approved them. Players are written as on screen: "#11 Hanne".
+  const label = (id) => `#${byId.get(id).number} ${byId.get(id).name}`;
+  const cameOn = (before, after) => sortedPlayers(onCourt(after).filter((id) => !onCourt(before).includes(id)));
+  // The Einde match tap shows the end screen itself, so it writes no line.
+  const wisselLine = (before, after) => (after.ended ? ''
+    : `Wissel gedaan: blok ${after.block}. Erin: ${cameOn(before, after).map(label).join(', ')}.`);
+  const uitLine = (id) => (before, after) => {
+    const replacement = cameOn(before, after)[0];
+    return replacement === undefined ? `${label(id)} uit.` : `${label(id)} uit, ${label(replacement)} erin.`;
+  };
+  const terugLine = (id) => () => `${label(id)} terug vanaf het volgende blok.`;
+  const undoLine = () => 'Ongedaan gemaakt.';
 
   function toggleZone(keep, extra = false) {
     zone = zone && zone.keep === keep && zone.extra === extra ? null : { keep, bench: proposedBench(state), extra };
@@ -198,8 +231,8 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
             isOut(id) && el('span', { className: 'tag' }, ' uit')),
           el('td', { className: 'min' }, formatSeconds(minutes[id])),
           !state.ended && el('td', { className: 'act' }, isOut(id)
-            ? canTerug() && el('button', { type: 'button', className: 'chip', onclick: () => act(() => terug(state, id)) }, 'Terug')
-            : el('button', { type: 'button', className: 'chip', onclick: () => act(() => uit(state, id)) }, 'Uit'))))));
+            ? canTerug() && el('button', { type: 'button', className: 'chip', onclick: () => act(() => terug(state, id), terugLine(id)) }, 'Terug')
+            : el('button', { type: 'button', className: 'chip', onclick: () => act(() => uit(state, id), uitLine(id)) }, 'Uit'))))));
   }
 
   // Every player's minutes at a glance (decision #27): a dense grid of small cells in jersey order, number above
@@ -221,9 +254,9 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   // next block, so it is offered while a next block exists.
   const canTerug = () => !state.ended && state.block < state.blocks;
 
-  const undoButton = () => el('button', { type: 'button', className: 'undo', disabled: !canUndo(state), onclick: () => act(() => undo(state)) },
+  const undoButton = () => el('button', { type: 'button', className: 'undo', disabled: !canUndo(state), onclick: () => act(() => undo(state), undoLine) },
     'Ongedaan maken');
-  const status = () => el('p', { className: 'message', role: 'alert' }, message);
+  const status = () => el('p', { className: 'message', role: confirmed ? 'status' : 'alert' }, message);
 
   function playing() {
     const change = nextChange(state);
