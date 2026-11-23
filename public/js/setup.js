@@ -199,7 +199,9 @@ export function rosterScreen(root, { store }) {
       ? el('p', { className: 'note' }, `Maximaal ${MAX_PLAYERS} spelers. Verwijder eerst een speler om er een toe te voegen.`)
       : el('form', { className: 'player-form', onsubmit: submit, novalidate: true },
         el('label', { className: 'field field-name' }, 'Voornaam',
-          el('input', { name: 'name', type: 'text', autocomplete: 'off', autocapitalize: 'words', maxlength: String(MAX_NAME),
+          // autocorrect and spellcheck off so a phone keeps names such as Fien or Lien as typed (⚠ iOS not tried on a device).
+          el('input', { name: 'name', type: 'text', autocomplete: 'off', autocapitalize: 'words', autocorrect: 'off',
+            spellcheck: 'false', maxlength: String(MAX_NAME),
             value: nameDraft ?? editing?.name ?? '' })),
         el('label', { className: 'field field-number' }, 'Rugnummer',
           el('input', { name: 'number', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '2', autocomplete: 'off',

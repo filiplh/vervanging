@@ -250,6 +250,23 @@ test('roster screen: edit and remove persist', () => {
   assert.equal(raw('roster').players.length, 2, 'cancelled remove keeps the player');
 });
 
+test('roster screen: the Voornaam input turns off autocorrect and spellcheck, when adding and in Wijzig (#61)', () => {
+  const { store } = memoryStore();
+  store.save('roster', rosterOf(2));
+  const view = new FakeElement('main');
+  rosterScreen(view, { store });
+  const nameInput = () => find(view, 'input', (e) => e.attrs.name === 'name')[0];
+  for (const mode of ['add', 'edit']) {
+    if (mode === 'edit') button(view, 'Wijzig', 0).fire('click');
+    const { attrs } = nameInput();
+    assert.equal(attrs.autocorrect, 'off', mode);
+    assert.equal(attrs.spellcheck, 'false', mode);
+    assert.equal(attrs.autocapitalize, 'words', mode);
+    assert.equal(attrs.autocomplete, 'off', mode);
+  }
+  assert.ok(button(view, 'Bewaren'), 'the Wijzig form was checked');
+});
+
 test('roster screen: a refused write shows a Dutch message', () => {
   const store = createStore({ getItem: () => null, setItem() { throw new Error('full'); }, removeItem() {} });
   const view = new FakeElement('main');
