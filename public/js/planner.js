@@ -167,7 +167,8 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
 
 // Tries a cap of 2 subs with the strict limits, then a cap of 3, then drops the stint limit, then the sit limit
 // (never the cap of 3; plan assumption A3). `level` in the result says how far it went (0 to 3). With `maxLevel`, it
-// goes no further than that level and gives null when no plan is found there.
+// goes no further than that level and gives null when no plan is found up to it, the last level included (#41);
+// without `maxLevel`, it throws PlanError when no level finds a plan.
 export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random, maxLevel = null }) {
   const sitBlocks = Math.floor(MAX_SIT_SECONDS / blockSeconds);
   const stintBlocks = Math.max(1, Math.floor(MAX_STINT_SECONDS / blockSeconds));
@@ -184,6 +185,7 @@ export function searchGrid({ prefix, players, available, targets, blocks, blockS
     const grid = fillGrid({ prefix, players, available, targets, blocks, ...level, random });
     if (grid) return { grid, sitLimitRelaxed: level.sitLimitRelaxed, level: index };
   }
+  if (maxLevel !== null) return null;
   throw new PlanError('no plan found within the substitution limit of 3');
 }
 
