@@ -270,6 +270,7 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
   let plan = null;
   let selected = null;
   let message = '';
+  const SAVE_FAILED = 'Opslaan lukte niet: de browser weigert opslag.';
   // The tip stays hidden once dismissed on this device; a save that fails keeps it shown, so nothing is lost (#57).
   let showTip = !installed && store.load('installTip') !== true;
   let tipFailed = false;
@@ -315,19 +316,35 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
     render();
   }
 
+  // A player as the plan grid writes them: "#4 Lotte".
+  const label = (id) => `#${byId.get(id).number} ${byId.get(id).name}`;
+
+  // Why the planner refuses a swap, in Dutch, to follow "kan niet: " (#58). From the grid only the first case can
+  // happen; the second covers the planner's other refusals (a player not in the plan, the same player twice).
+  function swapRefusal(a, b) {
+    if (plan.start.includes(a) !== plan.start.includes(b)) return 'de ene staat in de basisvijf en de andere niet';
+    return 'die ruil past niet in het plan';
+  }
+
+  // A failed save stays on screen over the swap prompts (#58), so the coach still sees that nothing was stored.
+  function swapMessage(text) {
+    if (message !== SAVE_FAILED) message = text;
+  }
+
   function tapRow(id) {
     if (selected == null) {
       selected = id;
-      message = '';
+      swapMessage(`${label(id)} gekozen. Tik de speler aan om mee te ruilen.`);
     } else if (selected === id) {
       selected = null;
+      swapMessage('');
     } else {
       try {
         plan = swapPlayers(plan, selected, id);
         message = `${byId.get(selected).name} en ${byId.get(id).name} geruild.`;
       } catch (error) {
         if (!(error instanceof PlanError)) throw error;
-        message = 'Ruil twee spelers van de basisvijf, of twee spelers die niet in de basisvijf staan.';
+        swapMessage(`Wissel ${label(selected)} en ${label(id)} kan niet: ${swapRefusal(selected, id)}.`);
       }
       selected = null;
     }
@@ -338,7 +355,7 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
   function saveHistory(next) {
     history = next;
     const ok = store.save('history', history);
-    if (!ok) message = 'Opslaan lukte niet: de browser weigert opslag.';
+    if (!ok) message = SAVE_FAILED;
     return ok;
   }
 
@@ -372,7 +389,7 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
     };
     const ok = store.save('matchSetup', setup) && store.save('attendance', [...present]);
     if (!ok) {
-      message = 'Opslaan lukte niet: de browser weigert opslag.';
+      message = SAVE_FAILED;
       render();
       return;
     }

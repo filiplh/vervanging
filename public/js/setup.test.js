@@ -413,7 +413,7 @@ test('setup screen: swaps follow the planner rule and update the grid', () => {
 
   rowButton(0).fire('click');
   rowButton(7).fire('click');
-  assert.match(pageText(view), /Ruil twee spelers van de basisvijf/);
+  assert.match(planStatus(view), /kan niet: /);
   assert.deepEqual(rows(view).map(rowCells), before, 'refused swap changes nothing');
 
   rowButton(5).fire('click');
@@ -426,6 +426,64 @@ test('setup screen: swaps follow the planner rule and update the grid', () => {
   rowButton(1).fire('click');
   rowButton(3).fire('click');
   assert.match(pageText(view), /geruild/, 'two starters can swap too');
+});
+
+// The swap prompts name the players (#58, P3-6 in docs/spikes/2026-ui-review.md).
+const planStatus = (view) => find(view, 'p', (e) => e.className === 'message' && e.attrs.role === 'status')[0].text;
+
+test('setup screen: the first tap of a swap names the chosen player; tapping them again clears it', () => {
+  const { view } = openSetup();
+  pickFive(view);
+  const rowButton = (i) => rows(view)[i].children[0].children[0];
+  const name = rowButton(5).text; // as the grid writes it, "#6 Speler6"
+  assert.match(name, /^#\d+ Speler\d+$/);
+
+  rowButton(5).fire('click');
+  assert.equal(planStatus(view), `${name} gekozen. Tik de speler aan om mee te ruilen.`);
+  rowButton(5).fire('click');
+  assert.equal(planStatus(view), '', 'cancelling the choice clears the line');
+
+  rowButton(5).fire('click');
+  rowButton(6).fire('click');
+  assert.match(planStatus(view), /geruild\.$/, 'a done swap replaces the prompt');
+});
+
+test('setup screen: a refused swap names both players and the reason', () => {
+  const { view } = openSetup();
+  pickFive(view);
+  const rowButton = (i) => rows(view)[i].children[0].children[0];
+  const starter = rowButton(0).text;
+  const bench = rowButton(7).text;
+
+  rowButton(0).fire('click');
+  rowButton(7).fire('click');
+  assert.equal(planStatus(view), `Wissel ${starter} en ${bench} kan niet: de ene staat in de basisvijf en de andere niet.`);
+
+  rowButton(7).fire('click'); // the other way round names them in tap order
+  rowButton(0).fire('click');
+  assert.equal(planStatus(view), `Wissel ${bench} en ${starter} kan niet: de ene staat in de basisvijf en de andere niet.`);
+  assert.ok(!rows(view).some((r) => r.className?.includes('selected')), 'nobody stays chosen after a refusal');
+});
+
+test('setup screen: a failed save stays on screen over the swap prompts', () => {
+  const env = openSetup();
+  const data = new Map(env.data);
+  const store = createStore({ getItem: (k) => data.get(k) ?? null, setItem() { throw new Error('full'); }, removeItem() {} });
+  const view = new FakeElement('main');
+  setupScreen(view, { store, onStart() {} });
+  pickFive(view);
+  button(view, 'Start').fire('click');
+  const failed = planStatus(view);
+  assert.match(failed, /^Opslaan lukte niet/);
+  const rowButton = (i) => rows(view)[i].children[0].children[0];
+
+  rowButton(5).fire('click');
+  assert.equal(planStatus(view), failed, 'first tap');
+  rowButton(5).fire('click');
+  assert.equal(planStatus(view), failed, 'cancel');
+  rowButton(0).fire('click');
+  rowButton(7).fire('click');
+  assert.equal(planStatus(view), failed, 'refusal');
 });
 
 test('setup screen: Start saves the setup and the attendance', () => {
