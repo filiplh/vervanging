@@ -3,14 +3,12 @@ import Foundation
 // check-examples: runs the shared examples (shared/examples/, plan decision #35) through this sim and compares what
 // it prints with what scripts/sim.mjs printed, exactly.
 
-/// The example kinds the Swift sim runs so far; later tickets add match (#98, #99) and history (#97).
-let supportedKinds: Set<String> = ["plan"]
+/// The example kinds the Swift sim runs so far; later tickets add match (#98, #99).
+let supportedKinds: Set<String> = ["plan", "history"]
 let knownKinds = ["plan", "match", "history"]
 
 /// Options of a supported kind that the Swift sim does not have yet, with the reason given when an example is skipped.
-let unsupportedOptions: [(kind: String, option: String, reason: String)] = [
-    ("plan", "--history", "--history and --use-history come with the history rules (#97)"),
-]
+let unsupportedOptions: [(kind: String, option: String, reason: String)] = []
 
 struct Example {
     let file: String
@@ -128,8 +126,10 @@ func checkExamples(_ argv: [String]) -> Outcome {
         lines.append("skipped \(names.count) example\(names.count == 1 ? "" : "s") (\(reason)): "
             + names.joined(separator: ", "))
     }
-    if ran == 0 { lines.append("no example ran: \"\(dir)\" holds no example this sim can run") }
-    lines.append("\(matched)/\(ran) \(only.map { "\($0) " } ?? "")examples match")
+    if ran + unreadable == 0 { lines.append("no example ran: \"\(dir)\" holds no example this sim can run") }
+    // An unreadable file counts as an example that does not match (its kind is unknown, so it counts under --only
+    // too): the last line alone never reads as a full match while a file could not be checked.
+    lines.append("\(matched)/\(ran + unreadable) \(only.map { "\($0) " } ?? "")examples match")
     // A run that checks nothing (a wrong or empty folder) is not a pass.
     let ok = ran > 0 && matched == ran && unreadable == 0
     return Outcome(stdout: lines.joined(separator: "\n") + "\n", status: ok ? 0 : 1)

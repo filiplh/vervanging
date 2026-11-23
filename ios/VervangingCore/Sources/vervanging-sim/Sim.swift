@@ -15,7 +15,7 @@ struct Outcome: Equatable {
     var status: Int32 = 0
 }
 
-let usage = "usage: vervanging-sim random|plan|check-examples (see the comment at the top of main.swift)"
+let usage = "usage: vervanging-sim random|plan|history|check-examples (see the comment at the top of main.swift)"
 
 /// Like `parse` in scripts/sim.mjs: the command, then `--key value` pairs; `--json` and `--use-history` take no value.
 /// A later value for the same key wins, as in the JS object.
@@ -58,10 +58,11 @@ func run(_ argv: [String]) -> Outcome {
     case "check-examples":
         // check-examples takes a directory as its first argument, which the sim.mjs parser does not allow.
         return checkExamples(Array(argv.dropFirst()))
-    case "plan":
+    case "plan", "history":
         // As in sim.mjs, every UsageError and PlanError, from the parser too, is printed after "sim: ".
         do {
-            return Outcome(stdout: try planJSON(parse(argv).opts) + "\n")
+            let opts = try parse(argv).opts
+            return Outcome(stdout: try (argv.first == "plan" ? planJSON(opts) : historyJSON(opts)) + "\n")
         } catch let error as UsageError {
             return Outcome(stderr: "sim: \(error.message)\n", status: 2)
         } catch let error as PlanError {
