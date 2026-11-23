@@ -165,7 +165,7 @@ final class SetupUITests: XCTestCase {
         tapReveal(present("13"))   // Elise is absent
         pickBasisvijf(["4", "7", "11", "12", "14"])
         tapReveal(app.buttons["setup.start"])
-        XCTAssertEqual(message(), "Match bewaard. Het live scherm komt in een volgende versie.")
+        XCTAssertTrue(app.buttons["live.wissel"].waitForExistence(timeout: 5), "Start opens the live screen (#102)")
 
         let stored = try storedSetup()
         XCTAssertEqual(stored["version"] as? Int, 1)

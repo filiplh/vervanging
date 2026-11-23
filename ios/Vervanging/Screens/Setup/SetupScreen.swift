@@ -9,15 +9,18 @@ struct SetupScreen: View {
     let setupStore: SetupStore
     /// Opens the Spelers screen, for a roster of fewer than five players.
     var onShowSpelers: () -> Void = {}
-    /// Takes the started match to the live screen; nil until the live screen exists (#102).
-    var onStart: ((StartedMatch) -> Void)?
+    /// Takes the started match to the live screen (#102).
+    var onStart: (StartedMatch) -> Void = { _ in }
+    /// Back to the match that is running, when there is one: setup then leads back to it, and Start asks before it
+    /// replaces that match (`hasRunningMatch` in `public/js/setup.js`).
+    var runningMatch: (() -> Void)?
 
     @State private var model: SetupModel?
 
     var body: some View {
         Group {
             if let model {
-                SetupContent(model: model, onShowSpelers: onShowSpelers, onStart: onStart)
+                SetupContent(model: model, onShowSpelers: onShowSpelers, onStart: onStart, runningMatch: runningMatch)
             } else {
                 Color.clear
             }
@@ -35,24 +38,45 @@ struct SetupScreen: View {
 private struct SetupContent: View {
     @Bindable var model: SetupModel
     let onShowSpelers: () -> Void
-    let onStart: ((StartedMatch) -> Void)?
+    let onStart: (StartedMatch) -> Void
+    let runningMatch: (() -> Void)?
+
+    @State private var askingToReplace = false
 
     var body: some View {
         if model.players.count < SetupModel.onCourt {
             tooFewPlayers
         } else {
             List {
+                if let runningMatch {
+                    Section { backToMatch(runningMatch) }
+                }
                 attendanceSection
                 scheduleSection
                 historySection
                 opponentSection
                 planSection
             }
+            // Asked before anything is saved, so Annuleren keeps the running match and its setup untouched.
+            .alert("De lopende match stoppen en een nieuwe beginnen?", isPresented: $askingToReplace) {
+                // ⚠ New label: the web app's confirm has the browser's own OK button.
+                Button("Nieuwe match", role: .destructive, action: startNow)
+                Button("Annuleren", role: .cancel) {}
+            }
         }
+    }
+
+    /// "Terug naar de match", while a match is running (P1-2 in docs/spikes/2026-ui-review.md).
+    private func backToMatch(_ action: @escaping () -> Void) -> some View {
+        Button("Terug naar de match", action: action)
+            .buttonStyle(.glassProminent)
+            .frame(maxWidth: .infinity)
+            .accessibilityIdentifier("setup.backToMatch")
     }
 
     private var tooFewPlayers: some View {
         VStack(spacing: 16) {
+            if let runningMatch { backToMatch(runningMatch) }
             Text("Voeg eerst minstens \(SetupModel.onCourt) spelers toe bij Spelers.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -214,13 +238,12 @@ private struct SetupContent: View {
     }
 
     private func start() {
+        if runningMatch != nil { askingToReplace = true } else { startNow() }
+    }
+
+    private func startNow() {
         guard let match = model.startMatch() else { return }
-        if let onStart {
-            onStart(match)
-        } else {
-            // ⚠ New copy, until the live screen exists (#102): the web app goes straight to the match.
-            model.message = String(localized: "Match bewaard. Het live scherm komt in een volgende versie.")
-        }
+        onStart(match)
     }
 }
 
