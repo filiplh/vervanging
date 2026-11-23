@@ -126,6 +126,10 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .player-form .form-actions { margin-top: 0; }
 .form-actions button, .form-actions .button { flex: 1; }
 
+/* Setup: a section without a heading (Tegenstander) gets the space an h2 gives the others, so it does not sit against
+   the section above, such as the Wis geschiedenis button (#59) */
+section:not([aria-labelledby]) { margin-top: 20px; }
+
 /* Setup: the way back to a running match, above everything else on the screen */
 .back-to-match { display: flex; width: 100%; min-height: 56px; font-size: 1.1rem; margin-bottom: 16px; }
 
