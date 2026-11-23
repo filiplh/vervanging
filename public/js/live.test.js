@@ -756,6 +756,21 @@ test('styles: a name row keeps its one button beside the name, and the name wrap
   assert.match(rule('.change'), /grid-template-columns:\s*minmax\(0, 1\.05fr\) minmax\(0, 1fr\)/, 'Eruit is a little wider');
 });
 
+// #77: three Eruit names that each need three lines ("#11 / Mohammed- / Amine" at 360 px) make rows of about 54 px
+// instead of 45. Measured in headless Chrome at 360-402 x 874 (#77 PR): the live screen's tighter top gives back about
+// 25 px, so the lowest Eruit edge is at 716.33 instead of 741.45, above the Wissel bar at 725. These guard the rules
+// that measurement rests on.
+test('styles: the live screen\'s top sits tight, so three three-line Eruit rows stay above the Wissel bar', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const rule = (selector) => css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*()#]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+  assert.match(rule('h1.live-title'), /margin:\s*8px 0/, '8 px over and under the live heading, not 16 and 12');
+  assert.match(rule('#h-court'), /margin-top:\s*12px/, '12 px over Op het veld, not 20');
+  assert.match(rule('.sub-time'), /line-height:\s*1\.2/, 'one line of large text, not the body\'s 1.4');
+  const { view } = open(setupOf({ n: 15 }));
+  assert.equal(find(view, 'h1')[0].className, 'live-title', 'the live heading carries the class the rule needs');
+  assert.equal(find(view, 'h2', (e) => e.attrs.id === 'h-court').length, 1, 'Op het veld keeps the id the rule needs');
+});
+
 // ---------- minutes at a glance (#32) ----------
 
 const overviewCells = (view) => {

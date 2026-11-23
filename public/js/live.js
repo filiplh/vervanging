@@ -314,7 +314,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
     const change = nextChange(state);
     extraToggle = null;
     return [
-      el('h1', {}, `Blok ${state.block} van ${state.blocks}`,
+      el('h1', { className: 'live-title' }, `Blok ${state.block} van ${state.blocks}`,
         ' ', el('span', { className: 'count' }, `kwart ${quarterOf(state)}`)),
       setup.opponent && el('p', { className: 'note' }, `Tegen ${setup.opponent}`),
       el('p', { className: 'sub-time' }, subTimeText(state)),
