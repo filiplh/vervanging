@@ -81,6 +81,12 @@ test('invalid input is refused with a PlanError', () => {
   assert.throws(() => makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'six' }), /unknown schedule/);
 });
 
+test('a name inherited from Object.prototype is no schedule', () => {
+  for (const schedule of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+    assert.throws(() => makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule }), PlanError, schedule);
+  }
+});
+
 test('exactly five players: everyone plays every block', () => {
   const stats = planStats(makePlan({ players: range(5), start: [1, 2, 3, 4, 5], schedule: 'equal' }));
   assert.ok(Object.values(stats.minutes).every((m) => m === 2400));
