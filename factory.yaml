@@ -22,12 +22,13 @@ commands:
   verify: 'node --test'
   serve:                            # lets hunters and the validator start the app black-box
     run: 'python3 -m http.server "$PORT" --directory public'
-  # checks:                         # checks beyond verify that only some changes need
-  #   <name>:                       # lower case with _; `verify` is reserved
-  #     run: '<command>'
-  #     when: ["<glob>", "!<glob>"] # ordered, last match wins; leave out to need it for every change
-  #     heavy: false                # true: runs under the machine's shared heavy lock
-  #     gate: true                  # false: never blocks a merge, runs only nightly
+  checks:                           # checks beyond verify that only some changes need
+    # The Swift tests (plan decision #43): the rules package's tests (no simulator), then the app's tests in the
+    # iPhone 17 Pro simulator. Every build output stays inside the worktree (the package's .build, ios/DerivedData).
+    swift:
+      run: 'swift test --package-path ios/VervangingCore --manifest-cache local && xcodebuild test -project ios/Vervanging.xcodeproj -scheme Vervanging -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=latest" -derivedDataPath ios/DerivedData -packageCachePath "$PWD/ios/DerivedData/PackageCache" -quiet'
+      when: ["ios/**", "shared/**"]
+      heavy: true
 
 # work_kinds:                       # merged onto the core table; add the hard parts of this product
 #   <kind>: deep | standard | light
