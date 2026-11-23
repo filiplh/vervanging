@@ -3,8 +3,8 @@ import Testing
 @testable import VervangingCore
 
 // Ported from the wissel, undo, in the zone, Extra minuten, save and restore and minutes parts of
-// public/js/match.test.js (plan decisions #8, #9, #12, #17, #18, #24, #25, #27). The uit and terug parts come with
-// #99. The shared examples check the exact output through `vervanging-sim check-examples`.
+// public/js/match.test.js (plan decisions #8, #9, #12, #17, #18, #24, #25, #27). The uit and terug parts are in
+// MatchUitTests.swift. The shared examples check the exact output through `vervanging-sim check-examples`.
 
 private func range(_ n: Int) -> [Int] { Array(1...n) }
 

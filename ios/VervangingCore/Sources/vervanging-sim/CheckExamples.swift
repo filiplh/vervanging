@@ -10,13 +10,6 @@ let knownKinds = ["plan", "match", "history"]
 /// Options of a supported kind that the Swift sim does not have yet, with the reason given when an example is skipped.
 let unsupportedOptions: [(kind: String, option: String, reason: String)] = []
 
-/// Match actions the Swift sim does not run yet (an example's `actions` field), with the reason given when an
-/// example is skipped; #99 adds them.
-let unsupportedActions: [(action: String, reason: String)] = [
-    ("uit", "the Swift sim has no uit or terug yet"),
-    ("terug", "the Swift sim has no uit or terug yet"),
-]
-
 struct Example {
     let file: String
     let kind: String
@@ -127,10 +120,6 @@ func checkExamples(_ argv: [String]) -> Outcome {
             continue
         }
         if let gap = unsupportedOptions.first(where: { $0.kind == example.kind && example.args.contains($0.option) }) {
-            skipped[gap.reason, default: []].append(file)
-            continue
-        }
-        if let gap = unsupportedActions.first(where: { example.kind == "match" && example.actions.contains($0.action) }) {
             skipped[gap.reason, default: []].append(file)
             continue
         }

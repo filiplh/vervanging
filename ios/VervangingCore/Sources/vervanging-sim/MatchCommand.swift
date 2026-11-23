@@ -2,7 +2,7 @@ import Foundation
 import VervangingCore
 
 // The match command, ported from parseActions and runMatch in scripts/sim.mjs: the same action syntax, checks,
-// messages and JSON, byte for byte. Uit and terug are read but not run yet (#99).
+// messages and JSON, byte for byte.
 
 /// One action of `--actions`, as parseActions gives it. A player number is kept as JavaScript's `Number()` reads the
 /// digits, so a number too large for a player prints in messages as sim.mjs prints it.
@@ -91,25 +91,32 @@ private func playerNumber(_ value: Double?, standIn: Int) -> Int? {
 
 /// Applies one action as applyAction in match.js does; a MatchError becomes the sim's invalid input.
 private func apply(_ action: SimAction, to state: MatchState) throws -> MatchState {
-    switch action {
-    case .undo:
-        return state.undo()
-    case let .wissel(keepValue, benchValue, extra):
-        let keep = playerNumber(keepValue, standIn: -1), bench = playerNumber(benchValue, standIn: -2)
-        do {
-            return try state.wissel(keep: keep, bench: bench, extra: extra)
-        } catch let error as MatchError {
-            var message = error.message
-            for (standIn, value) in [(-1, keepValue), (-2, benchValue)] {
-                if let value, playerNumber(value, standIn: standIn) == standIn {
-                    message = message.replacingOccurrences(of: "player \(standIn) ",
-                                                           with: "player \(value.javaScriptString) ")
-                }
-            }
-            throw UsageError(message)
+    // Each player number given, with the stand-in it gets when it is too large for an Int.
+    var given: [(standIn: Int, value: Double?)] = []
+    func number(_ value: Double?, _ standIn: Int) -> Int? {
+        given.append((standIn, value))
+        return playerNumber(value, standIn: standIn)
+    }
+    do {
+        switch action {
+        case .undo:
+            return state.undo()
+        case let .wissel(keep, bench, extra):
+            return try state.wissel(keep: number(keep, -1), bench: number(bench, -2), extra: extra)
+        case let .uit(player):
+            return try state.uit(number(player, -1)!)
+        case let .terug(player):
+            return try state.terug(number(player, -1)!)
         }
-    case .uit, .terug:
-        throw UsageError("uit and terug are not in the Swift sim yet")
+    } catch let error as MatchError {
+        var message = error.message
+        for (standIn, value) in given {
+            if let value, playerNumber(value, standIn: standIn) == standIn {
+                message = message.replacingOccurrences(of: "player \(standIn) ",
+                                                       with: "player \(value.javaScriptString) ")
+            }
+        }
+        throw UsageError(message)
     }
 }
 
