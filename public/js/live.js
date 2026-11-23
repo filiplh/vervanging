@@ -116,7 +116,11 @@ export function keepScreenAwake(on) {
   return screenLock.set(on);
 }
 
-export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
+// A second Wissel (or Einde match) tap this soon after the first is ignored: the button is redrawn in the same spot and
+// would otherwise take it as a second wissel, skipping a block, or ending the match from block 11 (#49).
+export const DOUBLE_TAP_MS = 600;
+
+export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Date.now }) {
   const setup = normaliseMatchSetup(store.load('matchSetup'));
   if (!setup) {
     keepAwake(false);
@@ -130,6 +134,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
   let state = restoreMatch(store, setup);
   let message = repairHistory(store, setup, state) ? '' : SAVE_FAILED;
   let zone = null; // in the zone or extra minuten, chosen but not yet applied: { keep, bench, extra }
+  let lastWisselAt = -Infinity; // when the last Wissel tap that counted came, on the `now` clock
 
   // Applies one engine action, saves the new state and redraws; an action the engine refuses shows its reason.
   function act(step) {
@@ -143,6 +148,13 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
     }
     zone = null;
     render();
+  }
+
+  function tapWissel() {
+    const at = now();
+    if (at - lastWisselAt < DOUBLE_TAP_MS) return;
+    lastWisselAt = at;
+    act(() => wissel(state, zone ? { keep: zone.keep, bench: zone.bench, extra: zone.extra } : {}));
   }
 
   function toggleZone(keep, extra = false) {
@@ -255,8 +267,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
       status(),
       el('div', { className: 'live-actions' },
         el('button', {
-          type: 'button', className: 'primary wissel',
-          onclick: () => act(() => wissel(state, zone ? { keep: zone.keep, bench: zone.bench, extra: zone.extra } : {})),
+          type: 'button', className: 'primary wissel', onclick: tapWissel,
         }, subTime(state).kind === 'endMatch' ? 'Einde match' : 'Wissel'),
         undoButton()),
       minutesTable('Minuten tot nu'),

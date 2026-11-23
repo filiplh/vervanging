@@ -89,7 +89,7 @@ proposal for the owner to confirm.
   [block 1](2026-ui-review/10-live-blok1-light.png) (context, before the taps).
 - **Why it matters:** ⚠ the risk (not observed with coaches) is a coach in a hurry tapping twice, or again because
   nothing seemed to happen (see P2-2). If two taps arrive, one block is skipped: the wrong players come on, and the minutes go wrong until the coach notices and taps
-  Ongedaan maken. Ongedaan maken undoes one step, so a double tap on the second-to-last wissel also ends the match.
+  Ongedaan maken. Ongedaan maken undoes one step, so a double tap at block 11 also ends the match.
   ⚠ Whether real iOS Safari passes a fast double tap to the page as two clicks, or treats it as a zoom gesture, was
   not checked on a device.
 - **Fix (S):** ignore a second Wissel tap within about 600 ms of the first (a timestamp in `liveScreen`), and set

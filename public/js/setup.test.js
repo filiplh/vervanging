@@ -457,7 +457,7 @@ const REPLACE_QUESTION = 'De lopende match stoppen en een nieuwe beginnen?';
 // The live screen (#start) as app.js opens it after Start, which first removes the old match state.
 function openLive(env) {
   const view = new FakeElement('main');
-  liveScreen(view, { store: env.store, keepAwake() {} });
+  liveScreen(view, { store: env.store, keepAwake() {}, now: ((t) => () => (t += 1000))(0) }); // taps 1 s apart (#49)
   return view;
 }
 const liveTitle = (view) => find(view, 'h1')[0].text;
