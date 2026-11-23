@@ -142,6 +142,9 @@ section:not([aria-labelledby]) { margin-top: 20px; }
 }
 .roster li.editing { background: var(--selected); }
 .player { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Spelers: the name with its season total under it, in the text colour with its unit (#60) */
+.player-cell { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.season-total { font-size: 0.875rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* Attendance and starting five */
 .check { flex: 1; min-width: 0; min-height: var(--tap); display: flex; align-items: center; gap: 12px; cursor: pointer; }
