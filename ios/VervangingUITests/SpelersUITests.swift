@@ -30,16 +30,15 @@ final class SpelersUITests: XCTestCase {
     @MainActor
     func testAddedPlayerIsShownAndStillThereAfterForceQuit() throws {
         launch()
-        XCTAssertTrue(app.staticTexts["spelers.empty"].exists)
-        XCTAssertTrue(app.staticTexts["0 van 15"].exists)
+        expectShown(app.staticTexts["spelers.empty"])
+        expectShown(app.staticTexts["0 van 15"])
 
         add("Lotte", "7")
 
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
-        XCTAssertTrue(row("7").label.contains("Lotte"))
-        XCTAssertFalse(app.staticTexts["spelers.empty"].exists)
-        XCTAssertTrue(app.staticTexts["1 van 15"].exists)
-        XCTAssertEqual(field("spelers.name").value as? String, "Voornaam", "the form is cleared after adding")
+        expectRow("7", containing: "Lotte")
+        expectGone(app.staticTexts["spelers.empty"])
+        expectShown(app.staticTexts["1 van 15"])
+        expectValue(field("spelers.name"), "Voornaam", "the form is cleared after adding")
 
         // Written at once, with a version field.
         let stored = try storedRoster()
@@ -52,18 +51,22 @@ final class SpelersUITests: XCTestCase {
         // Force-quit and open again.
         app.terminate()
         launch()
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
-        XCTAssertTrue(row("7").label.contains("Lotte"))
-        XCTAssertTrue(app.staticTexts["1 van 15"].exists)
+        expectRow("7", containing: "Lotte")
+        expectShown(app.staticTexts["1 van 15"])
     }
 
     @MainActor
     func testPlayersAreListedByNumber() throws {
         launch()
-        add("Fien", "12")
-        add("Lotte", "7")
-        add("Mila", "07")
-        XCTAssertTrue(row("07").waitForExistence(timeout: 5))
+        addPlayer("Fien", "12")
+        addPlayer("Lotte", "7")
+        addPlayer("Mila", "07")
+        for number in ["7", "07", "12"] { expectShown(row(number)) }
+        // The list settles in order; wait for that before reading the positions.
+        _ = waitUntil {
+            let positions = ["7", "07", "12"].map { self.row($0).frame.minY }
+            return positions == positions.sorted()
+        }
         let order = ["7", "07", "12"].map { row($0).frame.minY }
         XCTAssertEqual(order, order.sorted(), "rows sorted by number, 7 before 07 (as the web app)")
     }
@@ -73,50 +76,47 @@ final class SpelersUITests: XCTestCase {
     @MainActor
     func testEditChangesNameAndNumberAndIsSaved() throws {
         launch()
-        add("Lotte", "7")
-        app.buttons["spelers.edit.7"].tap()
+        addPlayer("Lotte", "7")
+        tap(app.buttons["spelers.edit.7"])
 
-        XCTAssertTrue(app.buttons["Bewaren"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Annuleren"].exists)
-        XCTAssertEqual(field("spelers.name").value as? String, "Lotte")
-        XCTAssertEqual(field("spelers.number").value as? String, "7")
+        expectShown(app.buttons["Bewaren"])
+        expectShown(app.buttons["Annuleren"])
+        expectValue(field("spelers.name"), "Lotte")
+        expectValue(field("spelers.number"), "7")
 
         replace(field("spelers.name"), with: "Fien")
         replace(field("spelers.number"), with: "8")
-        app.buttons["Bewaren"].tap()
+        tap(app.buttons["Bewaren"])
 
-        XCTAssertTrue(row("8").waitForExistence(timeout: 5))
-        XCTAssertTrue(row("8").label.contains("Fien"))
-        XCTAssertFalse(row("7").exists)
-        XCTAssertTrue(app.buttons["Toevoegen"].exists, "back to adding after saving")
-        XCTAssertTrue(app.staticTexts["1 van 15"].exists)
+        expectRow("8", containing: "Fien")
+        expectGone(row("7"))
+        expectShown(app.buttons["Toevoegen"], "back to adding after saving")
+        expectShown(app.staticTexts["1 van 15"])
 
         app.terminate()
         launch()
-        XCTAssertTrue(row("8").waitForExistence(timeout: 5))
-        XCTAssertTrue(row("8").label.contains("Fien"))
+        expectRow("8", containing: "Fien")
     }
 
     @MainActor
     func testEditKeepsOwnNumberAndCancelLeavesPlayerAsIs() throws {
         launch()
-        add("Lotte", "7")
+        addPlayer("Lotte", "7")
 
         // Saving with the player's own number is fine (the number is not "taken" by herself).
-        app.buttons["spelers.edit.7"].tap()
+        tap(app.buttons["spelers.edit.7"])
         replace(field("spelers.name"), with: "Lotje")
-        app.buttons["Bewaren"].tap()
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
-        XCTAssertTrue(row("7").label.contains("Lotje"))
-        XCTAssertFalse(app.staticTexts["spelers.message"].exists)
+        tap(app.buttons["Bewaren"])
+        expectRow("7", containing: "Lotje")
+        expectGone(app.staticTexts["spelers.message"])
 
         // Annuleren drops the change.
-        app.buttons["spelers.edit.7"].tap()
+        tap(app.buttons["spelers.edit.7"])
         replace(field("spelers.name"), with: "Iemand")
-        app.buttons["Annuleren"].tap()
-        XCTAssertTrue(app.buttons["Toevoegen"].waitForExistence(timeout: 5))
-        XCTAssertTrue(row("7").label.contains("Lotje"))
-        XCTAssertEqual(field("spelers.name").value as? String, "Voornaam")
+        tap(app.buttons["Annuleren"])
+        expectShown(app.buttons["Toevoegen"])
+        expectRow("7", containing: "Lotje")
+        expectValue(field("spelers.name"), "Voornaam")
     }
 
     // MARK: - Remove
@@ -124,29 +124,30 @@ final class SpelersUITests: XCTestCase {
     @MainActor
     func testRemoveAsksFirstAndIsSaved() throws {
         launch()
-        add("Lotte", "7")
-        add("Fien", "12")
+        addPlayer("Lotte", "7")
+        addPlayer("Fien", "12")
 
         // "Annuleren" keeps her.
-        app.buttons["spelers.remove.7"].tap()
+        tap(app.buttons["spelers.remove.7"])
         let alert = app.alerts["#7 Lotte verwijderen?"]
-        XCTAssertTrue(alert.waitForExistence(timeout: 5))
-        alert.buttons["Annuleren"].tap()
-        XCTAssertTrue(row("7").exists)
-        XCTAssertTrue(app.staticTexts["2 van 15"].exists)
+        expectShown(alert)
+        tap(alert.buttons["Annuleren"])
+        expectGone(alert)
+        expectShown(row("7"))
+        expectShown(app.staticTexts["2 van 15"])
 
         // "Verwijder" removes her.
-        app.buttons["spelers.remove.7"].tap()
-        XCTAssertTrue(alert.waitForExistence(timeout: 5))
-        alert.buttons["Verwijder"].tap()
-        XCTAssertTrue(row("7").waitForNonExistence(timeout: 5))
-        XCTAssertTrue(row("12").exists)
-        XCTAssertTrue(app.staticTexts["1 van 15"].exists)
+        tap(app.buttons["spelers.remove.7"])
+        expectShown(alert)
+        tap(alert.buttons["Verwijder"])
+        expectGone(row("7"))
+        expectShown(row("12"))
+        expectShown(app.staticTexts["1 van 15"])
 
         app.terminate()
         launch()
-        XCTAssertTrue(row("12").waitForExistence(timeout: 5))
-        XCTAssertFalse(row("7").exists)
+        expectShown(row("12"))
+        expectGone(row("7"))
     }
 
     // MARK: - Refusals, as the web app refuses them
@@ -154,34 +155,34 @@ final class SpelersUITests: XCTestCase {
     @MainActor
     func testEmptyNameTakenNumberAndBadNumberAreRefusedWithTheWebAppsMessages() throws {
         launch()
-        add("Lotte", "7")
+        addPlayer("Lotte", "7")
 
         // An empty name (spaces only count as empty).
         add("   ", "8")
-        XCTAssertEqual(message(), "Vul een voornaam in.")
-        XCTAssertFalse(row("8").exists)
+        expectMessage("Vul een voornaam in.")
+        expectGone(row("8"))
 
         // A number already taken.
         replace(field("spelers.name"), with: "Fien")
         replace(field("spelers.number"), with: "7")
-        app.buttons["Toevoegen"].tap()
-        XCTAssertEqual(message(), "Rugnummer 7 is al van Lotte.")
-        XCTAssertEqual(field("spelers.name").value as? String, "Fien", "a refused entry stays in the form")
+        tap(app.buttons["Toevoegen"])
+        expectMessage("Rugnummer 7 is al van Lotte.")
+        expectValue(field("spelers.name"), "Fien", "a refused entry stays in the form")
 
         // No number.
         replace(field("spelers.number"), with: "")
-        app.buttons["Toevoegen"].tap()
-        XCTAssertEqual(message(), "Vul een rugnummer van 0 tot 99 in.")
+        tap(app.buttons["Toevoegen"])
+        expectMessage("Vul een rugnummer van 0 tot 99 in.")
 
-        XCTAssertTrue(app.staticTexts["1 van 15"].exists)
+        expectShown(app.staticTexts["1 van 15"])
         let players = try XCTUnwrap(try storedRoster()["players"] as? [[String: Any]])
         XCTAssertEqual(players.count, 1, "nothing refused was saved")
 
         // A good entry clears the message.
         replace(field("spelers.number"), with: "8")
-        app.buttons["Toevoegen"].tap()
-        XCTAssertTrue(row("8").waitForExistence(timeout: 5))
-        XCTAssertFalse(app.staticTexts["spelers.message"].exists)
+        tap(app.buttons["Toevoegen"])
+        expectShown(row("8"))
+        expectGone(app.staticTexts["spelers.message"])
     }
 
     @MainActor
@@ -190,8 +191,7 @@ final class SpelersUITests: XCTestCase {
         // the space after "Teh" would let the keyboard replace it.
         launch()
         add("Teh Lien", "3")
-        XCTAssertTrue(row("3").waitForExistence(timeout: 5))
-        XCTAssertTrue(row("3").label.contains("Teh Lien"), "got \(row("3").label)")
+        expectRow("3", containing: "Teh Lien")
         let players = try XCTUnwrap(try storedRoster()["players"] as? [[String: Any]])
         XCTAssertEqual(players.first?["name"] as? String, "Teh Lien")
     }
@@ -202,37 +202,37 @@ final class SpelersUITests: XCTestCase {
     func testFifteenthPlayerFillsTheRosterAndASixteenthCannotBeAdded() throws {
         try plant(players: (1...14).map { (id: $0, name: "Speler\($0)", number: String($0 + 10)) })
         launch()
-        XCTAssertTrue(app.staticTexts["14 van 15"].waitForExistence(timeout: 5))
+        expectShown(app.staticTexts["14 van 15"])
 
         add("Lotte", "7")
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["15 van 15"].exists)
+        expectShown(row("7"))
+        expectShown(app.staticTexts["15 van 15"])
 
         // Full: the form gives way to the web app's message, so a 16th cannot be entered.
         let full = app.staticTexts["spelers.full"]
-        XCTAssertTrue(full.waitForExistence(timeout: 5))
+        expectShown(full)
         XCTAssertEqual(
             full.label, "Maximaal 15 spelers. Verwijder eerst een speler om er een toe te voegen."
         )
-        XCTAssertFalse(field("spelers.name").exists)
-        XCTAssertFalse(app.buttons["Toevoegen"].exists)
+        expectGone(field("spelers.name"))
+        expectGone(app.buttons["Toevoegen"])
 
         // Still full after a restart.
         app.terminate()
         launch()
-        XCTAssertTrue(app.staticTexts["spelers.full"].waitForExistence(timeout: 5))
-        XCTAssertFalse(field("spelers.name").exists)
+        expectShown(app.staticTexts["spelers.full"])
+        expectGone(field("spelers.name"))
 
         // Editing a player is still possible on a full roster.
-        app.buttons["spelers.edit.7"].tap()
-        XCTAssertTrue(app.buttons["Bewaren"].waitForExistence(timeout: 5))
-        app.buttons["Annuleren"].tap()
+        tap(app.buttons["spelers.edit.7"])
+        expectShown(app.buttons["Bewaren"])
+        tap(app.buttons["Annuleren"])
 
         // Removing one makes room again.
-        app.buttons["spelers.remove.7"].tap()
-        app.alerts["#7 Lotte verwijderen?"].buttons["Verwijder"].tap()
-        XCTAssertTrue(field("spelers.name").waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["14 van 15"].exists)
+        tap(app.buttons["spelers.remove.7"])
+        tap(app.alerts["#7 Lotte verwijderen?"].buttons["Verwijder"])
+        expectShown(field("spelers.name"))
+        expectShown(app.staticTexts["14 van 15"])
     }
 
     // MARK: - A missing or unreadable file
@@ -241,8 +241,8 @@ final class SpelersUITests: XCTestCase {
     func testMissingFileStartsAnEmptyRoster() throws {
         XCTAssertFalse(FileManager.default.fileExists(atPath: rosterFile.path))
         launch()
-        XCTAssertTrue(app.staticTexts["spelers.empty"].exists)
-        XCTAssertTrue(app.staticTexts["0 van 15"].exists)
+        expectShown(app.staticTexts["spelers.empty"])
+        expectShown(app.staticTexts["0 van 15"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: rosterFile.path), "nothing is written before a change")
     }
 
@@ -250,11 +250,11 @@ final class SpelersUITests: XCTestCase {
     func testUnreadableFileStartsAnEmptyRosterAndIsReplacedOnTheNextChange() throws {
         try Data("{ dit is geen JSON".utf8).write(to: rosterFile)
         launch()
-        XCTAssertTrue(app.staticTexts["spelers.empty"].exists)
-        XCTAssertTrue(app.staticTexts["0 van 15"].exists)
+        expectShown(app.staticTexts["spelers.empty"])
+        expectShown(app.staticTexts["0 van 15"])
 
         add("Lotte", "7")
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
+        expectShown(row("7"))
         XCTAssertEqual(try storedRoster()["version"] as? Int, 1)
     }
 
@@ -265,7 +265,7 @@ final class SpelersUITests: XCTestCase {
             "version": 99, "nextId": 2, "players": [["id": 1, "name": "Lotte", "number": "7"]],
         ]).write(to: rosterFile)
         launch()
-        XCTAssertTrue(app.staticTexts["spelers.empty"].exists)
+        expectShown(app.staticTexts["spelers.empty"])
         app.terminate()
 
         // One damaged player is dropped, the others stay (as the web app's normaliseRoster).
@@ -278,10 +278,10 @@ final class SpelersUITests: XCTestCase {
             ],
         ]).write(to: rosterFile)
         launch()
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
-        XCTAssertFalse(row("8").exists)
-        XCTAssertFalse(row("123").exists)
-        XCTAssertTrue(app.staticTexts["1 van 15"].exists)
+        expectShown(row("7"))
+        expectGone(row("8"))
+        expectGone(row("123"))
+        expectShown(app.staticTexts["1 van 15"])
     }
 
     // MARK: - Damaged or extreme ids (review of #117)
@@ -299,12 +299,12 @@ final class SpelersUITests: XCTestCase {
             ],
         ]).write(to: rosterFile)
         launch()
-        XCTAssertTrue(row("12").waitForExistence(timeout: 5), "an id at the limit is kept")
-        XCTAssertFalse(row("7").exists, "an id above the limit is damaged and dropped")
-        XCTAssertFalse(row("9").exists, "an id below the negative limit is damaged and dropped")
+        expectShown(row("12"), "an id at the limit is kept")
+        expectGone(row("7"), "an id above the limit is damaged and dropped")
+        expectGone(row("9"), "an id below the negative limit is damaged and dropped")
 
         add("Mila", "4")
-        XCTAssertTrue(row("4").waitForExistence(timeout: 5))
+        expectShown(row("4"))
         let stored = try storedRoster()
         let players = try XCTUnwrap(stored["players"] as? [[String: Any]])
         let mila = try XCTUnwrap(players.first { $0["name"] as? String == "Mila" })
@@ -313,8 +313,8 @@ final class SpelersUITests: XCTestCase {
 
         app.terminate()
         launch()
-        XCTAssertTrue(row("4").waitForExistence(timeout: 5))
-        XCTAssertTrue(row("12").exists)
+        expectShown(row("4"))
+        expectShown(row("12"))
     }
 
     @MainActor
@@ -324,7 +324,7 @@ final class SpelersUITests: XCTestCase {
             .write(to: rosterFile)
         launch()
         add("Lotte", "7")
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
+        expectShown(row("7"))
         var stored = try storedRoster()
         XCTAssertEqual((stored["players"] as? [[String: Any]])?.first?["id"] as? Int, 1)
         XCTAssertEqual(stored["nextId"] as? Int, 2)
@@ -334,10 +334,8 @@ final class SpelersUITests: XCTestCase {
         try JSONSerialization.data(withJSONObject: ["version": 1, "nextId": maxId, "players": []])
             .write(to: rosterFile)
         launch()
-        add("Lotte", "7")
-        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
-        add("Fien", "12")
-        XCTAssertTrue(row("12").waitForExistence(timeout: 5))
+        addPlayer("Lotte", "7")
+        addPlayer("Fien", "12")
         stored = try storedRoster()
         let ids = (stored["players"] as? [[String: Any]])?.compactMap { $0["id"] as? Int }
         XCTAssertEqual(ids, [maxId, 1])
@@ -353,17 +351,17 @@ final class SpelersUITests: XCTestCase {
         try Data("geen map".utf8).write(to: blocked)
         app.launchEnvironment["VERVANGING_STORAGE_DIR"] = blocked.path
         launch()
-        XCTAssertTrue(app.staticTexts["spelers.empty"].exists, "an unreadable storage folder starts empty")
+        expectShown(app.staticTexts["spelers.empty"], "an unreadable storage folder starts empty")
 
         add("Lotte", "7")
-        XCTAssertEqual(message(), "Opslaan lukte niet: de telefoon weigert opslag.")
-        XCTAssertTrue(row("7").exists, "the change stays on screen, as on the web, with the message saying it was not stored")
+        expectMessage("Opslaan lukte niet: de telefoon weigert opslag.")
+        expectShown(row("7"), "the change stays on screen, as on the web, with the message saying it was not stored")
         XCTAssertEqual(try Data(contentsOf: blocked), Data("geen map".utf8), "nothing was written over the file")
 
         // A relaunch shows that nothing was stored.
         app.terminate()
         launch()
-        XCTAssertTrue(app.staticTexts["spelers.empty"].exists)
+        expectShown(app.staticTexts["spelers.empty"])
     }
 
     // MARK: - Helpers
@@ -379,15 +377,85 @@ final class SpelersUITests: XCTestCase {
         app.descendants(matching: .any)["spelers.player.\(number)"].firstMatch
     }
 
-    private func message() -> String? {
-        let text = app.staticTexts["spelers.message"]
-        return text.waitForExistence(timeout: 5) ? text.label : nil
+    /// Adds a player and waits until she is listed and the form is empty again, so the next step starts from the
+    /// settled screen.
+    private func addPlayer(_ name: String, _ number: String) {
+        add(name, number)
+        expectRow(number, containing: name)
+        expectValue(field("spelers.name"), "Voornaam", "the form is cleared after adding")
     }
 
     private func add(_ name: String, _ number: String) {
         replace(field("spelers.name"), with: name)
         replace(field("spelers.number"), with: number)
-        app.buttons["Toevoegen"].tap()
+        tap(app.buttons["Toevoegen"])
+    }
+
+    /// Taps an element once it is there, instead of failing at once when the screen is still catching up.
+    private func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(element.waitForExistence(timeout: Self.timeout), "\(element) never appeared", file: file, line: line)
+        element.tap()
+    }
+
+    // MARK: - Waiting (a busy simulator is slow, so nothing is read the moment after a launch or tap)
+
+    /// How long an element may take to appear, change or go away.
+    private static let timeout: TimeInterval = 5
+
+    /// Polls `condition` (every 0.1 s) until it holds or `timeout` has passed; true when it held.
+    private func waitUntil(_ timeout: TimeInterval = SpelersUITests.timeout, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline { return false }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return true
+    }
+
+    private func expectShown(
+        _ element: XCUIElement, _ message: String = "", file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertTrue(
+            element.waitForExistence(timeout: Self.timeout), "\(message) (\(element) never appeared)",
+            file: file, line: line
+        )
+    }
+
+    private func expectGone(
+        _ element: XCUIElement, _ message: String = "", file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertTrue(
+            element.waitForNonExistence(timeout: Self.timeout), "\(message) (\(element) is still there)",
+            file: file, line: line
+        )
+    }
+
+    /// Waits for a text field to hold `expected` (an empty field reads as its placeholder), then asserts it.
+    private func expectValue(
+        _ element: XCUIElement, _ expected: String, _ message: String = "",
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        _ = waitUntil { element.exists && element.value as? String == expected }
+        XCTAssertEqual(element.value as? String, expected, message, file: file, line: line)
+    }
+
+    /// Waits for the validation message to read `expected`, then asserts it.
+    private func expectMessage(_ expected: String, file: StaticString = #filePath, line: UInt = #line) {
+        let text = app.staticTexts["spelers.message"]
+        _ = waitUntil { text.exists && text.label == expected }
+        XCTAssertTrue(text.exists, "no message shown", file: file, line: line)
+        XCTAssertEqual(text.label, expected, file: file, line: line)
+    }
+
+    /// Waits for the player's row to exist and, when given, to carry `name` in its label.
+    private func expectRow(
+        _ number: String, containing name: String? = nil, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let element = row(number)
+        expectShown(element, "row \(number)", file: file, line: line)
+        guard let name else { return }
+        _ = waitUntil { element.exists && element.label.contains(name) }
+        XCTAssertTrue(element.label.contains(name), "got \(element.label)", file: file, line: line)
     }
 
     /// Clears a text field and types the new text.
