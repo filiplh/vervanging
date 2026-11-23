@@ -232,13 +232,16 @@ button.chip[aria-pressed="true"] { background: var(--selected); border-color: va
 .zone-note button.chip.extra { margin-left: 0; }
 .zone-note button.chip.extra[aria-pressed="true"] { background: var(--surface); border: 2px solid var(--on); }
 
-/* A name row with buttons under Eruit and Erin (#46). The name never shrinks: when it and the buttons don't fit on
-   one line, the buttons move to the line under it (a long name wraps rather than being cut). Each row has one small
-   button (In the zone or Op de bank, #52), so a row is a name line plus one 44 px button line from 360 px up, and a
-   three-player change shows every name and button above the sticky Wissel bar. */
-.names li.with-chips { flex-wrap: wrap; gap: 0 6px; padding: 0; }
-.names li.with-chips .player { flex: 1 1 auto; white-space: normal; overflow-wrap: anywhere; line-height: 1.1; }
-.names li .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+/* A name row with buttons under Eruit and Erin (#46, #52). Each row has one small button (In the zone or Op de bank),
+   kept beside the name: the name takes the rest of the column and wraps there (never cut), so a row stays 44 px
+   high while the name fits in two lines. Measured in headless Chrome at 360-402 x 874 with 15 players and a
+   three-player change: every Eruit name and button sits above the sticky Wissel bar with short names, with
+   "Marie-Louise" on one player due off, and with "Anne-Sophie" on all three (at 360 px "#11 Anne-Sophie" takes three
+   lines and ends 1 px above the bar). A name that takes three lines on more rows than that can still push the last
+   row under the bar. */
+.names li.with-chips { flex-wrap: nowrap; gap: 0 6px; padding: 0; }
+.names li.with-chips .player { flex: 1 1 0; min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.1; }
+.names li .chips { display: flex; flex: 0 0 auto; gap: 4px; }
 .names li .chips button.chip { margin-left: 0; padding: 0 6px; font-size: 0.8rem; }
 
 /* Minutes at a glance (#32): every player in one dense grid at the top, six cells a row, so twelve players fit in

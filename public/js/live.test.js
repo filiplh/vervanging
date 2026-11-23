@@ -723,14 +723,20 @@ test('live screen: every Eruit row shows the player\'s name on its own line abov
 });
 
 // The layout itself was measured in a browser at 402 x 874 (#46); these guard the rules that measurement rests on.
-test('styles: a name row with buttons wraps, its name is never cut, and the buttons stay compact on one line', () => {
+// #52 fix round: with one button per row, the button stays beside the name and a long name wraps in its own space, so
+// "Marie-Louise" or "Anne-Sophie" no longer push the button onto a line of its own (which put the third row under the
+// Wissel bar).
+test('styles: a name row keeps its one button beside the name, and the name wraps beside it, never cut', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
   const rule = (selector) => css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*()]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
-  assert.match(rule('.names li.with-chips'), /flex-wrap:\s*wrap/, 'buttons that do not fit go under the name');
+  assert.match(rule('.names li.with-chips'), /flex-wrap:\s*nowrap/, 'the button never moves under the name');
   const player = rule('.names li.with-chips .player');
   assert.match(player, /white-space:\s*normal/, 'a long name wraps instead of being cut');
-  assert.doesNotMatch(player, /flex-basis:\s*100%/, 'the name does not force the buttons onto a line of their own');
-  assert.match(player, /flex:\s*1 1 auto/, 'the name is laid out at its full width before the buttons');
+  assert.match(player, /overflow-wrap:\s*anywhere/, 'even one long word wraps rather than overflowing');
+  assert.match(player, /flex:\s*1 1 0/, 'the name takes the width the button leaves');
+  assert.match(player, /min-width:\s*0/, 'so it can wrap inside that width');
+  assert.doesNotMatch(player, /overflow:\s*hidden|text-overflow/, 'the name is never cut');
+  assert.match(rule('.names li .chips'), /flex:\s*0 0 auto/, 'the button keeps its full width');
   const chip = rule('.names li .chips button.chip');
   assert.match(chip, /padding:\s*0 6px/, 'narrow buttons, so a button fits beside a short name');
   assert.match(chip, /font-size:\s*0\.8rem/);
