@@ -6,11 +6,12 @@ import { join, relative, basename } from 'node:path';
 import vm from 'node:vm';
 import { createHash } from 'node:crypto';
 import { createStore } from './store.js';
-import { makePlan, planStats } from './planner.js';
+import { makePlan, planStats, SCHEDULES } from './planner.js';
+import { startMatch, wissel } from './match.js';
 import {
   MAX_PLAYERS, normaliseRoster, checkPlayer, addPlayer, editPlayer, removePlayer, normaliseAttendance,
   initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen, isInstalled,
-  formatDuration, seasonNote,
+  formatDuration, seasonNote, hasRunningMatch,
 } from './setup.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
@@ -447,6 +448,84 @@ test('setup screen: Start with refused storage shows a message and does not leav
   button(view, 'Start').fire('click');
   assert.equal(started.length, 0);
   assert.match(pageText(view), /Opslaan lukte niet/);
+});
+
+// ---------- Start with a saved match (#47, P1-2 in docs/spikes/2026-ui-review.md) ----------
+
+const REPLACE_QUESTION = 'De lopende match stoppen en een nieuwe beginnen?';
+
+// Starts a match through the setup screen and returns the live state match.js makes for it, at block 1.
+function liveStateOf(env) {
+  pickFive(env.view);
+  button(env.view, 'Start').fire('click');
+  const setup = env.raw('matchSetup');
+  const { blocks, blockSeconds, blocksPerQuarter } = SCHEDULES[setup.schedule];
+  return startMatch({
+    schedule: setup.schedule, blocks, blockSeconds, blocksPerQuarter,
+    players: setup.players.map((p) => p.id), grid: setup.plan.grid,
+  }, setup.savedAt);
+}
+
+// A second setup screen on the same store, where the coach picks a different schedule and taps Start.
+function startAgain(env, answer) {
+  const asked = [];
+  globalThis.window = { confirm: (q) => { asked.push(q); return answer; } };
+  const view = new FakeElement('main');
+  const started = [];
+  setupScreen(view, { store: env.store, onStart: (s) => started.push(s) });
+  radios(view)[1].fire('change');
+  pickFive(view);
+  button(view, 'Start').fire('click');
+  return { view, asked, started };
+}
+
+test('hasRunningMatch: a saved match that has not ended; nothing, an ended match or a damaged value is none', () => {
+  const env = openSetup();
+  const state = liveStateOf(env);
+  assert.equal(hasRunningMatch(state), true);
+  let ended = state;
+  while (!ended.ended) ended = wissel(ended);
+  assert.equal(hasRunningMatch(ended), false);
+  for (const raw of [null, undefined, 42, 'x', []]) assert.equal(hasRunningMatch(raw), false);
+});
+
+test('setup screen: Start with a running match asks first; no keeps the match and its setup and stays on setup', () => {
+  const env = openSetup({ players: 11 });
+  const state = wissel(liveStateOf(env));
+  env.store.save('match', state);
+  const before = new Map(env.data);
+
+  const { view, asked, started } = startAgain(env, false);
+  assert.deepEqual(asked, [REPLACE_QUESTION]);
+  assert.equal(started.length, 0, 'no: the new match is not started');
+  assert.deepEqual(new Map(env.data), before, 'no: nothing saved, the running match and its setup are untouched');
+  assert.equal(env.raw('match').block, 2);
+  assert.ok(button(view, 'Start'), 'still on the setup screen');
+});
+
+test('setup screen: Start with a running match and yes saves the new setup and starts it', () => {
+  const env = openSetup();
+  env.store.save('match', liveStateOf(env));
+  const { asked, started } = startAgain(env, true);
+  assert.deepEqual(asked, [REPLACE_QUESTION]);
+  assert.equal(started.length, 1);
+  assert.equal(env.raw('matchSetup').schedule, 'five', 'the new setup replaced the old one');
+});
+
+test('setup screen: Start with no match saved, or an ended one, starts at once without asking', () => {
+  const none = openSetup();
+  const first = startAgain(none, false);
+  assert.deepEqual(first.asked, []);
+  assert.equal(first.started.length, 1);
+
+  const env = openSetup();
+  let state = liveStateOf(env);
+  while (!state.ended) state = wissel(state);
+  env.store.save('match', state);
+  const { asked, started } = startAgain(env, false);
+  assert.deepEqual(asked, [], 'an ended match is not asked about');
+  assert.equal(started.length, 1);
+  assert.equal(env.raw('matchSetup').schedule, 'five');
 });
 
 // ---------- team history on the setup screen (decision #10) ----------

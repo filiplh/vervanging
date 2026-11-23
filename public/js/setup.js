@@ -114,6 +114,12 @@ export function playerLabel(p) {
   return `#${p.number} ${p.name}`;
 }
 
+// True when a saved live match (match.js) has not ended: a new Start would replace it, so it asks first (P1-2 in
+// docs/spikes/2026-ui-review.md). A stored value that is not an object counts as no match.
+export function hasRunningMatch(rawMatch) {
+  return rawMatch != null && typeof rawMatch === 'object' && !Array.isArray(rawMatch) && rawMatch.ended !== true;
+}
+
 function newSeed() {
   return Math.floor(Math.random() * 0xffffffff) + 1;
 }
@@ -326,6 +332,9 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
   }
 
   function startMatch() {
+    // Asked before anything is saved, so a "no" keeps the running match and its setup untouched.
+    if (hasRunningMatch(store.load('match'))
+      && !window.confirm('De lopende match stoppen en een nieuwe beginnen?')) return;
     const setup = {
       savedAt: new Date().toISOString(),
       opponent: opponent.trim(),

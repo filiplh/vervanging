@@ -25,7 +25,7 @@ function show() {
   else if (name === 'start') liveScreen(view, { store });
   else {
     // A new "Start" begins a new match: the previous match state is dropped (the live screen also refuses a state
-    // that belongs to another setup).
+    // that belongs to another setup). The setup screen asks first when that match has not ended.
     setupScreen(view, { store, onStart: () => { store.remove('match'); location.hash = '#start'; } });
   }
   window.scrollTo(0, 0);
