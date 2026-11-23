@@ -147,6 +147,8 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   let confirmed = false; // true when `message` is a confirmation line, not an error
   let zone = null; // in the zone or extra minuten, chosen but not yet applied: { keep, bench, extra }
   let lastWisselAt = -Infinity; // when the last Wissel tap that counted came, on the `now` clock
+  let extraToggle = null; // the Extra minuten toggle and the sticky Wissel bar as last drawn, for showExtraToggle
+  let actionsBar = null;
 
   // Applies one engine action, saves the new state and redraws; an action the engine refuses shows its reason.
   // A successful action writes its confirmation line (#50), made by `confirm` from the state before and after; a
@@ -201,11 +203,24 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   function toggleZone(keep) {
     zone = zone && zone.keep === keep ? null : { keep, bench: proposedBench(state), extra: false };
     render();
+    showExtraToggle();
   }
 
   function toggleExtra() {
     if (zone) zone = { ...zone, extra: !zone.extra };
     render();
+    showExtraToggle();
+  }
+
+  // The zone note sits under the change, so with a three-player change its Extra minuten toggle starts below the
+  // sticky Wissel bar (#74). After In the zone is chosen, and after the toggle is pressed (its sentence grows by a
+  // line), the page scrolls just far enough to put the toggle above the bar. Scrolling only moves the screen up, so the
+  // Eruit and Erin buttons stay above the bar; a toggle already in view does not move the page.
+  const TOGGLE_GAP = 8;
+  function showExtraToggle() {
+    if (!zone || !extraToggle?.getBoundingClientRect || !actionsBar?.getBoundingClientRect) return;
+    const below = extraToggle.getBoundingClientRect().bottom + TOGGLE_GAP - actionsBar.getBoundingClientRect().top;
+    if (below > 0) globalThis.scrollBy?.(0, below);
   }
 
   function chooseBench(bench) {
@@ -218,8 +233,8 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
     return el('span', { className: 'player' }, el('span', { className: 'number' }, `#${p.number}`), ' ', p.name);
   };
   const sortedPlayers = (ids) => ids.map((id) => byId.get(id)).sort(byNumber).map((p) => p.id);
-  // A row with buttons (In the zone, Op de bank) puts the name on its own line and the buttons under
-  // it, so the name is never squeezed to nothing in a half-width column (#46).
+  // A row with a button (In the zone under Eruit, Op de bank under Erin) keeps the button beside the name; the name
+  // takes the rest of the column and wraps there, never cut (#46, #52, #74; the widths are in styles.css).
   const nameList = (ids, className, extra = () => null) => el('ul', { className: `names ${className}` },
     sortedPlayers(ids).map((id) => {
       const buttons = extra(id);
@@ -273,6 +288,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
 
   function playing() {
     const change = nextChange(state);
+    extraToggle = null;
     return [
       el('h1', {}, `Blok ${state.block} van ${state.blocks}`,
         ' ', el('span', { className: 'count' }, `kwart ${quarterOf(state)}`)),
@@ -303,11 +319,11 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
           zone.extra
             ? el('p', {}, name(zone.keep), ' speelt een extra blok (extra minuten, niet teruggegeven), ', name(zone.bench), ' blijft op de bank.')
             : el('p', {}, name(zone.keep), ' blijft in the zone op het veld, ', name(zone.bench), ' blijft op de bank.'),
-          el('button', {
+          extraToggle = el('button', {
             type: 'button', className: 'chip extra', 'aria-pressed': zone.extra ? 'true' : 'false', onclick: toggleExtra,
           }, 'Extra minuten (niet teruggeven)'))),
       status(),
-      el('div', { className: 'live-actions' },
+      actionsBar = el('div', { className: 'live-actions' },
         el('button', {
           type: 'button', className: 'primary wissel', onclick: tapWissel,
         }, subTime(state).kind === 'endMatch' ? 'Einde match' : 'Wissel'),
