@@ -1,6 +1,6 @@
 ---
 name: factory-grill
-description: Relentless product interview that stress-tests an idea, plan, phase, feature or issue until every decision is made, assumed on purpose, or parked with an owner, and leaves a decision log that factory-plan turns into the plan. It does its own homework, maps the decision tree, asks the user only what they alone can decide or know (one deep question per turn, quick rounds, premise rounds; decisions come with a recommended answer) and challenges vague terms. Project context comes from the project's grill context file and rules file. Use when the user says "grill me", "interview me", "stress-test / poke holes in my plan", "what am I missing", "pre-mortem", "is this ready to build", or before a new project, a phase, an epic or a big feature, even if they never say "grill".
+description: Relentless interview that stress-tests an idea, plan, phase, feature or issue until every decision is made, assumed on purpose or parked with an owner, then leaves a decision log that factory-plan turns into the plan. Does its own homework and asks the user only what they alone can decide, one deep question per turn. Use when the user says "grill me", "interview me", "stress-test my plan", "what am I missing", "pre-mortem" or "is this ready to build", or before a new project, phase, epic or big feature, even without the word grill. Not for writing the plan or the tickets.
 ---
 
 # Grilling a plan

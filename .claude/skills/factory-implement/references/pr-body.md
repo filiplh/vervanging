@@ -1,41 +1,17 @@
-# PR body, when the repo has no template
+# PR body
 
-Use the repo's `.github/pull_request_template.md` when it exists. Use this structure only when it does not. Fill in
-every section; write "none" rather than leaving one empty. Write it in the language `AGENTS.md` sets for PR text,
-translating the headings if it asks for that.
+The PR body follows the repo's `.github/pull_request_template.md`: the factory installs it, and the template says what
+each section holds (`core/templates/pull_request_template.md` in the factory repo). Read it and fill it in. This page
+adds only what the template does not say.
 
-```markdown
-## What
-<one or two sentences: what changes, for the user or for the code>
-
-Closes #<N>        <!-- or "Refs #<N>" and what is left, when the issue is not fully done -->
-
-## How
-<main files or modules, and any decision the reviewer should know about>
-<paths touched outside the issue's owned paths, and why, or "none">
-
-## Acceptance criteria
-- [x] <criterion>
-- [ ] <criterion>: not met, because <reason>
-
-## Checks
-<!-- Commands you actually ran, with the head SHA and the real result. A check that failed or did not run is listed
-     as such. -->
-- Automated: <exact commands and results with counts>
-- Real target: <what was tried on the real target, or "not tested on a real target">
-- Left to the gate: <heavy checks this PR needs and did not run in full, or "none">
-
-## Known limitations
-<or "none">
-
-## Data impact
-<persisted shapes, migrations, stored data or config touched; does old data still load? Or "none">
-
-## Needs confirmation
-<or "none">
-
-## Self-check
-- [ ] Rules in `AGENTS.md` and the role file followed
-- [ ] `.factory/review-checklist.md` walked
-- [ ] No new dependency without approval; no secrets; only owned paths changed
-```
+- **Every section is filled in.** Write "none" rather than leaving one empty. Put the head SHA you ran the checks on
+  after `- Head:`.
+- **Language.** Write it in the language `AGENTS.md` sets for PR text, translating the headings if it asks for that.
+- **Acceptance criteria.** Only `- [ ]` and `- [x]` lines, one per criterion; an open one says ": not met, because
+  <reason>" and links a new follow-up issue. Notes go under Checks. (A project's own copy of the template may be
+  older than this rule: factory-update never changes it.)
+- **The issue line.** `Closes #<N>` only when the issue is fully done; otherwise `Refs #<N>` and what is left.
+- **No template in the repo** (a project that removed it, or kept its own under another name: use that one). Then use
+  these `##` headings in this order: What, How, Acceptance criteria (a list of `- [x]` and `- [ ]` items), Checks
+  (Head, Automated, Real target, Left to the gate), Known limitations, Data impact, Needs confirmation, Self-check.
+  Say in your report that the template was missing.

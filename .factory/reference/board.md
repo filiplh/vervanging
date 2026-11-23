@@ -50,7 +50,7 @@ Per open PR, the latest review marker and the latest local evidence:
 
 ```sh
 gh pr view <P> -R <repo> --json comments \
-  --jq '[.comments[].body | select(contains("<!-- factory:review "))] | last' | grep -o '<!-- factory:review [^>]*-->'
+  --jq '[.comments[].body | select(contains("<!-- factory:review "))] | last // "" | scan("<!-- factory:review [^>]*-->")'
 ```
 
 On the status issue: the latest comment headed `Lead handoff` and every open `Back-off record: <provider>`

@@ -1,6 +1,6 @@
 ---
 name: factory-init
-description: Installs the agentic software factory into the current GitHub repo and opens the install PR. Detects the stack and its commands, asks only what it cannot detect (about ten questions, one at a time, each with a recommended answer), writes the overlay (factory.yaml, AGENTS.md with CLAUDE.md pointing to it, role files, review checklist, PR template), copies the pinned core into .claude/skills, .claude/agents and .factory/ with a core.lock of file hashes, links .agents/skills, renders the budget-aware CI workflows, merges the sandbox and hook settings with what is there, creates the label set and the one status issue, and opens "chore: install factory <version>". In a repo with existing rules, CI or agent setup it keeps every file, merges or proposes with a diff, and lists all of it in the PR. Safe to re-run; it never overwrites a file the project owns. Use when the user says "/factory-init", "install the factory", "set up the factory in this repo" or "re-run factory-init".
+description: Installs the factory into the current GitHub repo and opens the install PR. Detects the stack, asks only what it cannot detect (about ten questions), writes the overlay (factory.yaml, rules file, roles, checklist, PR template), copies the pinned core with a lock file, renders the CI workflows, merges settings, and creates the labels and the status issue. Safe to re-run, and keeps every file a project owns. Use when the user says "/factory-init", "install the factory", "set up the factory in this repo" or "re-run factory-init". To move an installed repo to a newer core, use factory-update.
 ---
 
 # Install the factory in a repo
@@ -91,6 +91,8 @@ Ask only what detection left open or uncertain, **one question at a time**, each
 and why in one line; take the recommendation when the person says "yes" or "go". The list, with when to skip each
 question and how to pick the recommendation: [references/questions.md](references/questions.md). Usually about ten,
 often fewer. Open with one message that lists what you detected, so the person can correct a finding before you ask.
+A new repo with no stack yet has its own path (some keys stay unset, verify gets a named placeholder):
+[questions.md › A repo with no stack yet](references/questions.md#a-repo-with-no-stack-yet).
 
 Do not ask for anything that needs an account, a secret or money; those are human steps for the PR.
 
@@ -103,14 +105,21 @@ Do not ask for anything that needs an account, a secret or money; those are huma
    `sh <source>/core/bin/factory-install pin <owner>/<action> <release tag>` prints the line to use
    (`<owner>/<action>@<sha> # <tag>`). GitHub's own `actions/*` pinned this way are approved for every project; any
    other action is a new dependency (human gate H2): list it in the PR as waiting for a person's OK.
-3. **Preview:** `sh <source>/core/bin/factory-install apply --source <source> --target <target> --values <values> --proposals <scratch>/proposals --dry-run`.
+3. **Preview:** `sh <source>/core/bin/factory-install apply --source <source> --target <target> --values <values> --proposals <scratch>/proposals --source-stamp <scratch>/source.stamp --dry-run`.
+   The stamp (outside the repo) records the source's version and a digest of its files, so the apply installs exactly
+   what this preview saw: one core version, even when the source is a clone someone pulls during the run.
    Every line starts with what would happen. If any line says `differs`, `kept` with a reason, `merged` or `proposed`,
    or the merge notes say `replaced`, show those lines to the person before you go on. The proposals folder (outside
    the repo) gets each proposed file and its diff.
-4. **Apply:** the same command without `--dry-run`, with `--report <scratch>/report.txt`. It refuses to write through
+4. **Apply:** the same command without `--dry-run` (the same `--source-stamp` file), with `--report <scratch>/report.txt`. It refuses to write through
    a symlink anywhere it writes, and merging `.codex/config.toml` needs a Python 3.11+ (for `tomllib`). Exit codes: 0 done; 3 done,
    but the `differs` lines (and `kept` lines with a reason) need a person, and go in the PR; 4 another core version
-   (stop, step 1.4); 1 or 2 nothing was written: read the message, fix the answer, run again. A refusal that names
+   (stop, step 1.4); 1 or 2 nothing was written: read the message, fix the answer, run again; 5 "the source changed
+   since the dry run" (or during the run): nothing was written in the target. Never edit the stamp or run the apply
+   again on its own. Read the source's version again (step 1.1). Still the version you started with: run the preview
+   again, show its lines as in step 3, then apply. Another version: remove the worktree and start again from step 1.4
+   with that version, since the case, the branch name and the PR title all name it. If the source keeps moving, ask
+   the person to hold it still (no pull of the clone during the run) or to run from the installed plugin. A refusal that names
    skills or agents "whose names belong to the core" is for the person: see
    [references/brownfield.md](references/brownfield.md).
 5. `sh <source>/core/bin/factory-install check --target <target>` must print `ok` and nothing else, apart from files
@@ -129,7 +138,26 @@ answered differently in the PR instead.
 
 When `AGENTS.md` was **added**, you may draft its `## Stack` section from what you detected (languages, frameworks,
 the file that pins each version), leaving the `<!-- fill in -->` comment above your draft so a person checks it.
-Leave every other `fill in` comment for people.
+For a repo with no stack yet, write this handoff instead, as it stands:
+
+```markdown
+No stack yet: `factory-plan` records it. Until then `commands.verify` is the placeholder
+`sh .factory/bin/factory-install no-stack-verify --target .`, which checks only the factory install and fails as soon
+as `factory.yaml` names another verify. The first ticket that scaffolds the stack owns `factory.yaml` › `commands` and
+`.github/workflows/factory-ci.yml`: it sets the real `setup`, `verify` (and `serve`) in `factory.yaml`, sets the same
+commands as `SETUP` and `VERIFY` in `factory-ci.yml` (with the pinned toolchain step), and has the acceptance criterion
+"the PR's `Factory CI / verify` job runs the real verify". Pushing a workflow change needs the agent token's Workflows
+permission when the project uses agent tokens (`.factory/reference/github-access.md`); a person grants it for that
+ticket. The `factory.yaml` change is human gate H4.
+```
+
+When question 6b was answered, add its line under `## Stack`, worded exactly as
+[questions.md › The browser tool](references/questions.md#the-browser-tool-question-6b) gives it, even when you
+draft nothing else there: the validator reads the browser tool from `AGENTS.md`. Leave every other `fill in` comment
+for people.
+
+When `AGENTS.md` was **kept**, change nothing in it (a rules change is a human gate): put the browser tool line in the
+PR as a proposed addition to `## Stack`.
 
 ## 6. Labels and the status issue
 
@@ -161,7 +189,13 @@ the person, then run it with `--adopt <N>` or `--not-status <N>` ([references/br
    [references/pr-body.md](references/pr-body.md), filled in from the apply report, your answers, the label and
    status lines and the checks you ran. It closes the bootstrap issue when there is one (an open issue that asks for
    the factory's install, which the person named or you found by its title: `Closes #<N>`); otherwise it closes
-   none. On the open install PR's branch, push to it and update its body instead.
+   none. On the open install PR's branch, push to it and update its body instead. Two things the PR must say when
+   they apply: a `skipped  SANDBOX_DOMAINS` or `skipped  SANDBOX_WRITE` line from the apply means that list was not
+   written (list the hosts or folders under "not written by this core version", never under what was merged); and for
+   a repo with no stack yet, the placeholder verify is named as such, with the keys left unset and the stack's first
+   ticket as the step that sets them ([questions.md](references/questions.md#a-repo-with-no-stack-yet)). A browser
+   tool answer of "none" goes in the PR with its consequence: `ui` assertions cannot be validated, and tickets use
+   `command` or `http` assertions.
 4. **Verify evidence before the gate.** The project's own lint and format checks run over the overlay files
    (`factory.yaml`, ignore files, the rules file), so the install PR, and any switch PR, gets local `commands.verify`
    evidence on its head like any other PR. A fresh worktree has none of the project's dependencies, so in `<target>`,

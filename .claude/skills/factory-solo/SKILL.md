@@ -1,6 +1,6 @@
 ---
 name: factory-solo
-description: Runs one GitHub issue at a time from the user's own session in solo mode, without a lead thread. Implements it with factory-implement in a git worktree (or starts a builder on the tier's model when the session runs another), starts the independent reviewer on another model through the runtime adapter with the model and effort of the issue's tier, acts on the verdict with bounded fix rounds and the escalation ladder, applies the same merge gate as team mode (refused-for-billing vs red CI, an up-to-date head, local evidence, human gates and release holds), merges, closes out, and picks the next ready issue only when the user asked for more than one. The person in the session stands in for the lead at every human gate. Use in a repo whose factory.yaml sets mode solo, or leaves mode out, when the user says "implement issue #N", "ship #N", "next issue", "do the next N issues", "fix the review findings on PR #P" or "continue #N".
+description: 'Runs one GitHub issue at a time from the user''s own session in solo mode, with no lead thread. Builds it with factory-implement in a git worktree, starts the independent reviewer on another model, acts on the verdict with fix rounds, applies the merge gate and merges. Use in a repo whose factory.yaml sets mode solo or has no mode, when the person says "implement issue #N", "ship #N", "next issue", "do the next N issues", "fix the review findings on PR #P" or "continue #N". Not for a builder agent started with a brief, which is factory-implement, and not for mode team, which is factory-lead.'
 ---
 
 # Solo mode: one issue at a time
@@ -86,22 +86,7 @@ check those yourself. Without `factory.yaml`, list them by hand with [board.md](
    the right step.
 
    **Paused reports first.** When the newest implementer report on the issue or its PR is a paused one
-   ("Implementer report: #N, paused"), the work stopped mid-step, and the table below does not apply yet. Check the
-   [emergency stop](#1-session-start) and take [the builder slot](#the-builder-slot), then resume what the report
-   names:
-   - **A child built it** (the issue has its "started" comment): runtime: `continue` on that child's thread, with
-     "Resume: the factory is no longer paused. Continue issue #<N> from the step your paused report names; your
-     worktree and branch are as you left them." Then runtime: `wait`, as in [3. Build](#3-build). Only when the
-     thread cannot be continued: a new `start` with "finish issue #N on branch `<b>`", and tell the person that
-     uncommitted work may be left in the old worktree (its path is in the report).
-   - **You built it:** reopen the worktree the report names, check it still exists on the report's branch
-     (`git -C <path> status`), and go on with `factory-implement` from the checkpoint the report records, in that
-     worktree. Never make a fresh worktree, reset, stash or check out over it: uncommitted work may wait there. If
-     the worktree is gone, tell the person what the report says was uncommitted, and continue from the branch only
-     after they agree.
-   - **A paused fix round** ("Round: fix round <n>"): resume it as above. It goes to [4. Review](#4-review) only
-     after its completed (not paused) fix-round report, at the head that report names: a new head, or the unchanged
-     one when the round changed no code (see "Fix rounds").
+   ("Implementer report: #N, paused"), read [references/paused-reports.md](references/paused-reports.md) first: the table below does not apply yet.
 
    Otherwise:
 
@@ -191,7 +176,7 @@ When a builder child reports, act on its report as `factory-lead` › When a chi
 lead's place: runtime: `result`, check that it ran on the model you asked for, give its slot back, then handle a PR,
 a transient 403 (runtime: `recover-403`), a usage limit (runtime: `back-off`; with one slot per pool, that means
 waiting for the eligible time, never a weaker model), a blocker, a question for the person, a stuck report
-(escalate) or a broken attempt. With a PR: `status:in-review`, runtime: `link-pr` and `watch-pr`.
+([escalate](references/fix-round-limits.md)) or a broken attempt. With a PR: `status:in-review`, runtime: `link-pr` and `watch-pr`.
 
 Copy any "Needs confirmation" items and the report's follow-ups into one issue comment; the follow-ups are filed in
 [close out](#close-out).
@@ -246,7 +231,7 @@ round, and the triage that allows a follow-up starts only after one). Don't offe
 | `release_hold` above 0 | record the hold ([human gates](#7-human-gates)); the merge may go ahead |
 | verdict `merge`, no open P0–P2, no open finding from [other sources](#all-review-sources) | [merge gate](#6-merge-gate) |
 | verdict `merge-after-fixes` | a fix round for the open P0–P2 findings |
-| verdict `needs-rework` | a rework round with the findings; escalate first when "Builder depth" says depth was lacking |
+| verdict `needs-rework` | a rework round with the findings; [escalate](references/fix-round-limits.md) first when "Builder depth" says depth was lacking |
 
 **Fix rounds.** Each round first takes [the builder slot](#the-builder-slot). The builder's spec does the round: you, in the same worktree, with factory-implement's "Addressing
 review findings" steps (if the worktree is gone, make it again from the PR branch as in 3); or, when a child built,
@@ -259,20 +244,7 @@ exception: a commit after the reviewed head other than a version-only commit or 
 review record of the new head for the release proof ([deploy contract](../../../.factory/reference/deploy-contract.md) rule 2
 link 5), so leave the P3 fix for a later round, or start a narrow re-review.
 
-**The bound.** Count fix rounds as model policy rule 3 defines them, from the PR, never from memory. Escalate (model policy,
-rule 3) when a PR has had **two fix rounds** that count (an adaptation round, caused only by the default branch moving and
-headed `### Fix round <n> (adaptation: <what moved>)`, does not), when a review says `needs-rework` for lack of depth, or when the builder
-is stuck: one step up `models.escalation` from the current build spec, with the escalation comment and label from
-[board.md](../../../.factory/reference/board.md) › Escalation record. The next round is then a new runtime: `start`
-with the escalated spec and the lead's fix-round brief, unless this session runs exactly that spec. The issue never
-steps back down. The step onto the top model (`claude-fable-5-2`) needs the owner's OK on the issue (model policy, rule 3);
-without it, and at the top of the ladder, the issue gets `status:needs-human`: tell the person what is still open
-and stop working on it.
-
-**The round rule.** (The third review is the one after the second counted fix-round report, adaptations excepted.) When the third review finds new P0–P2 findings of the same kind as earlier rounds, stop patching
-case by case: name the kind and its structural fix before the next round, as `factory-lead` › Reviews › The round rule
-says, or put it to the person as a design question. Escalation still applies. A brief you give a child follows
-[briefs.md](../../../.factory/reference/briefs.md)'s short-brief rule.
+**The bound and the round rule.** Read [references/fix-round-limits.md](references/fix-round-limits.md) when a PR has had a fix round that counts, a review says `needs-rework`, or the builder is stuck: it holds the escalation bound (two counted fix rounds, lack of depth, a stuck builder) and what to do when the third review finds new findings of the same kind.
 
 ## 6. Merge gate
 
@@ -317,11 +289,14 @@ merge of that head is yours. Never `--admin`.
 5. A deploy target with `when: merge`: runtime: `watch-run` on its run and act on the result by the deploy contract.
    A failed release smoke check or a rollback is an incident too.
 6. **Compound check.** Call `factory-compound` (solo mode; the person decides at its gates), one run per lesson, when
-   the merged issue was the fix for an **incident** (a red default branch or nightly, a revert, a hotfix, a failed
-   release check, a bug that escaped to the default branch), a PR whose review said `needs-rework`, an issue with an
-   escalation record, or the last open issue of its milestone (a milestone-close prune). The skill decides whether
-   there is a lesson; when there is none it records that. While the factory is paused it waits, since it files issues
-   and PRs. There is no lead, so there is no lead-handoff trigger.
+   the merged issue meets one of its triggers: the one list is
+   [factory-compound › When it runs](../factory-compound/SKILL.md#1-when-it-runs), two or more fix rounds that count
+   included. There is no lead, so the lead-handoff trigger does not apply. The skill decides whether there is a
+   lesson; when there is none it records that (outcome `none`). While the factory is paused it waits, since it files
+   issues and PRs. **Compound due:** `factory metrics` lists the merged issues with a trigger and no compound record
+   yet. Read it when you update the status and show it to the person, who decides for each issue: run it now, or keep
+   it on the status page ([factory-lead › handoff-and-status.md](../factory-lead/references/handoff-and-status.md) ›
+   Status issue). A due issue is never dropped, and "cannot tell" is not "none".
 7. Update the status issue, when the project has one (`factory status`), and tell the person in one line.
 
 ## 7. Human gates

@@ -1,6 +1,6 @@
 ---
 name: factory-architect
-description: Weekly architecture review in a repo with a factory.yaml. Reads the project's ADRs, their index, the plan's decisions table and AGENTS.md, then the whole codebase at one default-branch SHA, and files each drift (code that contradicts an accepted ADR or a settled decision, or an ADR that no longer describes the code) as a normal tiered issue in the ticket template, on the backlog, with a stable `architecture/<slug>` key so a later run never files it twice. A fix that would change an ADR, the plan's decisions or the rules is filed for a person (H4). At most five issues per run, worst first; posts one report on the status issue. Never edits code, ADRs or the plan, never delegates, never merges.
+description: Weekly architecture review in a repo with a factory.yaml. Reads the project's ADRs, their index, the plan's decisions table and AGENTS.md, then the whole codebase at one default-branch SHA, and files each drift (code that contradicts an accepted ADR or a settled decision, or an ADR that no longer describes the code) as a normal tiered issue in the ticket template, on the backlog, with a stable key, `architecture/` plus a short slug, so a later run never files it twice. A fix that would change an ADR, the plan's decisions or the rules is filed for a person (H4). At most five issues per run, worst first; posts one report on the status issue. Never edits code, ADRs or the plan, never delegates, never merges.
 tools: Read, Grep, Glob, Bash
 ---
 

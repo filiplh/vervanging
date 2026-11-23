@@ -14,9 +14,11 @@ PreToolUse   Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep. Exit 2 bloc
              cannot read, `gh pr merge --admin` and `--auto`, every merge that `factory gate <P>` does not pass, a
              merge or API write that is not the one command of the call, merges through the API, deploy approvals,
              commands that print a credential or read a credential file, writes to acceptance/ and .factory/hooks/,
-             and clearing the emergency stop. Before a push, opening a pull request, marking it ready or a merge, it
-             runs `factory-pause status`: paused (3) or cannot tell (1, twice) blocks. It guards against an agent's
-             mistakes, not against an agent that sets out to get around it (README, "What the hooks cannot see").
+             rm of a glob in the shared temp folder, an unbraced $NAME: before a path in a git command (zsh reads
+             it as a modifier), and clearing the emergency stop. Before a push, opening a pull request, marking it
+             ready or a merge, it runs `factory-pause status`: paused (3) or cannot tell (1, twice) blocks. It
+             guards against an agent's mistakes, not against an agent that sets out to get around it (README, "What
+             the hooks cannot see").
 PostToolUse  Bash. Records a green `factory verify` or `factory verify --no-heavy` (no pull request) on the checkout's
              HEAD, from its own output, so the Stop hook does not run it again; one with an assignment (other than
              FACTORY_TEST_WORKERS=<n>) or `env` in front is recorded as not counted. Never blocks.
@@ -178,6 +180,8 @@ class Word:
         self.expanded = False    # holds an expansion: its value is not known here
         self.glob = False        # holds an unquoted * ? or [
         self.names = []          # the variables it expands
+        self.colon_names = []    # unbraced names followed by ":" and a path character ($B:core/x), which zsh
+        #                          reads as a modifier of the value ($B:c...), not as text after it
         self.io = False          # an fd number before a redirection (2 in 2>&1)
 
     def literal(self):
@@ -315,6 +319,8 @@ class Lexer:
         m = NAME.match(s, i + 1)
         if m:
             w.names.append(m.group(0))
+            if re.match(r":[A-Za-z0-9_./~-]", s[m.end():m.end() + 2]):
+                w.colon_names.append(m.group(0))
             w.text += "$" + m.group(0)
             w.expanded = True
             return m.end()
@@ -761,9 +767,10 @@ class Guard:
         folders, from every folder the shell may be in; anything else is refused, since it cannot be shown to stay
         out of them."""
         if not w.literal() or any(c in w.text for c in "{}*?[$`"):
-            self.block("a write destination that is not plain text (%s; a brace, glob or $ counts, quoted or not): "
-                       "the hook cannot show that it stays out of acceptance/ and .factory/hooks/, so it is refused; "
-                       "write the path out" % shown(w.text))
+            self.block("a write destination that is not plain text (%s; a $, backtick, glob or brace counts, quoted "
+                       "or not): the hook reads only the command's text, so it cannot tell what a variable or a "
+                       "command substitution holds, even one set earlier in the same command, and cannot show that "
+                       "the path stays out of acceptance/ and .factory/hooks/. %s" % (shown(w.text), WRITE_IT_OUT))
             return
         where = self.protected(w.text, cwds)
         if where is UNKNOWN:
@@ -917,7 +924,8 @@ class Guard:
     def writes(self, base, args, cwds, fed=False):
         """The destinations a writer names are checked (protected_write). A writer that xargs, find -exec or parallel
         runs gets more paths from them, which the hook cannot see, so it is refused; so is a link (ln) to a protected
-        file, or a symbolic link to a protected folder or a folder above one."""
+        file, or a symbolic link to a protected folder or a folder above one. rm with a glob in the shared temp folder
+        is refused with its own reason."""
         plain = [a for a in args if not a.text.startswith("-")]
         targets, writing = [], True
         if base in ("rm", "rmdir", "unlink", "shred", "truncate", "touch", "mkdir", "chmod", "chown", "chgrp", "mv",
@@ -951,6 +959,12 @@ class Guard:
             self.block("%s gets more paths from xargs, find -exec or parallel, which the hook cannot see, so it cannot "
                        "show that they stay out of acceptance/ and .factory/hooks/; name the paths" % base)
         for t in targets:
+            if base == "rm" and temp_glob(t):
+                self.block("rm with a glob in the shared temp folder (%s): $TMPDIR and /tmp hold every program's "
+                           "files, and such a glob once deleted thousands of entries that were not the agent's; "
+                           "remove the exact path, written out, or work in the session's scratch folder"
+                           % shown(t.text))
+                continue
             self.protected_write(t, cwds)
 
     def links(self, args, cwds):
@@ -987,7 +1001,7 @@ class Guard:
         bases = list(cwds or [])
         for d in dirs:
             if not d.literal() or any(c in d.text for c in "{}*?[$`"):
-                self.block("ln with a link folder that is not plain text (%s); write the path out" % shown(d.text))
+                self.block("ln with a link folder that is not plain text (%s). %s" % (shown(d.text), WRITE_IT_OUT))
                 return
             full = expand_home(d.text)
             for f in ([full] if full.startswith("/") else [os.path.join(c, full) for c in cwds or []]):
@@ -995,7 +1009,7 @@ class Guard:
         for s in sources:
             if not s.literal() or any(c in s.text for c in "{}*?[$`"):
                 self.block("ln with a source that is not plain text (%s): the hook cannot show that it is not in "
-                           "acceptance/ or .factory/hooks/; write the path out" % shown(s.text))
+                           "acceptance/ or .factory/hooks/. %s" % (shown(s.text), WRITE_IT_OUT))
                 continue
             t = expand_home(s.text)
             if not t.startswith("/") and cwds is None:
@@ -1206,6 +1220,13 @@ class Guard:
     def git(self, args, cmd, state, depth, feeder, env=None, alias_depth=0):
         cwd = state["cwd"]
         wc = self.wcwds(state)              # where git's own writes (git rm, checkout, ...) land: git -C chdirs
+        if depth == 0:                      # the call's own shell, which may be zsh; not bash -c or an alias
+            for a in args:
+                for n in a.colon_names:
+                    self.block("git with $%s: before a path (%s): zsh, which may be the agent's shell, reads the "
+                               "letter after the colon as a modifier of $%s, so git gets another revision or path "
+                               "(once it silently extracted the wrong file during a release check); brace the name: "
+                               "\"${%s}:path\"" % (n, shown(a.text), n, n))
         i = 0
         for name in GIT_PLACES:
             if (env or {}).get(name):
@@ -1895,6 +1916,13 @@ PROTECTED_WHY = {"acceptance": "holdout scenarios are the validator's alone; a p
                  ".factory/hooks": "the hooks guard every agent; factory-update changes them"}
 
 
+# The one form a write path is accepted in. A variable path stays refused even when the same command set it: telling
+# what it holds would need to know which assignments run (a skipped, subshell or function assignment), what changes
+# the value later (an array element, an append), which mktemp runs (a function or alias) and how an unquoted value
+# splits, and the lexical reader knows none of these.
+WRITE_IT_OUT = ("Accepted: the exact path, written out in the command (absolute, ~/..., or relative to the working "
+                "folder; quotes are fine). For temporary files, write out the session's scratch folder path in full")
+
 UNKNOWN = object()               # a path whose place cannot be told
 OVERRIDES = ("GH_REPO", "GH_HOST")
 GIT_PLACES = ("GIT_DIR", "GIT_WORK_TREE")   # set on a git command, they move where its writes land
@@ -1907,6 +1935,15 @@ def union(folders, more):
     if folders is None or more is None:
         return None
     return folders + [f for f in more if f not in folders]
+
+
+TEMP_ROOT = re.compile(r"(\$TMPDIR(?![A-Za-z0-9_])|\$\{TMPDIR(?=[}:=+?#%-])|/tmp(?=/|$)|/private/tmp(?=/|$))")
+
+
+def temp_glob(w):
+    """An rm destination with an unquoted glob whose path starts at the shared temp folder: $TMPDIR, ${TMPDIR...}
+    (with any default) or /tmp."""
+    return w.glob and TEMP_ROOT.match(w.text) is not None
 
 
 def assignment(w):

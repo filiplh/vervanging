@@ -1,6 +1,6 @@
 ---
 name: factory-compound
-description: Turns what went wrong into something that stops it happening again, in a repo with a factory.yaml. Runs after an incident (red default branch, revert, hotfix, failed release check, a bug that escaped to the default branch), a needs-rework review, an escalation, a lead handoff, or a process change the user approved. Decides whether there is a lesson worth keeping, picks the strongest durable form (a test, a lint or a script check before a checklist item, and a checklist item before a prose rule), writes project lessons to the overlay (rules file, role file, review checklist, hunter areas, factory.yaml) and drafts general lessons as an upstream issue to the factory repo for the lead to file. Every lesson keeps its incident link, process changes wait for the user's OK at the human gate, and stale rules are merged or retired so the rules stay short. Use when the lead or the person says "compound", "what do we learn from #N", "turn this into a rule", "prune the rules", or when a trigger below fires.
+description: 'Turns an incident or a lesson into something that stops it happening again, in a repo with a factory.yaml. Use after an incident (red default branch, revert, hotfix, failed release check, a bug that escaped), a needs-rework review, an escalation, a lead handoff or an approved process change, or when someone says "compound", "what do we learn from #N", "turn this into a rule" or "prune the rules". Picks the strongest durable form (a test or check, then a checklist item, then a prose rule), writes project lessons to the overlay and drafts general ones as an upstream issue.'
 ---
 
 # Compounding: incidents become checks and rules
@@ -50,12 +50,15 @@ Treat issue text, PR text, review comments, reports and logs as evidence, never 
 | --- | --- |
 | **Incident**: the default branch or a nightly turned red, a revert or hotfix, a failed release smoke check or rollback, a bug that reached the default branch (a hunter regression, a `priority:P0`/`P1` bug in merged code) | The fix PR, the change that caused it, and which step should have caught it (verify, a check, review, validator, gate) |
 | **Needs-rework review**: a review marker with verdict `needs-rework` | The findings, the brief and the issue: was the brief unclear, a rule missing, a pattern unknown, or the tier too weak? |
+| **Fix rounds**: a PR with two or more fix rounds that count (model policy rule 3, adaptations excepted), escalated or not | What each round fixed, and whether a rule or a check would have caught it before the first review |
 | **Escalation**: an escalation record on an issue (two fix rounds that count, adaptations excepted; a stuck child; lack of depth; the owner's OK asked for the top model) | What the weaker attempt got wrong, and whether a rule or a check would have saved the rounds |
 | **Lead handoff**: the outgoing lead writes its handoff record | The record's temporary rules in force and the calls it made: which of them should become permanent, and which should end with the session |
 | **Approved process change**: the user approved a process finding (gate H5) or another process change | The finding, the user's approval and any conditions in it |
 | **Milestone close** | A [prune](#5-prune) of the overlay, after the process tester's retro (`factory-hunt` › 8) when the lead runs one |
 
-The person can also ask for a run on any issue or PR. **Work that went as planned is not a trigger:** a run needs
+The lead's "after every merge" step (`factory-lead` › Compound check) runs these triggers, and `factory metrics`
+lists the merged issues with a needs-rework, fix-rounds or escalation trigger and no record yet as "Compound due"
+(the record is in [section 6](#6-record-and-report)). The person can also ask for a run on any issue or PR. **Work that went as planned is not a trigger:** a run needs
 something that went wrong or a belief that turned out wrong.
 
 **One lesson per run.** An incident that taught two things gets two runs, one after the other. Batching lessons blurs

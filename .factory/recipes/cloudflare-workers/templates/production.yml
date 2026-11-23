@@ -18,7 +18,8 @@
 # 4. Holds for your OK, without changing anything and without failing, when: the Worker does not exist yet (first
 #    deploy), the live version names no commit the factory knows, the environment has `approve: always`, a pull
 #    request in the range recorded an H7 release hold, or any commit in the range has a breaking change or touches
-#    the migration paths. The OK names one commit in full, and the run links it on the held pull requests.
+#    the migration paths. The OK names one commit in full, and the run links it on the held-release issue and, from
+#    a small job of its own whose token alone may write to pull requests, on the held pull requests.
 # 5. Builds that exact commit in its own job, which holds no secret: setup, build, and wrangler's bundle of the Worker,
 #    handed on as an artefact of this run. A separate deploy job, which runs no project install, build or lifecycle
 #    script, checks the artefact (its digest, this run, this commit, plain files only), deploys it as it is with the
@@ -105,9 +106,11 @@ jobs:
       version: ${{ steps.check.outputs.version }}
       version_tag: ${{ steps.check.outputs.version_tag }}
       live_version: ${{ steps.check.outputs.live_version }}
+      held_prs: ${{ steps.check.outputs.held_prs }}
+      approval: ${{ steps.approval.outputs.body }}
     permissions:
       contents: read
-      issues: write # the held-release issue and the approval links on held pull requests
+      issues: write # the held-release issue, and the approval noted on it
       pull-requests: read # the pull requests merged in the range, their gate records, reviews and holds
       checks: read # the check runs on each gated head
       actions: read # whether a failed job really ran, or Actions never started it (local evidence counts only then)
@@ -365,24 +368,65 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=Held::The release of ${SHA:0:7} waits for your OK: $url"
 
-      - name: Link the approval on the held pull requests
+      - name: Record the approval on the held-release issue
+        id: approval
         if: steps.check.outputs.go == 'true' && steps.check.outputs.approved == 'true' && steps.check.outputs.reasons != '0'
         env:
           SHA: ${{ steps.commit.outputs.sha }}
-          HELD_PRS: ${{ steps.check.outputs.held_prs }}
           ACTOR: ${{ github.actor }}
         run: |
-          # The approval came with this run, bound to this commit. Record it where human-gates.md expects it linked.
+          # The approval came with this run, bound to this commit. Record it where human-gates.md expects it linked:
+          # here on the held-release issue, and through the job's `approval` output, by the link job on each held
+          # pull request (this job's token can only read pull requests).
           {
             echo "<!-- factory:release-approved target=$TARGET env=production sha=$SHA -->"
             echo "Release approval for \`$TARGET\` production at \`$SHA\`, given by @$ACTOR in $RUN_URL. It covered:"
             sed 's/^/- /' "$RUNNER_TEMP/reasons.txt"
           } > "$RUNNER_TEMP/approval.md"
+          # One line of base64, so no text of the reasons can add a line to the step's outputs.
+          echo "body=$(base64 < "$RUNNER_TEMP/approval.md" | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          bash "$RECIPE/bin/issue.sh" note "factory-deploy-hold:$TARGET/production" "$RUNNER_TEMP/approval.md" || true
+
+  link:
+    name: 'Release approval link (__FACTORY_TARGET__)'
+    needs: release
+    # Only after the release job recorded an approval that resolves an H7 hold. Holds no secret, checks out nothing
+    # and runs no project code or package: one step posts that approval on each held pull request, through GitHub's
+    # API. A pull request's comments need a token that may write to pull requests, which may also edit a pull
+    # request's description, where the release checker reads hold lines; so only this job has one, and the release
+    # job, which runs the pinned wrangler, keeps pull requests read-only. It runs beside the build, and the deploy
+    # waits for it: with held pull requests, nothing is deployed unless every one of them got the approval.
+    if: needs.release.outputs.approval != '' && needs.release.outputs.held_prs != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # the approval comment on each held pull request
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      HELD_PRS: ${{ needs.release.outputs.held_prs }}
+      APPROVAL: ${{ needs.release.outputs.approval }}
+    steps:
+      - name: Link the approval on the held pull requests
+        run: |
+          # The release job's approval as it noted it on the held-release issue, posted only when it is one for this
+          # target, and only when every held pull request is a number: nothing is posted otherwise.
+          base64 -d <<<"$APPROVAL" > "$RUNNER_TEMP/approval.md"
+          marker_re="^<!-- factory:release-approved target=$TARGET env=production sha=[0-9a-f]{40} -->\$"
+          if ! [[ $(head -n 1 "$RUNNER_TEMP/approval.md") =~ $marker_re ]]; then
+            echo "::error title=Approval not linked::The release job's approval is not one for $TARGET production."
+            exit 1
+          fi
+          for pr in $HELD_PRS; do
+            if ! [[ $pr =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error title=Approval not linked::The release job named a held pull request that is not a number."
+              exit 1
+            fi
+          done
           for pr in $HELD_PRS; do
             gh api "repos/$REPO/issues/$pr/comments" -F "body=@$RUNNER_TEMP/approval.md" > /dev/null
             echo "linked on #$pr"
           done
-          bash "$RECIPE/bin/issue.sh" note "factory-deploy-hold:$TARGET/production" "$RUNNER_TEMP/approval.md" || true
 
   build:
     name: 'Release build (__FACTORY_TARGET__)'
@@ -451,11 +495,15 @@ jobs:
 
   deploy:
     name: 'Release deploy (__FACTORY_TARGET__)'
-    needs: [release, build]
-    # Also after a failed build, to open the bug. Holds the secrets, and runs no project install, build or lifecycle
-    # script: only the recipe's own scripts, the core's release checker and the pinned wrangler, on files it checked.
+    needs: [release, link, build]
+    # Also after a failed build, to open the bug. Only once the approval is linked on every held pull request
+    # (deploy contract, rule 7): the link job passed, or it was skipped because nothing is held. A failed, cancelled
+    # or skipped link job with held pull requests deploys nothing. Holds the secrets, and runs no project install,
+    # build or lifecycle script: only the recipe's own scripts, the core's release checker and the pinned wrangler,
+    # on files it checked.
     if: >-
-      !cancelled() && needs.release.result == 'success' && needs.release.outputs.go == 'true'
+      !cancelled() && needs.release.result == 'success' && needs.release.outputs.go == 'true' &&
+      (needs.link.result == 'success' || (needs.link.result == 'skipped' && needs.release.outputs.held_prs == ''))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -662,9 +710,11 @@ jobs:
     name: 'Release version (__FACTORY_TARGET__)'
     needs: [release, deploy]
     # Only after the deploy job passed, which it does only when the smoke check passed (a failed one ends that job
-    # red). Holds no secret, checks out nothing and runs no project code: it names the released commit with its
-    # version, through GitHub's API.
-    if: needs.deploy.result == 'success'
+    # red). The explicit status function matters: without one, Actions adds `success()` over every job before this
+    # one, so a link job skipped because nothing is held would skip the tag of a release that went out. Holds no
+    # secret, checks out nothing and runs no project code: it names the released commit with its version, through
+    # GitHub's API.
+    if: "!cancelled() && needs.deploy.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
