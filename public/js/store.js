@@ -10,6 +10,7 @@ export const THINGS = {
   matchSetup: 1, // the match setup saved by "Start", read by the live screen
   match: 1, // the live match state (match.js), saved after every tap
   history: 1, // { useHistory, matches: [{ id, seconds }] }: finished matches' seconds per player (history.js)
+  installTip: 1, // true once the coach dismissed the home-screen tip with "Begrepen" (setup.js)
 };
 
 export function keyOf(thing, version = THINGS[thing]) {

@@ -804,6 +804,60 @@ test('setup screen: the home-screen hint shows in a browser tab and says why, an
   }
 });
 
+// Opens the setup screen in a browser tab on `store`, as a fresh page load would (#57).
+function openTab(store) {
+  const view = new FakeElement('main');
+  setupScreen(view, { store, onStart: () => {}, installed: false });
+  return view;
+}
+
+test('setup screen: Begrepen hides the home-screen hint, and it stays hidden after a reload (#57)', () => {
+  for (const players of [12, 3]) {
+    const env = memoryStore();
+    env.store.save('roster', rosterOf(players));
+    const view = openTab(env.store);
+    assert.equal(hints(view).length, 1, `${players} players: the hint shows before Begrepen`);
+    button(hints(view)[0], 'Begrepen').fire('click');
+    assert.equal(hints(view).length, 0, `${players} players: Begrepen hides it at once`);
+    assert.equal(env.raw('installTip'), true, 'the choice is saved on this device');
+    assert.equal(hints(openTab(env.store)).length, 0, `${players} players: still hidden after a reload`);
+  }
+  // Installed, there is no hint and so no Begrepen, whatever was saved.
+  const env = memoryStore();
+  env.store.save('roster', rosterOf(12));
+  const installed = new FakeElement('main');
+  setupScreen(installed, { store: env.store, onStart: () => {}, installed: true });
+  assert.equal(hints(installed).length, 0);
+  assert.equal(env.data.has('vervanging.installTip.v1'), false);
+});
+
+test('setup screen: when storage fails or is missing, Begrepen keeps the hint shown and says why (#57)', () => {
+  const memory = memoryStore();
+  memory.store.save('roster', rosterOf(12));
+  const rosterRaw = memory.data.get('vervanging.roster.v1');
+  const failing = (getItem) => createStore({
+    getItem,
+    setItem: () => { throw new Error('QuotaExceededError'); },
+    removeItem: () => {},
+  });
+  const cases = {
+    'a refused write': failing((k) => (k === 'vervanging.roster.v1' ? rosterRaw : null)),
+    'reads and writes that throw': failing((k) => {
+      if (k === 'vervanging.roster.v1') return rosterRaw;
+      throw new Error('SecurityError');
+    }),
+    'no storage at all': createStore(null),
+  };
+  for (const [name, store] of Object.entries(cases)) {
+    const view = openTab(store);
+    assert.equal(hints(view).length, 1, `${name}: the hint shows`);
+    button(hints(view)[0], 'Begrepen').fire('click');
+    assert.equal(hints(view).length, 1, `${name}: the hint stays after Begrepen`);
+    assert.match(hints(view)[0].text, /Opslaan lukte niet/, `${name}: it says the choice was not saved`);
+    assert.equal(hints(openTab(store)).length, 1, `${name}: and it shows again on the next load`);
+  }
+});
+
 // ---------- offline: service worker, manifest, icons (#11) ----------
 // These read the files in public/ (a separate pwa.test.js would fit better, but this issue owns only this test file
 // and live.test.js).
