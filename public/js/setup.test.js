@@ -1144,6 +1144,14 @@ test('manifest and page: installable as "Vervanging" in Dutch, standalone from /
   assert.equal(manifest.start_url, '/');
   const html = readPublic('index.html').toString();
   assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest">/);
+  // Two theme colours (#62): the light accent for a light page, the dark page background for a dark one, so the
+  // status bar does not show a blue band over the dark page. The manifest keeps the light one (it has no dark variant).
+  const themes = [...html.matchAll(/<meta name="theme-color" content="(#[0-9a-f]{6})" media="\(prefers-color-scheme: (light|dark)\)">/g)]
+    .map((m) => [m[2], m[1]]);
+  assert.equal((html.match(/name="theme-color"/g) || []).length, 2, 'exactly two theme-color metas');
+  const css = readPublic('styles.css').toString();
+  const darkBg = css.match(/@media \(prefers-color-scheme: dark\)\s*\{\s*:root\s*\{[^}]*--bg:\s*(#[0-9a-f]{6})/)[1];
+  assert.deepEqual(Object.fromEntries(themes), { light: manifest.theme_color, dark: darkBg });
   const touch = html.match(/<link rel="apple-touch-icon" href="\/([^"]+)">/);
   assert.ok(touch, 'apple-touch-icon link');
   const pngSize = (path) => {
@@ -1171,4 +1179,20 @@ test('setup screen: with the switch on, a player who missed a match gets one blo
   assert.equal(Object.values(minutes).filter((m) => m === 800).length, 1, 'one player furthest ahead gives a block');
   historySwitch(view).fire('change'); // the switch replans with the same five
   assert.ok(Object.values(minutesById(view)).every((m) => m === 1000), 'switch off: equal minutes');
+});
+
+// ---------- Dutch quotes in the copy (#62, P3-10 in docs/spikes/2026-ui-review.md) ----------
+// The no-plan message shows only when the planner throws, which a real setup does not reach (the planner always finds
+// a plan for 5 to 15 players), so the copy is checked in the source.
+test('copy: the no-plan message quotes the button with Dutch quotes, and no screen string uses straight double quotes', () => {
+  const source = (file) => readFileSync(join(PUBLIC, 'js', file)).toString();
+  assert.ok(source('setup.js').includes("'Er kon geen plan gemaakt worden. Probeer „Ander plan”.'"));
+  for (const file of ['setup.js', 'live.js', 'app.js']) {
+    // Single-quoted string literals (the screens' copy) outside comments, holding a straight double quote; a CSS
+    // attribute selector such as input[name="name"] is code, not copy.
+    const code = source(file).split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+    const straight = [...code.matchAll(/'((?:[^'\\\n]|\\.)*)'/g)].map((m) => m[1])
+      .map((t) => t.replace(/\[[\w-]+="[^"]*"\]/g, '')).filter((t) => t.includes('"'));
+    assert.deepEqual(straight, [], `${file}: no straight double quotes in a string`);
+  }
 });
