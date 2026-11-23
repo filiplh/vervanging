@@ -3,16 +3,24 @@ import Foundation
 // check-examples: runs the shared examples (shared/examples/, plan decision #35) through this sim and compares what
 // it prints with what scripts/sim.mjs printed, exactly.
 
-/// The example kinds the Swift sim runs so far; later tickets add match (#98, #99).
-let supportedKinds: Set<String> = ["plan", "history"]
+/// The example kinds the Swift sim runs.
+let supportedKinds: Set<String> = ["plan", "match", "history"]
 let knownKinds = ["plan", "match", "history"]
 
 /// Options of a supported kind that the Swift sim does not have yet, with the reason given when an example is skipped.
 let unsupportedOptions: [(kind: String, option: String, reason: String)] = []
 
+/// Match actions the Swift sim does not run yet (an example's `actions` field), with the reason given when an
+/// example is skipped; #99 adds them.
+let unsupportedActions: [(action: String, reason: String)] = [
+    ("uit", "the Swift sim has no uit or terug yet"),
+    ("terug", "the Swift sim has no uit or terug yet"),
+]
+
 struct Example {
     let file: String
     let kind: String
+    let actions: [String]
     let args: [String]
     let exitStatus: Int32
     let stdout: String
@@ -30,8 +38,10 @@ func readExample(_ url: URL) throws -> Example {
     else {
         throw UsageError("not an example: it needs kind, args, exitStatus, stdout and stderr")
     }
-    return Example(file: url.lastPathComponent, kind: kind, args: args, exitStatus: Int32(exitStatus), stdout: stdout,
-                   stderr: stderr)
+    // `actions` lists the match actions an example uses (README); an example without the field uses none.
+    let actions = object["actions"] as? [String] ?? []
+    return Example(file: url.lastPathComponent, kind: kind, actions: actions, args: args,
+                   exitStatus: Int32(exitStatus), stdout: stdout, stderr: stderr)
 }
 
 /// The first line where `actual` differs from `expected`, as report lines; nil when they are the same.
@@ -58,12 +68,25 @@ func firstDifference(_ stream: String, expected: String, actual: String) -> [Str
 }
 
 func checkExamples(_ argv: [String]) -> Outcome {
-    let checkUsage = "usage: vervanging-sim check-examples <dir> [--only <plan|match|history>]"
+    let checkUsage = "usage: vervanging-sim check-examples <dir> [--only <plan|match|history>] [--without <actions>]"
     var rest = argv[...]
     guard let dir = rest.popFirst(), !dir.hasPrefix("--") else { return Outcome(stderr: checkUsage + "\n", status: 2) }
     var only: String?
+    var without: Set<String> = []
     while let arg = rest.popFirst() {
-        guard arg == "--only", let value = rest.popFirst() else { return Outcome(stderr: checkUsage + "\n", status: 2) }
+        guard arg == "--only" || arg == "--without", let value = rest.popFirst() else {
+            return Outcome(stderr: checkUsage + "\n", status: 2)
+        }
+        if arg == "--without" {
+            // Comma-separated action words, as an example's `actions` field lists them (wissel, undo, keep, extra,
+            // bench, uit, terug); an example that uses any of them is left out and not counted.
+            let words = value.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            guard !words.contains(where: \.isEmpty) else {
+                return Outcome(stderr: "--without takes comma-separated action words, not \"\(value)\"\n", status: 2)
+            }
+            without.formUnion(words)
+            continue
+        }
         guard knownKinds.contains(value) else {
             return Outcome(stderr: "--only takes plan, match or history, not \"\(value)\"\n", status: 2)
         }
@@ -98,11 +121,16 @@ func checkExamples(_ argv: [String]) -> Outcome {
             continue
         }
         if let only, example.kind != only { continue }
+        if example.actions.contains(where: without.contains) { continue }
         if !supportedKinds.contains(example.kind) {
             skipped["the Swift sim has no \(example.kind) command yet", default: []].append(file)
             continue
         }
         if let gap = unsupportedOptions.first(where: { $0.kind == example.kind && example.args.contains($0.option) }) {
+            skipped[gap.reason, default: []].append(file)
+            continue
+        }
+        if let gap = unsupportedActions.first(where: { example.kind == "match" && example.actions.contains($0.action) }) {
             skipped[gap.reason, default: []].append(file)
             continue
         }
