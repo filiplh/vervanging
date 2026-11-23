@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createStore } from './store.js';
 import { makePlan } from './planner.js';
 import { startMatch, wissel, minutesSoFar } from './match.js';
-import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory, createWakeLock } from './live.js';
+import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory, createWakeLock, DOUBLE_TAP_MS } from './live.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
 
@@ -64,11 +64,17 @@ function setupOf({ n = 8, schedule = 'equal', savedAt = '2026-11-22T10:00:00.000
   return { savedAt, opponent: 'BC Test', schedule, seed: 3, players, startingFive: [1, 2, 3, 4, 5], plan };
 }
 
+// A fake clock that moves a second on every read, so each tap in a test is a separate tap, never a double tap (#49).
+function spacedClock() {
+  let t = 0;
+  return () => (t += 1000);
+}
+
 function open(setup = setupOf(), env = memoryStore()) {
   env.store.save('matchSetup', setup);
   const view = new FakeElement('main');
-  liveScreen(view, { store: env.store });
-  return { ...env, view, setup, reload() { const v = new FakeElement('main'); liveScreen(v, { store: env.store }); return v; } };
+  liveScreen(view, { store: env.store, now: spacedClock() });
+  return { ...env, view, setup, reload() { const v = new FakeElement('main'); liveScreen(v, { store: env.store, now: spacedClock() }); return v; } };
 }
 
 const h1 = (view) => find(view, 'h1')[0].text;
@@ -151,7 +157,7 @@ test('live screen: a refused write shows a Dutch message and the tap still count
   const data = new Map(env.data);
   const store = createStore({ getItem: (k) => data.get(k) ?? null, setItem() { throw new Error('full'); }, removeItem() {} });
   const view = new FakeElement('main');
-  liveScreen(view, { store });
+  liveScreen(view, { store, now: spacedClock() });
   wisselButton(view).fire('click');
   assert.match(h1(view), /^Blok 2/);
   assert.ok(find(view, 'p', (p) => /Opslaan lukte niet/.test(p.text)).length);
@@ -237,6 +243,67 @@ test('live screen: the button reads Einde match at the last block', () => {
   assert.equal(chips(view, 'Uit').length, 8, 'uit is possible in the last block too');
   wisselButton(view).fire('click');
   assert.equal(h1(view), 'Einde match');
+});
+
+// ---------- a double tap on Wissel (#49, P2-1 in docs/spikes/2026-ui-review.md) ----------
+
+// A clock the test sets by hand: `clock.at` is what the screen reads as now, in milliseconds.
+function handClock() {
+  const clock = { at: 0, now: () => clock.at };
+  return clock;
+}
+
+function openWithClock(clock) {
+  const env = memoryStore();
+  env.store.save('matchSetup', setupOf());
+  const view = new FakeElement('main');
+  liveScreen(view, { store: env.store, now: clock.now });
+  return { ...env, view };
+}
+
+test('live screen: a second Wissel tap within 600 ms does nothing; a tap after that plays the next wissel', () => {
+  assert.equal(DOUBLE_TAP_MS, 600);
+  const clock = handClock();
+  const { view, data } = openWithClock(clock);
+  clock.at = 10_000;
+  wisselButton(view).fire('click');
+  assert.match(h1(view), /^Blok 2 van 12/);
+  clock.at += 120; // the two scripted touches of P2-1, 120 ms apart
+  wisselButton(view).fire('click');
+  assert.match(h1(view), /^Blok 2 van 12/, 'the second tap is ignored, no block is skipped');
+  clock.at = 10_000 + DOUBLE_TAP_MS - 1;
+  wisselButton(view).fire('click');
+  assert.match(h1(view), /^Blok 2 van 12/, 'still ignored just under 600 ms after the first tap');
+  assert.equal(JSON.parse(data.get('vervanging.match.v1')).block, 2, 'the ignored taps saved nothing');
+  clock.at = 10_000 + DOUBLE_TAP_MS;
+  wisselButton(view).fire('click');
+  assert.match(h1(view), /^Blok 3 van 12/, '600 ms after the first tap, a tap counts again');
+  assert.equal(JSON.parse(data.get('vervanging.match.v1')).block, 3);
+});
+
+test('live screen: a double tap at block 11 does not end the match; Einde match ends it on a later tap', () => {
+  const clock = handClock();
+  const { view, data } = openWithClock(clock);
+  for (let b = 1; b < 11; b++) { clock.at += 1000; wisselButton(view).fire('click'); }
+  assert.match(h1(view), /^Blok 11 van 12/);
+  clock.at += 1000;
+  wisselButton(view).fire('click');
+  assert.match(h1(view), /^Blok 12 van 12/);
+  assert.equal(wisselButton(view).text, 'Einde match', 'the redrawn button in the same spot reads Einde match');
+  clock.at += 200;
+  wisselButton(view).fire('click');
+  assert.match(h1(view), /^Blok 12 van 12/, 'the second tap of the double tap does not end the match');
+  assert.equal(JSON.parse(data.get('vervanging.match.v1')).ended, false);
+  clock.at += DOUBLE_TAP_MS;
+  wisselButton(view).fire('click');
+  assert.equal(h1(view), 'Einde match', 'a later tap on Einde match ends it as before');
+  assert.equal(JSON.parse(data.get('vervanging.match.v1')).ended, true);
+});
+
+test('styles: buttons have touch-action: manipulation, so a quick second tap is not taken as a zoom', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const rule = css.match(/(?:^|\n)button, \.button\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rule, /touch-action:\s*manipulation/);
 });
 
 test('live screen: no In the zone button for a player who is out', () => {
@@ -505,7 +572,7 @@ test('live screen: keeps the screen awake while the match runs, not after the en
   const env = memoryStore();
   env.store.save('matchSetup', setupOf());
   const view = new FakeElement('main');
-  liveScreen(view, { store: env.store, keepAwake: (on) => awake.push(on) });
+  liveScreen(view, { store: env.store, keepAwake: (on) => awake.push(on), now: spacedClock() });
   assert.equal(awake.at(-1), true, 'on when the match screen opens');
   for (let b = 1; b <= 12; b++) wisselButton(view).fire('click');
   assert.equal(h1(view), 'Einde match');
