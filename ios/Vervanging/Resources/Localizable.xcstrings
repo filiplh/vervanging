@@ -11,12 +11,92 @@
         }
       }
     },
+    "%@ en %@ geruild.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ en %@ geruild."
+          }
+        }
+      }
+    },
+    "%@ gekozen. Tik de speler aan om mee te ruilen.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ gekozen. Tik de speler aan om mee te ruilen."
+          }
+        }
+      }
+    },
+    "%lld blokken: %@ · %@": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld blokken: %@ · %@"
+          }
+        }
+      }
+    },
+    "%lld matchen bewaard. Aan: de extra blokken gaan naar wie in vorige matchen het minst speelde.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld matchen bewaard. Aan: de extra blokken gaan naar wie in vorige matchen het minst speelde."
+          }
+        }
+      }
+    },
     "%lld van %lld": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld van %lld"
+          }
+        }
+      }
+    },
+    "1 match bewaard. Aan: de extra blokken gaan naar wie in vorige matchen het minst speelde.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 match bewaard. Aan: de extra blokken gaan naar wie in vorige matchen het minst speelde."
+          }
+        }
+      }
+    },
+    "Aanwezig en basisvijf": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aanwezig en basisvijf"
+          }
+        }
+      }
+    },
+    "Aanwezig: %lld · Basisvijf: %lld van %lld": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aanwezig: %lld · Basisvijf: %lld van %lld"
+          }
+        }
+      }
+    },
+    "Ander plan": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ander plan"
           }
         }
       }
@@ -31,6 +111,16 @@
         }
       }
     },
+    "Basis": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Basis"
+          }
+        }
+      }
+    },
     "Bewaren": {
       "localizations": {
         "nl": {
@@ -41,12 +131,82 @@
         }
       }
     },
+    "Blokken van 5 minuten": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Blokken van 5 minuten"
+          }
+        }
+      }
+    },
     "Een voornaam heeft hoogstens %lld tekens.": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Een voornaam heeft hoogstens %lld tekens."
+          }
+        }
+      }
+    },
+    "Er kon geen plan gemaakt worden. Probeer „Ander plan”.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Er kon geen plan gemaakt worden. Probeer „Ander plan”."
+          }
+        }
+      }
+    },
+    "Gelijke minuten": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gelijke minuten"
+          }
+        }
+      }
+    },
+    "Houd rekening met vorige matchen": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Houd rekening met vorige matchen"
+          }
+        }
+      }
+    },
+    "Kies precies %lld spelers voor de basisvijf om het plan te zien.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kies precies %lld spelers voor de basisvijf om het plan te zien."
+          }
+        }
+      }
+    },
+    "Match": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Match"
+          }
+        }
+      }
+    },
+    "Match bewaard. Het live scherm komt in een volgende versie.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Match bewaard. Het live scherm komt in een volgende versie."
           }
         }
       }
@@ -71,6 +231,36 @@
         }
       }
     },
+    "Min": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Min"
+          }
+        }
+      }
+    },
+    "Naar Spelers": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Naar Spelers"
+          }
+        }
+      }
+    },
+    "Nog geen matchen bewaard.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nog geen matchen bewaard."
+          }
+        }
+      }
+    },
     "Nog geen spelers. Voeg je spelers toe met voornaam en rugnummer.": {
       "localizations": {
         "nl": {
@@ -87,6 +277,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Opslaan lukte niet: de telefoon weigert opslag."
+          }
+        }
+      }
+    },
+    "Plan": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan"
+          }
+        }
+      }
+    },
+    "Plan: spelers per blok, met de geplande minuten": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan: spelers per blok, met de geplande minuten"
           }
         }
       }
@@ -111,12 +321,62 @@
         }
       }
     },
+    "Schema": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schema"
+          }
+        }
+      }
+    },
+    "Speler": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speler"
+          }
+        }
+      }
+    },
     "Spelers": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Spelers"
+          }
+        }
+      }
+    },
+    "Start": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start"
+          }
+        }
+      }
+    },
+    "Tegenstander (niet verplicht)": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tegenstander (niet verplicht)"
+          }
+        }
+      }
+    },
+    "Tik twee spelers aan om hun rijen te ruilen: twee van de basisvijf, of twee die er niet in staan.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tik twee spelers aan om hun rijen te ruilen: twee van de basisvijf, of twee die er niet in staan."
           }
         }
       }
@@ -141,12 +401,42 @@
         }
       }
     },
+    "Vink minstens %lld aanwezige spelers aan.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vink minstens %lld aanwezige spelers aan."
+          }
+        }
+      }
+    },
+    "Voeg eerst minstens %lld spelers toe bij Spelers.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voeg eerst minstens %lld spelers toe bij Spelers."
+          }
+        }
+      }
+    },
     "Voornaam": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Voornaam"
+          }
+        }
+      }
+    },
+    "Vorige matchen": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vorige matchen"
           }
         }
       }
@@ -177,6 +467,56 @@
           "stringUnit": {
             "state": "translated",
             "value": "Wijzig"
+          }
+        }
+      }
+    },
+    "Wissel %@ en %@ kan niet: %@.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wissel %@ en %@ kan niet: %@."
+          }
+        }
+      }
+    },
+    "aanwezig": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "aanwezig"
+          }
+        }
+      }
+    },
+    "afwezig": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "afwezig"
+          }
+        }
+      }
+    },
+    "de ene staat in de basisvijf en de andere niet": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "de ene staat in de basisvijf en de andere niet"
+          }
+        }
+      }
+    },
+    "die ruil past niet in het plan": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "die ruil past niet in het plan"
           }
         }
       }
