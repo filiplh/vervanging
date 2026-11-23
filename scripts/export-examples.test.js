@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,6 +61,61 @@ test('--check names a stray file without counting it as an example (issue #113)'
     const two = exportExamples('--check', '--dir', dir);
     assert.equal(two.status, 1);
     assert.equal(two.stdout.trim().split('\n').at(-1), '2 files are not in the list; run node scripts/export-examples.mjs');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--check names a stray file of any kind and leaves README.md alone (issue #115)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vervanging-examples-'));
+  try {
+    cpSync(DIR, dir, { recursive: true });
+    assert.ok(readdirSync(dir).includes('README.md'), 'README.md is in the examples folder');
+    writeFileSync(join(dir, 'notes.txt'), 'not an example\n');
+    writeFileSync(join(dir, 'plan-equal-10.json.bak'), '{}\n');
+    writeFileSync(join(dir, 'LICENSE'), 'x\n');
+    mkdirSync(join(dir, 'old'));
+    const run = exportExamples('--check', '--dir', dir);
+    assert.equal(run.status, 1);
+    assert.equal(run.stderr, '');
+    assert.deepEqual(run.stdout.trim().split('\n').sort(), [
+      '4 files are not in the list; run node scripts/export-examples.mjs',
+      'not in the list: LICENSE',
+      'not in the list: notes.txt',
+      'not in the list: old',
+      'not in the list: plan-equal-10.json.bak',
+    ]);
+    // README.md is the only entry that is no example and still passes: the clean copy matches.
+    rmSync(join(dir, 'notes.txt'));
+    rmSync(join(dir, 'plan-equal-10.json.bak'));
+    rmSync(join(dir, 'LICENSE'));
+    rmSync(join(dir, 'old'), { recursive: true });
+    const clean = exportExamples('--check', '--dir', dir);
+    assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+    assert.equal(clean.stdout.trim(), `${EXAMPLES.length} examples match`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writing removes a stray file of any kind, keeps README.md and reports a stray folder (issue #115)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vervanging-examples-'));
+  try {
+    cpSync(DIR, dir, { recursive: true });
+    writeFileSync(join(dir, 'notes.txt'), 'not an example\n');
+    writeFileSync(join(dir, 'plan-old.json'), '{}\n');
+    const run = exportExamples('--dir', dir);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    const files = readdirSync(dir);
+    assert.ok(files.includes('README.md'));
+    assert.ok(!files.includes('notes.txt'));
+    assert.ok(!files.includes('plan-old.json'));
+    assert.equal(files.length, EXAMPLES.length + 1);
+    mkdirSync(join(dir, 'old'));
+    const folder = exportExamples('--dir', dir);
+    assert.equal(folder.status, 1);
+    assert.match(folder.stderr, /not removed, it is a folder: old/);
+    assert.ok(readdirSync(dir).includes('old'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

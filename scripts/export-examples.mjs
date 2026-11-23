@@ -2,10 +2,12 @@
 // Exports the shared examples: runs scripts/sim.mjs over a fixed list of argument sets and writes each run, with its
 // exact stdout, stderr and exit status, as one JSON file in shared/examples/ (plan decision #35, ADR-003). The Swift
 // rules must give the same output for every file. The files are generated, never edited by hand.
-//   node scripts/export-examples.mjs [--dir <path>]          writes the files (and removes stale ones)
+//   node scripts/export-examples.mjs [--dir <path>]          writes the files (and removes stray ones)
 //   node scripts/export-examples.mjs --check [--dir <path>]  compares the files with what the JS gives now
 // --check exits 0 with "<n> examples match" as its last line, or exits 1 naming every example that differs, is
-// missing or is not in the list; the last line counts the examples that do not match and the stray files apart.
+// missing or is not in the list; the last line counts the examples that do not match and the stray files apart. A
+// stray file is any entry of the folder that is not <name>.json of a listed example, whatever its extension, except
+// README.md.
 // Paths in the examples' arguments are relative to the repo root; sim runs from there.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, existsSync } from 'node:fs';
@@ -15,6 +17,8 @@ import { join, resolve } from 'node:path';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SIM = 'scripts/sim.mjs';
 const DEFAULT_DIR = join(ROOT, 'shared', 'examples');
+// The one file in the examples folder that is not an example (it explains them); every other entry must be one.
+const README = 'README.md';
 const FIXTURE = (name) => `scripts/fixtures/${name}`;
 
 const P = (n, start, schedule, ...more) => ['--players', String(n), '--start', start, '--schedule', schedule, ...more];
@@ -141,8 +145,10 @@ function main(argv) {
   }
   const names = new Set(EXAMPLES.map(([name]) => name));
   if (names.size !== EXAMPLES.length) throw new Error('two examples share a name');
-  const present = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.json')) : [];
-  const stale = present.filter((f) => !names.has(f.slice(0, -'.json'.length)));
+  const present = existsSync(dir) ? readdirSync(dir, { withFileTypes: true }) : [];
+  const isExample = (f) => f.endsWith('.json') && names.has(f.slice(0, -'.json'.length));
+  const strays = present.filter((e) => e.name !== README && !isExample(e.name));
+  const stale = strays.map((e) => e.name);
 
   if (!check) {
     mkdirSync(dir, { recursive: true });
@@ -151,7 +157,12 @@ function main(argv) {
       const text = run(name, args);
       if (!existsSync(file) || readFileSync(file, 'utf8') !== text) writeFileSync(file, text);
     }
-    for (const f of stale) rmSync(join(dir, f));
+    // Only files go; a stray folder is for a person to look at.
+    for (const e of strays) {
+      if (e.isDirectory()) process.stderr.write(`export-examples: not removed, it is a folder: ${e.name}\n`);
+      else rmSync(join(dir, e.name));
+    }
+    if (strays.some((e) => e.isDirectory())) return 1;
     process.stdout.write(`${EXAMPLES.length} examples written\n`);
     return 0;
   }
