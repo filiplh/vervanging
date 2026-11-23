@@ -232,17 +232,19 @@ button.chip[aria-pressed="true"] { background: var(--selected); border-color: va
 .zone-note button.chip.extra { margin-left: 0; }
 .zone-note button.chip.extra[aria-pressed="true"] { background: var(--surface); border: 2px solid var(--on); }
 
-/* A name row with buttons under Eruit and Erin (#46, #52). Each row has one small button (In the zone or Op de bank),
-   kept beside the name: the name takes the rest of the column and wraps there (never cut), so a row stays 44 px
-   high while the name fits in two lines. Measured in headless Chrome at 360-402 x 874 with 15 players and a
-   three-player change: every Eruit name and button sits above the sticky Wissel bar with short names, with
-   "Marie-Louise" on one player due off, and with "Anne-Sophie" on all three (at 360 px "#11 Anne-Sophie" takes three
-   lines and ends 1 px above the bar). A name that takes three lines on more rows than that can still push the last
-   row under the bar. */
+/* A name row with buttons under Eruit and Erin (#46, #52, #74). Each row has one small button (In the zone or Op de
+   bank), kept beside the name: the name takes the rest of the column and wraps there (never cut). The button's label
+   wraps onto two lines ("In the / zone", "Op de / bank") inside its 44 px, so the button is about 50 px wide instead
+   of 80 and the name gets about 105 px at 360 px wide: a single name of up to about 12 letters ("Maximiliaan",
+   "Emmanuelle") fits on one line, under the number when needed, so a row takes at most two lines and stays 44 px high.
+   A name breaks only between words or at a hyphen; only a word wider than the whole column is split (break-word).
+   Measured in headless Chrome at 360-402 x 874 with 15 players and a three-player change: with long single names on
+   all three players due off, every Eruit name and button sits above the sticky Wissel bar (#74 PR). A hyphenated name
+   that needs three lines ("Mohammed-Amine" at 360 px) still makes its row taller. */
 .names li.with-chips { flex-wrap: nowrap; gap: 0 6px; padding: 0; }
-.names li.with-chips .player { flex: 1 1 0; min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.1; }
+.names li.with-chips .player { flex: 1 1 0; min-width: 0; white-space: normal; overflow-wrap: break-word; line-height: 1.1; }
 .names li .chips { display: flex; flex: 0 0 auto; gap: 4px; }
-.names li .chips button.chip { margin-left: 0; padding: 0 6px; font-size: 0.8rem; }
+.names li .chips button.chip { margin-left: 0; padding: 0 6px; font-size: 0.8rem; max-width: 4.6em; white-space: normal; line-height: 1.1; text-align: center; }
 
 /* Minutes at a glance (#32): every player in one dense grid at the top, six cells a row, so twelve players fit in
    two rows on a phone 360 px wide or more (328 px between the gutters: cells of about 51 px) */

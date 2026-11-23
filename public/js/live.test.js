@@ -697,24 +697,24 @@ const rows = (ul) => find(ul, 'li').map((li) => ({
   buttons: find(li, 'button').map((b) => b.text),
 }));
 
-test('live screen: every Eruit row shows the player\'s name on its own line above its one button, In the zone', () => {
+test('live screen: every Eruit row shows the player\'s name with its one button beside it, In the zone', () => {
   for (const n of [11, 15]) {
     const { view, setup } = open(setupOf({ n }));
     const byId = new Map(setup.players.map((p) => [p.id, p]));
     const off = rows(listOf(view, 'off'));
     assert.ok(off.length > 0, `someone is due off with ${n} players`);
     for (const row of off) {
-      assert.equal(row.className, 'with-chips', 'the row wraps: name on its own line, buttons under it');
+      assert.equal(row.className, 'with-chips', 'a row with a button: the name and the button beside it');
       assert.equal(row.first.className, 'player', 'the name comes first in the row');
       const number = Number(find(row.first, 'span', (s) => s.className === 'number')[0].text.slice(1));
       assert.equal(row.first.text, `#${number} ${byId.get(number).name}`, 'the full name is in the row');
       assert.ok(row.chips, 'the buttons sit in their own group');
       assert.deepEqual(find(row.chips, 'button').map((b) => b.text), ['In the zone'], 'only In the zone on a row (#52)');
     }
-    for (const row of rows(listOf(view, 'on'))) assert.equal(row.className, '', 'no wrap on Erin before a zone choice');
+    for (const row of rows(listOf(view, 'on'))) assert.equal(row.className, '', 'no button layout on Erin before a zone choice');
     chips(view, 'In the zone')[0].fire('click');
     for (const row of rows(listOf(view, 'on'))) {
-      assert.equal(row.className, 'with-chips', 'Erin rows wrap while Op de bank is shown');
+      assert.equal(row.className, 'with-chips', 'Erin rows get the button layout while Op de bank is shown');
       assert.equal(row.first.className, 'player');
       assert.match(row.first.text, /^#\d+ Speler\d+$/);
       assert.deepEqual(row.buttons, ['Op de bank']);
@@ -732,7 +732,10 @@ test('styles: a name row keeps its one button beside the name, and the name wrap
   assert.match(rule('.names li.with-chips'), /flex-wrap:\s*nowrap/, 'the button never moves under the name');
   const player = rule('.names li.with-chips .player');
   assert.match(player, /white-space:\s*normal/, 'a long name wraps instead of being cut');
-  assert.match(player, /overflow-wrap:\s*anywhere/, 'even one long word wraps rather than overflowing');
+  // #74: break-word, not anywhere, so "Mohammed" never splits into "Mohamm/ed" while it fits on a line of its own; only
+  // a word wider than the whole column is split, so it still never overflows onto the button.
+  assert.match(player, /overflow-wrap:\s*break-word/, 'a name breaks between words, and splits only a word too wide to fit');
+  assert.doesNotMatch(player, /anywhere/, 'never in the middle of a word that fits');
   assert.match(player, /flex:\s*1 1 0/, 'the name takes the width the button leaves');
   assert.match(player, /min-width:\s*0/, 'so it can wrap inside that width');
   assert.doesNotMatch(player, /overflow:\s*hidden|text-overflow/, 'the name is never cut');
@@ -742,6 +745,11 @@ test('styles: a name row keeps its one button beside the name, and the name wrap
   assert.match(chip, /font-size:\s*0\.8rem/);
   assert.match(chip, /margin-left:\s*0/);
   assert.doesNotMatch(chip, /min-height/, 'the buttons keep the 44 px tap height of button.chip');
+  // #74: the label wraps in two lines ("In the / zone"), so the button is about 50 px wide and a long single name
+  // ("Bernadette", "Maximiliaan") fits beside it on one line at 360 px, keeping every row 44 px high.
+  assert.match(chip, /max-width:\s*4\.6em/, 'a narrow button: its label takes two lines');
+  assert.match(chip, /white-space:\s*normal/, 'the label may wrap');
+  assert.match(chip, /line-height:\s*1\.1/, 'two lines of label fit in 44 px');
   assert.match(rule('.change'), /grid-template-columns:\s*minmax\(0, 1\.05fr\) minmax\(0, 1fr\)/, 'Eruit is a little wider');
 });
 
@@ -918,4 +926,59 @@ test('buttons have a pressed (:active) style', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
   assert.match(css, /button:active:not\(:disabled\)/);
   assert.match(css, /button\.primary:active:not\(:disabled\)/);
+});
+
+// #74: with a three-player change the zone note starts under the sticky Wissel bar, so its Extra minuten toggle was out
+// of sight. The browser measured it (PR); here a fake layout checks the rule: after In the zone, and after the toggle
+// is pressed (its sentence grows by a line), the page scrolls just far enough to put the toggle 8 px above the bar.
+function withLayout({ toggleTop }, fn) {
+  let scrolled = 0;
+  const scrolls = [];
+  const make = globalThis.document.createElement;
+  globalThis.document = {
+    createElement(tag) {
+      const node = make(tag);
+      node.getBoundingClientRect = () => {
+        const classes = node.className.split(' ');
+        if (classes.includes('live-actions')) return { top: 725, bottom: 874 };
+        if (classes.includes('extra')) {
+          const top = toggleTop + (node.attrs['aria-pressed'] === 'true' ? 22 : 0) - scrolled;
+          return { top, bottom: top + 44 };
+        }
+        return { top: 0, bottom: 0 };
+      };
+      return node;
+    },
+  };
+  globalThis.scrollBy = (x, y) => { scrolls.push([x, y]); scrolled += y; };
+  try {
+    fn(scrolls);
+  } finally {
+    delete globalThis.scrollBy;
+  }
+}
+
+test('live screen: choosing In the zone scrolls the Extra minuten toggle above the Wissel bar, and pressing it keeps it there', () => {
+  withLayout({ toggleTop: 785 }, (scrolls) => {
+    const { view } = open(setupOf({ n: 15 }));
+    assert.deepEqual(scrolls, [], 'opening the screen does not scroll');
+    chips(view, 'In the zone')[0].fire('click');
+    assert.deepEqual(scrolls, [[0, 785 + 44 + 8 - 725]], 'scrolled just far enough: toggle bottom 8 px above the bar');
+    chips(view, 'Extra minuten (niet teruggeven)')[0].fire('click');
+    assert.deepEqual(scrolls.at(-1), [0, 22], 'pressed: the longer sentence pushes it down 22 px, the page follows');
+    assert.equal(scrolls.length, 2);
+    chips(view, 'Extra minuten (niet teruggeven)')[0].fire('click');
+    assert.equal(scrolls.length, 2, 'back to In the zone: the toggle moves up and stays in view, no scroll');
+    chips(view, 'In the zone')[0].fire('click');
+    assert.equal(scrolls.length, 2, 'cancelling the choice does not scroll');
+  });
+});
+
+test('live screen: a toggle already above the Wissel bar does not move the page', () => {
+  withLayout({ toggleTop: 600 }, (scrolls) => {
+    const { view } = open(setupOf({ n: 15 }));
+    chips(view, 'In the zone')[0].fire('click');
+    chips(view, 'Extra minuten (niet teruggeven)')[0].fire('click');
+    assert.deepEqual(scrolls, []);
+  });
 });
