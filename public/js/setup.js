@@ -212,7 +212,8 @@ export function rosterScreen(root, { store }) {
       ? el('p', { className: 'note' }, 'Nog geen spelers. Voeg je spelers toe met voornaam en rugnummer.')
       : el('ul', { className: 'roster' }, roster.players.slice().sort(byNumber).map((p) =>
         el('li', { className: p.id === editingId ? 'editing' : null },
-          // The season total sits under the name, so a long name keeps the width beside the buttons (#60).
+          // The season total sits under the name, so a long name keeps the width beside the buttons (#60). ⚠ The owner chose
+          // the "min" suffix; putting it under the name rather than beside it is to be confirmed.
           el('span', { className: 'player-cell' },
             el('span', { className: 'player' }, el('span', { className: 'number' }, `#${p.number}`), ' ', p.name),
             el('span', { className: 'season-total' },
