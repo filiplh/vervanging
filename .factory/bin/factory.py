@@ -83,6 +83,9 @@ DEPS_PAGE = 100         # native dependencies read at once (mode off); a full pa
 PR_LIMIT = 100          # pull requests one list reads; a full answer is refused, never read in part (a merged
                         # window is read whole instead: StatusGitHub.merged_since)
 SEARCH_LIMIT = 1000     # GitHub's search gives at most this many: an answer that size cannot be told whole
+GH_PR_FILES = 100       # changed files gh pr view (and the broker's pr-view) gives at most
+PR_FILES_PAGES = 30     # pages of 100 a pull request's file list is read in (mode off); GitHub lists at most
+                        # 3000 files, so a longer list cannot be read whole and is refused
 
 
 class Stop(Exception):
@@ -450,8 +453,9 @@ class GitHub:
         them; the broker's pr-view gives both too, an older broker neither), and files: the paths of its changed files,
         as merge-gate.md rule 2 › "Which checks" reads them (`files`; a rename is its new path only). Both modes must
         give the list, and it must hold changedFiles paths: gh asks GitHub for the first 100 files only, so a longer
-        list is cut short, and a short list is refused, never used. With draft, also whether it is a draft (isDraft,
-        which both modes must give)."""
+        list is cut short. Mode off then reads the whole list page by page (pr_files); mode on has no broker verb that
+        lists more, so there, as for any list that still falls short, it is refused, never used. With draft, also
+        whether it is a draft (isDraft, which both modes must give)."""
         what = "reading pull request #%d" % n
         data = self._json(self._gh("pr", "view", str(n), "-R", self.repo or "", "--json",
                                    "number,state,headRefOid,headRefName,baseRefName,isCrossRepository,headRepository,"
@@ -486,6 +490,13 @@ class GitHub:
         paths = [f.get("path") if isinstance(f, dict) else None for f in files]
         if any(not isinstance(p, str) or not p or "\0" in p for p in paths):
             raise GitHubError("%s: a changed file in the answer has no path" % what)
+        if len(paths) != count and count > GH_PR_FILES and len(paths) <= GH_PR_FILES:
+            if self.mode != "off":
+                raise GitHubError("%s: the pull request has %d changed files and factory-github's pr-view gives the "
+                                  "first %d only (no broker verb lists more); an incomplete list never selects the "
+                                  "checks, so this pull request is gated by hand in agent-token mode on"
+                                  % (what, count, GH_PR_FILES))
+            paths = self.pr_files(n, count, paths)
         if len(paths) != count:
             raise GitHubError("%s: the answer lists %d changed files of the %d the pull request has; an incomplete "
                               "list never selects the checks" % (what, len(paths), count))
@@ -496,6 +507,39 @@ class GitHub:
                 raise GitHubError("%s: the answer does not say whether it is a draft (isDraft)" % what)
             out["draft"] = data["isDraft"]
         return out
+
+    def pr_files(self, n, count, first):
+        """Mode off: every changed file of #n, read page by page through the REST API (pulls/<n>/files, 100 a page,
+        `filename`: a rename is its new path only, as gh's `files` gives it). `count` is changedFiles and `first` the
+        paths gh pr view gave. Refused, never cut, when GitHub cannot list them all (more than PR_FILES_PAGES pages),
+        when a page is not a list of files with paths, when a full page is followed by nothing more and the list is
+        still short, or when gh's first paths are not all in it (the pull request changed between the reads). A head
+        that moves after these reads is caught where the head is fetched and compared."""
+        what = "reading the changed files of pull request #%d" % n
+        if count > PR_FILES_PAGES * 100:
+            raise GitHubError("%s: it has %d changed files and GitHub lists at most %d, so the list cannot be read "
+                              "whole; an incomplete list never selects the checks" % (what, count, PR_FILES_PAGES * 100))
+        paths = []
+        for page in range(1, PR_FILES_PAGES + 1):
+            batch = self._json(self._gh("api", "-H", "Accept: application/vnd.github+json",
+                                        "repos/%s/pulls/%d/files?per_page=100&page=%d" % (self.repo, n, page)), [],
+                               what)
+            if not isinstance(batch, list):
+                raise GitHubError("%s: page %d is not a list" % (what, page))
+            for f in batch:
+                p = f.get("filename") if isinstance(f, dict) else None
+                if not isinstance(p, str) or not p or "\0" in p:
+                    raise GitHubError("%s: a changed file on page %d has no path" % (what, page))
+                paths.append(p)
+            if len(batch) < 100 or len(paths) >= count:
+                break
+        if len(paths) != count:
+            raise GitHubError("%s: the list holds %d changed files of the %d the pull request has; an incomplete list "
+                              "never selects the checks" % (what, len(paths), count))
+        if len(set(paths)) != len(paths) or not set(first) <= set(paths):
+            raise GitHubError("%s: the list does not match the one gh pr view gave (the pull request changed between "
+                              "the reads); run it again" % what)
+        return paths
 
     def fetch_pr(self, n):
         """Fetch origin's branches and the pull request's head as origin/pr/<n> (github-access.md › Fetch a PR's head;
@@ -2909,8 +2953,10 @@ GATE_NIGHTLY = "factory-nightly.yml"    # the core's nightly workflow (templates
 GATE_CI = "Factory CI"                   # factory-ci.yml's workflow name (core/templates/README.md › Fixed names)
 GATE_SELECTOR = "select checks"          # factory-ci.yml's first job when verify is not in ci.pr: it runs no command
 # factory-ci.yml's check job when no check is needed: skipped before its matrix expands, so GitHub names it by its job
-# id or by its unexpanded name. It runs no command, and no check may be named so (templates README › Fixed names).
-GATE_EMPTY_MATRIX = ("checks", "${{ matrix.check.name }}")
+# id (checks), by its unexpanded name (${{ matrix.check.name }}) or by that name's bare expression (matrix.check.name,
+# what GitHub reports when ci.pr is just [verify]). Exempt only in Factory CI and only skipped: it runs no command, and
+# no check may be named so (templates README › Fixed names).
+GATE_EMPTY_MATRIX = ("checks", "${{ matrix.check.name }}", "matrix.check.name")
 GATE_HUMAN = ("agent:human", "status:needs-human")      # human-gates.md › H1, on the pull request or on its issue
 GATE_REVIEW_KEYS = {"reviews": ("submitted_at",), "inline": ("created_at", "updated_at"),
                     "conversation": ("created_at", "updated_at")}  # mode on: what pr-reviews gives beside the author
@@ -4506,7 +4552,9 @@ class GateRun:
         checks = self.github.pr_checks(self.n)
         for e in checks:
             name, shown, bucket = e["name"], rc.escape(e["name"]), e["bucket"]
-            factory_ci = e["workflow"] == GATE_CI
+            # Factory CI's own selector and idle check job, unless ci.external lists a job of that workflow by this
+            # name: such a job is the project's, and needs its evidence like every listed job.
+            factory_ci = e["workflow"] == GATE_CI and not any(w == GATE_CI and gate_job_of(name, j) for w, j in ext)
             if bucket == "pass":
                 if e["workflow"] not in workflows:     # a ci.external job never stands in for a factory check
                     passed.add(name)

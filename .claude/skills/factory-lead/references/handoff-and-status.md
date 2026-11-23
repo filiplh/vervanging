@@ -80,6 +80,7 @@ Each status comment, in this order:
 
 ### In flight
 - #<N> <title>: <in progress (role, spec) | in review (PR #P, next step)>
+- Compound due: #<N>, #<M> (<trigger per issue>)
 
 ### Ready next
 - #<N> <title> (milestone, tier)
@@ -110,7 +111,7 @@ other section, whatever its status. An epic's line keeps its status and `agent:h
 `<r>` is the number of fix-round reports on the PR, every `### Fix round <n> (…)` heading, adaptation rounds included
 (`0 fix rounds` when there were none), counted from the PR, never from memory. It is not the escalation count:
 [model policy](../../../../.factory/reference/model-policy.md) rule 3 leaves adaptations out of that one, so read the
-headings to judge the effect of the [round rule](../SKILL.md#reviews). Every item under "Merged
+headings to judge the effect of the [round rule](round-rule.md). Every item under "Merged
 recently" carries it.
 
 Under "Model fit (merged recently)", `factory status` counts the model fit lines
@@ -118,6 +119,12 @@ Under "Model fit (merged recently)", `factory status` counts the model fit lines
 "Merged recently", per work kind, role and tier, by verdict, from the PR comments only. An example in a fenced block or
 an HTML comment is not counted. A line that is not in the policy's form is counted as not parsed, with its PR, never
 guessed.
+
+"Compound due" is one line, copied from the "Compound due" line of `factory metrics`
+([after every merge](../SKILL.md#merge-gate), step 7): the merged issues whose compound run is due and not yet
+recorded. It shows only when that list is not empty; with "none" it is left out. An issue leaves it only when its
+compound record is posted. When `factory metrics` says "cannot tell", the line says that with its reason, since an
+unknown list is not an empty one. With `factory status`, add it as `--note "in-flight: Compound due: …"`.
 
 Upstream drafts are `factory-compound`'s general lessons for the factory repo; filing one is gate H9, so they wait
 here, as a single line for all of them (not one per lesson), until the user says which to file

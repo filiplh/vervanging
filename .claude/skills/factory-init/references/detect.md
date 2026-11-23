@@ -76,7 +76,9 @@ third-party (gate H2), so prefer the runner's preinstalled tools when they are e
 **Make, just, Task.** A `verify`, `check` or `test` target is the best verify command when it exists, whatever the
 stack: it is the project's own word for it.
 
-**Nothing found.** Ask for setup and verify (questions 4 and 5) and recommend the commands the README names.
+**Nothing found.** When the README or the code names commands, ask for setup and verify (questions 4 and 5) and
+recommend those. When the repo has no code and no manifest at all (a new repo: a README, maybe a licence), it has no
+stack yet: follow [questions.md](questions.md#a-repo-with-no-stack-yet) instead of inventing one.
 
 ## Setup: the worktree script
 
@@ -92,6 +94,15 @@ copy-on-write instead of installing again, and falls back to the install command
   account).
 - Slow integration tests behind a marker or tag: the same.
 - Performance budgets: a check with `gate: false`, nightly only.
+
+## Browser tool
+
+A project whose screens are shown in a browser needs a browser tool for the validator's `ui` assertions
+([questions.md](questions.md#the-browser-tool-question-6b), question 6b). Signs of a web stack: HTML pages or
+templates, a frontend framework or bundler in a manifest, a `serve`, `preview` or `dev` script that serves pages, a
+web server framework that renders pages. Note too which browser tool the repo already has: an end-to-end runner's
+config or dependency (the same one an end-to-end suite check uses, below). A library, a command-line tool, firmware or
+an API with no pages has no browser screens: question 6b is skipped, and the findings say so.
 
 ## Plan, decisions, spikes
 

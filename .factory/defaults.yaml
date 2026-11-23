@@ -79,6 +79,7 @@ models:
     process_hunter: claude/claude-opus-5-5/high
     domain_hunter: claude/claude-opus-5-5/high
     architecture_review: claude/claude-opus-5-5/high
+    maintenance: claude/claude-sonnet-5-5/high  # weekly upkeep scan; it only files tickets, each fix runs on its tier
   helpers:
     search: claude/claude-haiku-5-5           # search and lookups
     read: claude/claude-sonnet-5-5/low        # reading and summarising; up to medium when needed

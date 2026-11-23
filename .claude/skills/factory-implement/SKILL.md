@@ -1,6 +1,6 @@
 ---
 name: factory-implement
-description: Implements one GitHub issue in its own git worktree and takes it to a pull request with honest evidence, or addresses the review findings on an existing PR. Covers the worktree check, the project's setup command, blockers merged on main, branch naming, owned paths, tests, the project's verify command with the machine's worker cap, the PR body, and the final report (also posted on the PR). Everything project-specific comes from factory.yaml and the overlay. Use when a task says "implement issue #N" or "address review findings on PR #N" in a repo with a factory.yaml.
+description: For a builder agent whose brief comes from a lead, or from factory-solo's flow (its implement step). The brief puts the builder in its own git worktree with one issue to take to a pull request with evidence, or with review findings on an existing PR to fix in a fix round. Use only when the brief puts you in your own worktree with your issue or fix-round findings. A person asking in their own session to implement or ship an issue, or to fix review findings, does not use it. That is factory-solo in solo mode or factory-lead in team mode, which also run the review and the merge gate.
 ---
 
 # Implementing one issue
@@ -118,6 +118,19 @@ runs you read the mode), use the broker verb that [the core's GitHub access mapp
   product question) is marked in code and docs with the marker `AGENTS.md` names, and listed under "Needs
   confirmation" in your report. Never present it as fact.
 - **No secrets** in files, commits, logs, test fixtures or PR text. Never use production data or production systems.
+- **Shell safety.** Your shell may be zsh, and not every agent runs the factory's hooks (a Codex child does not), so
+  these hold wherever you run commands; the lead follows them too:
+  - **Temp paths:** work in your session's scratch folder, and remove only exact paths you made, written out.
+    Never `rm` a glob in `$TMPDIR` or `/tmp`: every program keeps files there, and one such glob once deleted
+    thousands of entries that were not the agent's. The hook refuses it, and refuses `rm` of a path held in a
+    variable too, since it cannot tell what the variable holds.
+  - **A colon after a variable:** brace the name, `"${B}:path"`, never `$B:path`. zsh reads the letter after the
+    colon as a modifier of the value, and an unbraced `git show $B:<path>` once silently extracted the wrong file
+    during a release check. The hook refuses it in `git` commands.
+  - **Edit scripts go in a file** that you then run, not in a here-document. A here-document ends at the first line
+    equal to its terminator, even inside the text it carries, and the lines after it run as shell commands: test
+    text holding `EOF` once ended an edit script early, and the rest overwrote a real file in the user's home
+    folder. A here-document you do write gets a terminator that occurs nowhere in its body.
 - Commit as you go, with conventional commits (`fix(parser): handle an empty input list`), each after the
   [pause check](#emergency-stop). Follow the project's language rules in `AGENTS.md` for commit messages, code
   comments and PR text.
@@ -242,10 +255,10 @@ your checkpoints: right before **every commit, every push, opening the PR (`gh p
   the paused report from [references/report.md](references/report.md) › Paused, on the PR when there is one,
   otherwise on the issue, make it your final message, and stop. No commit, push, PR, label or new agent after that.
 - **A message from the lead** that the factory is paused means the same, wherever you are.
-- **Resuming** is not your call: the lead or the person starts you again ("finish issue #N on branch <b>", or a
+- **Resuming** is not your call: the lead or the solo session starts you again ("finish issue #N on branch <b>", or a
   `continue`) after the label is gone. Check again before your first step back.
 
 ## Solo mode
 
-In solo mode there is no lead: the person who started you reads the report. The steps after the PR (independent
+In solo mode there is no lead: the solo session that started you reads the report. The steps after the PR (independent
 review on a different model, the gate, the merge) belong to the solo flow, not to this skill.

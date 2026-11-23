@@ -20,7 +20,18 @@ included; 1 to 365):
     issue, and the usage-limit hits per provider on this machine (every project: a limit is the provider's, not a
     project's). The ledger names a project by the name its starter gave: factory.yaml's project.name and the name
     part of project.repo both count, or --project NAME;
-  - the model fit lines again per work kind, the numbers the lead's tier-table proposals rest on.
+  - the model fit lines again per work kind, the numbers the lead's tier-table proposals rest on;
+  - "Compound due": every issue merged in the window that has a factory-compound trigger but no compound record
+    (`<!-- factory:compound incident=#N ... -->`, factory-compound › Record and report) in a comment on the issue or
+    on a merged pull request of the window that closes it, or "none". The triggers (factory-lead › Compound check): a
+    review record with verdict needs-rework on such a pull request, an escalation record on the issue (board.md ›
+    Escalation record: a comment line that begins with the lead's or the solo session's prefix and "escalated to"), or
+    two or more fix rounds that count (model-policy.md rule 3) on one such pull request. Records and reports in a
+    fenced block are examples and do not count. A compound record counts only whole and as the comment's first line,
+    where factory-compound puts it: the tag with incident, a known outcome and form, and its closing "-->", alone on
+    that line; one in a quote, in backticks, later in the text or unfinished is talk about a record, not one. Each
+    issue is read with its comments; a comment list that cannot be read makes the whole GitHub part "cannot tell",
+    this line included.
 
 Fail closed: a GitHub read that cannot finish (an error, an answer of an unexpected shape such as a merged pull
 request without a readable closingIssuesReferences list or entry, a single UTC day with 1000 or more merged pull
@@ -63,6 +74,9 @@ CANNOT = "cannot tell"
 ADAPTATION = re.compile(r"^### Fix round [1-9][0-9]* \(adaptation:", re.MULTILINE)
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 MARKER = re.compile(r"<!-- factory:review ([^>]*)-->")
+COMPOUND = re.compile(r"<!-- factory:compound incident=#([1-9][0-9]*) outcome=(?:written|proposed|upstream|none) "
+                      r"form=(?:check|watched|rule|cause|none) -->")
+ESCALATION = re.compile(r"^\U0001F916 (?:Lead|Solo): escalated to ", re.MULTILINE)
 
 
 def _load(name, file):
@@ -171,6 +185,32 @@ def first_findings(comments):
     return None
 
 
+def needs_rework(comments):
+    """True when a review record on the pull request, outside fenced blocks, has verdict needs-rework."""
+    for body in comments:
+        for m in MARKER.finditer(fenced_out(body)):
+            if "verdict=needs-rework" in m.group(1).split():
+                return True
+    return False
+
+
+def escalated(comments):
+    """True when an issue comment, outside fenced blocks, is an escalation record (board.md › Escalation record)."""
+    return any(ESCALATION.search(fenced_out(body)) for body in comments)
+
+
+def compounded(comments):
+    """The issue numbers that compound records in these comments name. A record counts only as a comment's whole
+    first line (factory-compound › Record and report): quoted, in backticks, further down or unfinished, it is talk
+    about a record, never one."""
+    out = set()
+    for body in comments:
+        m = COMPOUND.fullmatch(body.split("\n", 1)[0].rstrip("\r \t"))
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
 def tier_of(issue):
     tiers = fac.tiers_of(issue)
     return tiers[0][len("tier:"):] if len(tiers) == 1 else ("no tier" if not tiers else "several tiers")
@@ -220,6 +260,7 @@ def github_numbers(github, since):
     repo = github.project.repo()
     merged = github.merged_since(since)   # the window read whole, as `factory status` reads it; a part is refused
     rows, kinds, no_record, unparsed, tier_by_issue = {}, {}, [], [], {}
+    triggers, done = {}, set()   # issue -> the compound triggers seen; issues with a compound record
 
     def row(t):
         return rows.setdefault(t, {"issues": 0, "rounds": 0, "findings": 0, "fit": dict.fromkeys(fac.FIT_VERDICTS, 0)})
@@ -231,12 +272,25 @@ def github_numbers(github, since):
         tiers = []
         for n in numbers:
             if n not in tier_by_issue:
-                tier_by_issue[n] = tier_of(github.issue(n))
+                issue = github.issue(n, comments=True)
+                tier_by_issue[n] = tier_of(issue)
                 row(tier_by_issue[n])["issues"] += 1
+                done |= compounded(issue["comments"]) & {n}
+                if escalated(issue["comments"]):
+                    triggers.setdefault(n, set()).add("escalation")
             tiers.append(tier_by_issue[n])
         comments = github.pr_comments(p["number"])
         top = min(tiers, key=rank)
-        row(top)["rounds"] += counted_rounds(comments)
+        rounds = counted_rounds(comments)
+        row(top)["rounds"] += rounds
+        found_here = compounded(comments)
+        for n in numbers:
+            if n in found_here:
+                done.add(n)
+            if needs_rework(comments):
+                triggers.setdefault(n, set()).add("needs-rework")
+            if rounds >= 2:
+                triggers.setdefault(n, set()).add("%d fix rounds" % rounds)
         f = first_findings(comments)
         if f is None:
             no_record.append(p["number"])
@@ -248,7 +302,8 @@ def github_numbers(github, since):
             kinds.setdefault(kind, dict.fromkeys(fac.FIT_VERDICTS, 0))[verdict] += 1
         if bad:
             unparsed.append((p["number"], bad))
-    return {"rows": rows, "kinds": kinds, "no_record": no_record, "unparsed": unparsed}
+    due = [(n, sorted(triggers[n])) for n in sorted(triggers) if n not in done]
+    return {"rows": rows, "kinds": kinds, "no_record": no_record, "unparsed": unparsed, "due": due}
 
 
 # --- the ledger -----------------------------------------------------------------------------------------------------
@@ -302,6 +357,7 @@ def table(title, days, gh, gh_error, ledger, ledger_name):
     if gh is None:
         out.append("| all | %s | %s | %s | %s |" % ((CANNOT,) * 4))
         out += ["", "GitHub: %s (%s); no GitHub number is shown." % (CANNOT, fac.one_line(gh_error))]
+        out.append("Compound due: %s (%s)." % (CANNOT, fac.one_line(gh_error)))
     else:
         rows = gh["rows"]
         total = {"issues": 0, "rounds": 0, "findings": 0, "fit": dict.fromkeys(fac.FIT_VERDICTS, 0)}
@@ -319,6 +375,7 @@ def table(title, days, gh, gh_error, ledger, ledger_name):
         if gh["no_record"]:
             out.append("No readable first review record: %s (their findings are not in P0-P2)."
                        % ", ".join("PR #%d" % p for p in gh["no_record"]))
+        out.append("Compound due: %s." % (", ".join("#%d (%s)" % (n, ", ".join(t)) for n, t in gh["due"]) or "none"))
     if ledger is None:
         out.append("Usage: no usage ledger on this machine.")
     elif isinstance(ledger, str):

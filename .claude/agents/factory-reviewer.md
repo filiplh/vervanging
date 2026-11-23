@@ -172,7 +172,7 @@ need it: skip it and follow this file as written.
   and let the most conservative believable reading win. Ask of every "fresh", "latest" or "stale" in the diff: fresh
   by what clock? A rule that infers an observation's age ("probably new" or "already superseded") from something else
   (equal values, the previous period's end, the latest entry already stored) is a finding. Severity: **P2**; **P1** when it guards a gate, a release or a reserve.
-  Two cases, as tests (from #323):
+  Two cases, as tests:
 
   | Check | Input | Expected | Read-time or inferred version |
   | --- | --- | --- | --- |

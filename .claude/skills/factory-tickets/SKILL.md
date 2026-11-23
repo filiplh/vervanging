@@ -1,6 +1,6 @@
 ---
 name: factory-tickets
-description: Turns a merged plan's phases (with their exit tests and decision logs), or one idea or epic the user names, into GitHub issues the user approves before any is created. Each ticket is a tracer-bullet slice sized to one builder context window, written in the core's ticket template (Blocked by, Work kind, what and why, acceptance criteria, the contract section with testable assertions, owned paths, plan link), labelled with type, tier (from work_kinds), size, status and milestone, created in dependency order with GitHub's native issue dependencies set to match. Too-big items become proposed epics, work for a person gets agent:human, each phase's exit test becomes its own ticket, and a re-run never duplicates an issue. Use after factory-plan, or when the user says "write the tickets", "turn the plan into issues", "break this epic down", "ticket this idea".
+description: Turns a merged plan's phases, or one idea or epic the user names, into GitHub issues the user approves before any is created. Each ticket is a tracer-bullet slice sized to one builder context window, in the core's ticket template with acceptance criteria, owned paths, labels, and a re-run never duplicates an issue. Too-big items become proposed epics. Use after factory-plan, or when the user says "write the tickets", "turn the plan into issues", "break this epic down", "ticket this idea" or "file an issue for this feature". Does not implement what it files (factory-solo or factory-lead do).
 ---
 
 # Tickets from the plan
@@ -105,9 +105,9 @@ otherwise it waits in the list. An existing epic the user names keeps its labels
 **Work for a person.** A ticket that needs a person (an account, money, a secret, a signature, a decision, a check on
 real hardware or with a real end user; every gate on [the human-gate list](../../../.factory/reference/human-gates.md)
 whose trigger the work itself needs, and the project's `human_gates`) gets `agent:human` and is never sized as agent
-work: no `size:*` label, and it is not split to fit a context window. Write what the person does and what "done"
-looks like, so they can close it with a "Done" comment (board.md › Unblock). The agent work around it becomes its own
-tickets, Blocked by it where they need its result. A parked plan item that blocks a phase item becomes such a ticket
+work: no `size:*` label, and it is not split to fit a context window. It still gets its work kind's `tier:*` (§3).
+Write what the person does and what "done" looks like, so they can close it with a "Done" comment (board.md ›
+Unblock). The agent work around it becomes its own tickets, Blocked by it where they need its result. A parked plan item that blocks a phase item becomes such a ticket
 ("decide <the question>", owned by the parked item's owner), and the work it blocks waits on it.
 
 **The phase's exit test** becomes its own ticket: the end-to-end check that shows the exit test passing, plus the
@@ -131,7 +131,7 @@ marked `(append-only)`. Prefer narrow paths over a whole tree: a ticket that own
 | Label | Rule |
 | --- | --- |
 | `type:*` | what the change is: `type:feature`, `type:bug`, `type:chore`, `type:docs`, `type:test`, `type:spike`; `type:epic` for an epic. The title's prefix follows it (§4) |
-| `tier:*` | exactly one, from the ticket's work kind: `work_kinds.<kind>` in `factory.yaml` over the core default. Pick the kind for the hardest part of the slice (a feature that changes the stored data model is `data-model`, not `feature`). A kind that is in neither table: stop and ask the user to pick a listed kind or add theirs to `factory.yaml` (a rules change, gate H4); never invent a tier |
+| `tier:*` | exactly one, from the ticket's work kind: `work_kinds.<kind>` in `factory.yaml` over the core default. Pick the kind for the hardest part of the slice (a feature that changes the stored data model is `data-model`, not `feature`). A kind that is in neither table: stop and ask the user to pick a listed kind or add theirs to `factory.yaml` (a rules change, gate H4); never invent a tier. An `agent:human` ticket gets one too, while it gets no `size:*`: [the model policy's rule 2](../../../.factory/reference/model-policy.md#rules) says why |
 | `size:*` | `size:S` or `size:M` (§2). Never `size:L` on a ticket; `size:L` is the epic's. None for `agent:human` |
 | `status:*` | `status:ready` when the "Blocked by" line is `none`, or every blocker is already done by board.md › Unblock (closed **and** merged on the default branch). Otherwise `status:blocked`; when in doubt, blocked (`factory unblock` moves it later). None for an epic |
 | `agent:*` | `agent:human` for work for a person. Otherwise `agent:<role>` when every owned path falls inside that one role's `owns` in `factory.yaml`; no role label when the paths span roles or the project has none |

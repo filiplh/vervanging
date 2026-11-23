@@ -3,6 +3,17 @@
 The factory's merge gate rules (the `factory.yaml` schema, "Merge gate rules"), and how to check each one with `gh`
 and `git`. Stop at the first rule that fails, say which and why, and do not merge.
 
+Contents:
+
+- [1. Up to date, and the default branch green](#1-up-to-date-and-the-default-branch-green)
+- [2. Required checks on the current head](#2-required-checks-on-the-current-head), with [the batch gate](#the-batch-gate)
+- [3. The latest review](#3-the-latest-review), with [outside findings after a clean review](#outside-findings-after-a-clean-review)
+- [4. The validator](#4-the-validator)
+- [5. Human gates and acceptance](#5-human-gates-and-acceptance)
+- [6. The records, then the merge](#6-the-records-then-the-merge)
+- [After a merge that changes the release checker](#after-a-merge-that-changes-the-release-checker)
+- [Lead fixes](#lead-fixes)
+
 **The tool does most of it.** `factory gate <P>` checks rules 1 to 5 on the head and prints pass, or each rule that
 fails or cannot be judged and why; `factory gate <P> --record` then writes the gate record of
 [step 6](#6-the-records-then-the-merge) (items 3 and 4). `factory verify <P> --why "<reason>"` runs the required
@@ -139,10 +150,11 @@ from the default branch's: a check the default branch's selects and the head's d
 that takes an entry out, narrows its `when` or sets `gate: false` is held to it (one whose head no longer has the
 entry is gated by hand). Changed files:
 `gh pr view <P> -R <repo> --json files,changedFiles`, then `.files[].path`. That list holds at most 100 files (gh
-reads no further), so it is complete only when it has `changedFiles` paths. A longer PR is split, or gated by hand
-with the whole list read page by page through the REST API
-(`gh api --paginate repos/<repo>/pulls/<P>/files --jq '.[].filename'`), and its evidence says so; `factory verify`
-refuses it.
+reads no further), so it is complete only when it has `changedFiles` paths. A longer list is read page by page through
+the REST API (`gh api --paginate repos/<repo>/pulls/<P>/files --jq '.[].filename'`, at most 3,000 files, all GitHub
+lists); `factory verify` does that itself with agent-token mode off and refuses when the list cannot be read whole.
+With the mode on, the broker lists at most 100 files, so `factory verify` refuses a longer PR: split it, or gate it by
+hand with the whole list read as above, and its evidence says so.
 
 **The project's own workflows:** every job listed in `ci.external` is a required check too, on every PR. Its CI state
 is the check whose `workflow` is the entry's `workflow` and whose `name` is the job name, or the job name followed by

@@ -6,6 +6,22 @@ with changes pushes to the open one and updates its body.
 Fill in every section from what actually happened: the apply report, the label and status lines, the commands you
 ran and their real output. Never claim a check you did not run.
 
+**Human gates.** An install touches gates of the core's human-gate list (`.factory/reference/human-gates.md` in the
+target after the apply), and its review files each one the body leaves without an approval. So the "Human gates"
+section lists every gate this install touches, from what it actually installed (the apply report, `factory.yaml` and
+the recipes it applied), one row per gate and item:
+
+| What the install added | Gate | The owner approves |
+| --- | --- | --- |
+| The rules files and settings: `factory.yaml` (its `human_gates`, `licences` and `deploy` included), `AGENTS.md` or what it appended there, a `CLAUDE.md` that is more than a pointer, the role files and the review checklist. Always there | H4 | these rules and settings as written |
+| A third-party tool the installed files run: each action in the CI workflows other than GitHub's own `actions/*` pinned to a full SHA (the standing exception), each deploy tool the core's workflows or a recipe run (name, version or commit, licence) | H2 | that tool at that version, under that licence |
+| A deploy target or environment in `factory.yaml` › `deploy` | H6 | the target, its environments and when each deploys (`when`, `approve`) |
+| The account and the secrets a deploy target needs (the recipe's account and secret names, never a value) | H3 | the account, who pays for it, and each secret by name |
+
+Leave out a row whose gate the install does not touch. Never add a gate the install does not touch, and never mark a
+row approved yourself: the Approval cell stays empty until the owner links their own comment (human-gates.md ›
+Resolved or not). A row with an empty Approval cell is an open gate, and the PR waits for it.
+
 ```markdown
 ## What
 
@@ -66,10 +82,23 @@ Nothing that was here is overwritten. <or, on a fresh repo: "A new repo: nothing
 - Status issue: #<N> "Factory status", pinned / already there, left as it is / your issue #<N> adopted (labelled and
   pinned; title and body untouched).
 
+## Human gates
+
+This install touches the gates below. Approve each one with a comment on this PR, and put that comment's link in its
+row; the PR merges only when every row has one.
+
+| Gate | What this install adds | What you approve | Approval |
+| --- | --- | --- | --- |
+| H4 The rules or a settled decision | `factory.yaml`, `AGENTS.md` <written / appended>, `.factory/roles/…`, `.factory/review-checklist.md` | the rules and settings as written in this PR | <link to your comment> |
+| H2 A new dependency | <action@sha # tag, or the deploy tool and version a recipe pins>, licence <licence> | that tool at that version | <link> |
+| H6 A deploy that needs approval | deploy target `<name>`: <environments, and `when` / `approve` for each> | this target and how it deploys | <link> |
+| H3 An account, a secret or money | <the account on the platform>; secrets `<NAME>`, … (names only) | the account, its cost, each secret by name | <link> |
+| … one row per gate and item; leave out a row whose gate the install does not touch | | | |
+
 ## Human steps
 
 - [ ] Review the answers above; change any of them in this PR.
-- [ ] Approve each non-GitHub action in the CI workflows (gate H2): <action@sha # tag, or "none">.
+- [ ] Approve each row in "Human gates" above with a comment on this PR, and link it there.
 - [ ] Give the agents their own fine-grained token for this repo and set up the machine (the factory's agent token
       guide). Until then, agents use your own `gh` login.
 - [ ] <one line per deploy recipe human step or secret name, or remove this line>

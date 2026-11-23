@@ -1,6 +1,6 @@
 ---
 name: factory-hunt
-description: Bug hunting with idle capacity in a repo with a factory.yaml. The lead's part says when to hunt (no buildable issue and free builder slots), which areas to hunt (non-overlapping, named by the project's overlay, one hunter per area) and on which model (from the model policy); the hunter's part says how to try to break the app in one area, search existing issues before filing, and file one complete bug report per bug with a priority, a tier and the hunter labels. P0–P2 findings go to the board at once and through the normal implement, review and gate; P3 goes to the backlog. Also runs the process tester, which looks for flaws in the factory's own workflow and logs them for the user (gate H5), never fixing them itself. Use when the lead has idle capacity, when a brief says "hunt area <name>" or "run the process tester", or when a person asks for a bug hunt.
+description: Bug hunting with idle capacity in a repo with a factory.yaml, in two parts. The lead's part decides when to hunt (no buildable issue, free builder slots), which non-overlapping areas and on which model. The hunter's part tries to break the app in one area and files one complete bug report per bug after searching existing issues. Also runs the process tester, which logs flaws in the factory's own workflow for the user and never fixes them. Use when the lead has idle capacity, when a brief says to hunt an area or to run the process tester, or when a person asks for a bug hunt.
 ---
 
 # Bug hunting and the process tester

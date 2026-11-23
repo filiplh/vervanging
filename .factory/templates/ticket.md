@@ -36,10 +36,11 @@ page does not show: `<!-- factory:ticket <source>/<slug> -->`. It is the ticket'
 plan, factory-tickets finds the issues that already carry a key of that source and creates only what is missing, so
 nothing is filed twice. When you edit such an issue, keep that line as it is, as the body's last line: a changed or
 removed key makes the next run treat the ticket as missing and propose it again. Never add one by hand to an issue
-factory-tickets did not create (the core's `skills/factory-tickets/SKILL.md` › Find what already exists). The one
-exception is the source `architecture`, reserved for the core's `architect` agent: it writes
-`architecture/<slug>` keys on the drift issues it files, so its next weekly run does not file them again. No plan's
-tickets use that source.
+factory-tickets did not create (the core's `skills/factory-tickets/SKILL.md` › Find what already exists). Two sources
+are the exceptions, each reserved for one of the core's weekly lanes, which write its keys on the issues they file so
+that their next weekly run does not file them again: `architecture` (`architecture/<slug>`), for the core's
+`architect` agent and its drift issues, and `maintenance` (`maintenance/<slug>`), for the core's `factory-maintain`
+skill and its upkeep issues. No plan's tickets use these sources.
 
 ## The acceptance contract
 

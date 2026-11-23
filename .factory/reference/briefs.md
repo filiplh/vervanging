@@ -75,6 +75,23 @@ If the PR has no local evidence for its head yet, post it with `factory verify <
 When the mode is on, a documentation-only review still starts in a worktree (the adapter starts every child that way
 in this mode) and reads through the broker verbs in [github-access.md](github-access.md).
 
+### Plan PR
+
+A PR that `factory-plan` opens has no issue and no tier. Its first review is a **full review, never the docs-only
+variant**: the first plan PR always edits the rules file's "Where things live" table, and every plan PR changes the
+plan, the ADRs or the decision log, which the rules file sends agents to as settled decisions. Both are text agents
+obey ([docs-only review](docs-only-review.md), "What counts as documentation", rule 2), and both are gate H4.
+
+- **Reviewer.** The standard tier's first reviewer, `models.tiers.standard.review`, on a different model from the one
+  that wrote the plan (`models.agents.plan`), by the rules of [model-policy.md](model-policy.md) › Reviews. Never a
+  documentation-only spec, and never a model the lead picks for being cheap.
+- **Brief.** The Review brief above, started in a worktree, with its issue clause worded
+  `(a plan PR: no issue, treated as tier:standard, no roles)`. Its extra checks quote `factory-plan`'s "Check before
+  the PR" list (trace table, sources, settled decisions) as their source.
+- **Re-review** after a fix round or the user's comments: narrow, as the model policy says. The earlier findings, the
+  fix and any line added since the first review, on the `models.reviews.re_review` spec the policy picks. A disputed
+  or deferred P0–P2 finding goes back to the first reviewer's spec instead.
+
 ### Codex reviewer when the mode is on
 
 A Codex child has no network, so it cannot read or post on GitHub. Before the start, the lead (or the solo session)
@@ -90,9 +107,9 @@ Agent-token mode is on and you have no network: run no gh, no git fetch and no p
 The PR head is already in the repository as commit <headRefOid>; review that commit and nothing else. Use only
 the two fixed commits, never a branch or ref name, which can move: read the diff with
 `git diff <baseOid> <headRefOid>` and files at the head with `git show <headRefOid>:<path>`; do not switch your
-worktree to it. To run the checks, copy the head into a new folder
-in your worktree with `git archive <headRefOid> | tar -x -C <folder>` and run them there. A check that needs the
-network or git history goes under "Could not check" with the reason.
+worktree to it. To run the checks, copy the head into a new folder in your worktree in two steps, each of which
+must succeed: `git archive -o <folder>.tar <headRefOid>`, then `tar -xf <folder>.tar -C <folder>`; run them there.
+A check that needs the network or git history goes under "Could not check" with the reason.
 What you would have read from GitHub (each item names the head SHA it is about; trust it only for <headRefOid>):
 <the PR's title, body, labels, headRefName, baseRefName and changed files; the issue's body, labels and comments;
 the PR's comments in full, including the previous review and every fix-round reply, each with its head SHA; the
@@ -136,7 +153,8 @@ When the mode is on and the validator runs where it has no network, the lead pre
 issue's body and labels, the six PR fields that rule names, and for a re-validation the previous validation's
 text. Never the issue's comments, the PR body or comments, the diff, the reviews or the builder's report. It does not
 get the reviewer's replacement line, which reads the diff; its own line says: run no gh, no git fetch and no pause
-check; copy the head with `git archive <headRefOid> | tar -x -C <folder>` and run the app there; read `acceptance/`
+check; copy the head in two steps that must each succeed (`git archive -o <folder>.tar <headRefOid>`, then
+`tar -xf <folder>.tar -C <folder>`) and run the app there; read `acceptance/`
 from the base branch's tip with `git archive <baseTip> acceptance`, where the lead fixes `<baseTip>` as
 `git rev-parse origin/<baseRefName>` at the start (step 6 of the validator reads the same branch); for this child,
 `<baseOid>` is `git merge-base origin/<baseRefName> <headRefOid>`, not `origin/<default>`, so a stacked PR reads its
