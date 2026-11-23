@@ -15,7 +15,7 @@ struct Outcome: Equatable {
     var status: Int32 = 0
 }
 
-let usage = "usage: vervanging-sim random|plan|history|check-examples (see the comment at the top of main.swift)"
+let usage = "usage: vervanging-sim random|plan|match|history|check-examples (see the comment at the top of main.swift)"
 
 /// Like `parse` in scripts/sim.mjs: the command, then `--key value` pairs; `--json` and `--use-history` take no value.
 /// A later value for the same key wins, as in the JS object.
@@ -58,14 +58,22 @@ func run(_ argv: [String]) -> Outcome {
     case "check-examples":
         // check-examples takes a directory as its first argument, which the sim.mjs parser does not allow.
         return checkExamples(Array(argv.dropFirst()))
-    case "plan", "history":
+    case "plan", "match", "history":
         // As in sim.mjs, every UsageError and PlanError, from the parser too, is printed after "sim: ".
         do {
             let opts = try parse(argv).opts
-            return Outcome(stdout: try (argv.first == "plan" ? planJSON(opts) : historyJSON(opts)) + "\n")
+            let json = switch argv.first {
+            case "plan": try planJSON(opts)
+            case "match": try matchJSON(opts)
+            default: try historyJSON(opts)
+            }
+            return Outcome(stdout: json + "\n")
         } catch let error as UsageError {
             return Outcome(stderr: "sim: \(error.message)\n", status: 2)
         } catch let error as PlanError {
+            return Outcome(stderr: "sim: \(error.message)\n", status: 2)
+        } catch let error as MatchError {
+            // sim.mjs turns every MatchError into invalid input; the match command does so already, this is a guard.
             return Outcome(stderr: "sim: \(error.message)\n", status: 2)
         } catch {
             return Outcome(stderr: "sim: \(error)\n", status: 2)
