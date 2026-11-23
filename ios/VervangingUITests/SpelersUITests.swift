@@ -284,6 +284,88 @@ final class SpelersUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["1 van 15"].exists)
     }
 
+    // MARK: - Damaged or extreme ids (review of #117)
+
+    /// The web app's own id limit (JavaScript's largest safe integer), the largest id the store keeps.
+    private let maxId = 9_007_199_254_740_991
+
+    @MainActor
+    func testOutOfRangeStoredIdsAreDroppedWithoutACrashAndAddingStillWorks() throws {
+        try JSONSerialization.data(withJSONObject: [
+            "version": 1, "nextId": Int.max, "players": [
+                ["id": Int.max, "name": "Lotte", "number": "7"],
+                ["id": Int.min, "name": "Noor", "number": "9"],
+                ["id": maxId, "name": "Fien", "number": "12"],
+            ],
+        ]).write(to: rosterFile)
+        launch()
+        XCTAssertTrue(row("12").waitForExistence(timeout: 5), "an id at the limit is kept")
+        XCTAssertFalse(row("7").exists, "an id above the limit is damaged and dropped")
+        XCTAssertFalse(row("9").exists, "an id below the negative limit is damaged and dropped")
+
+        add("Mila", "4")
+        XCTAssertTrue(row("4").waitForExistence(timeout: 5))
+        let stored = try storedRoster()
+        let players = try XCTUnwrap(stored["players"] as? [[String: Any]])
+        let mila = try XCTUnwrap(players.first { $0["name"] as? String == "Mila" })
+        XCTAssertEqual(mila["id"] as? Int, 1, "no id above the limit is free, so the smallest free one is used")
+        XCTAssertEqual(stored["nextId"] as? Int, 2)
+
+        app.terminate()
+        launch()
+        XCTAssertTrue(row("4").waitForExistence(timeout: 5))
+        XCTAssertTrue(row("12").exists)
+    }
+
+    @MainActor
+    func testExtremeNextIdOnAnEmptyRosterStillAdds() throws {
+        // A next id far above the limit: read as damaged, the first player gets id 1.
+        try JSONSerialization.data(withJSONObject: ["version": 1, "nextId": Int.max, "players": []])
+            .write(to: rosterFile)
+        launch()
+        add("Lotte", "7")
+        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
+        var stored = try storedRoster()
+        XCTAssertEqual((stored["players"] as? [[String: Any]])?.first?["id"] as? Int, 1)
+        XCTAssertEqual(stored["nextId"] as? Int, 2)
+        app.terminate()
+
+        // A next id exactly at the limit is used, and the one after it wraps to a free small id, never overflowing.
+        try JSONSerialization.data(withJSONObject: ["version": 1, "nextId": maxId, "players": []])
+            .write(to: rosterFile)
+        launch()
+        add("Lotte", "7")
+        XCTAssertTrue(row("7").waitForExistence(timeout: 5))
+        add("Fien", "12")
+        XCTAssertTrue(row("12").waitForExistence(timeout: 5))
+        stored = try storedRoster()
+        let ids = (stored["players"] as? [[String: Any]])?.compactMap { $0["id"] as? Int }
+        XCTAssertEqual(ids, [maxId, 1])
+        XCTAssertEqual(stored["nextId"] as? Int, 2)
+    }
+
+    // MARK: - A failed save (review of #117)
+
+    @MainActor
+    func testFailedSaveShowsTheStorageMessage() throws {
+        // The storage folder's path is a regular file, so the folder cannot be made and every write fails.
+        let blocked = storageDir.appendingPathComponent("geen-map")
+        try Data("geen map".utf8).write(to: blocked)
+        app.launchEnvironment["VERVANGING_STORAGE_DIR"] = blocked.path
+        launch()
+        XCTAssertTrue(app.staticTexts["spelers.empty"].exists, "an unreadable storage folder starts empty")
+
+        add("Lotte", "7")
+        XCTAssertEqual(message(), "Opslaan lukte niet: de telefoon weigert opslag.")
+        XCTAssertTrue(row("7").exists, "the change stays on screen, as on the web, with the message saying it was not stored")
+        XCTAssertEqual(try Data(contentsOf: blocked), Data("geen map".utf8), "nothing was written over the file")
+
+        // A relaunch shows that nothing was stored.
+        app.terminate()
+        launch()
+        XCTAssertTrue(app.staticTexts["spelers.empty"].exists)
+    }
+
     // MARK: - Helpers
 
     private func launch() {

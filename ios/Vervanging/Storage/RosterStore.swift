@@ -11,11 +11,32 @@ struct Player: Codable, Equatable, Identifiable, Sendable {
 /// The coach's roster, the same shape as the web app's (`public/js/setup.js`): players plus the next free id.
 struct Roster: Equatable, Sendable {
     static let maxPlayers = 15
+    /// The largest id kept: JavaScript's largest safe integer, the web app's own limit. A stored id or next id above it
+    /// (or below its negative) is damaged, and keeping ids this small means `+ 1` can never overflow.
+    static let maxId = 9_007_199_254_740_991
 
     var nextId = 1
     var players: [Player] = []
 
     static let empty = Roster()
+
+    /// An id for a new player: the stored next id when it is free and in range, else one above the highest id in use,
+    /// else the smallest free positive id (there is always one, with at most 15 players).
+    func newPlayerId() -> Int {
+        let used = Set(players.map(\.id))
+        if (1...Self.maxId).contains(nextId), !used.contains(nextId) { return nextId }
+        if let top = used.max(), top >= 0, top < Self.maxId { return top + 1 }
+        return (1...).first { !used.contains($0) }!
+    }
+
+    /// The roster with a new player added under `newPlayerId()`, and the next id moved past it (kept in range).
+    func adding(name: String, number: String) -> Roster {
+        let id = newPlayerId()
+        var next = self
+        next.players.append(Player(id: id, name: name, number: number))
+        next.nextId = id < Self.maxId ? id + 1 : 1
+        return next
+    }
 }
 
 /// Reads and writes the roster as one small JSON file in the app's own storage (ADR-002, plan decision #38).
@@ -82,6 +103,7 @@ struct RosterStore: Sendable {
         var players: [Player] = []
         for p in raw {
             guard let id = p.id, let name = p.name, let number = p.number,
+                  (-Roster.maxId...Roster.maxId).contains(id),
                   !seen.contains(id),
                   !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   Self.isJerseyNumber(number)
@@ -89,8 +111,10 @@ struct RosterStore: Sendable {
             seen.insert(id)
             players.append(Player(id: id, name: name, number: number))
         }
-        let maxId = players.map(\.id).max() ?? 0
-        let next = if let nextId, nextId > maxId { nextId } else { maxId + 1 }
+        // Every id kept is within ±Roster.maxId, so `maxId + 1` cannot overflow; it can only reach maxId + 1, which
+        // newPlayerId() treats as out of range.
+        let maxId = max(players.map(\.id).max() ?? 0, 0)
+        let next = if let nextId, nextId > maxId, nextId <= Roster.maxId { nextId } else { maxId + 1 }
         return Roster(nextId: next, players: Array(players.prefix(Roster.maxPlayers)))
     }
 

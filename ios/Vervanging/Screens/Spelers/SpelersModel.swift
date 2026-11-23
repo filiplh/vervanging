@@ -56,8 +56,7 @@ final class SpelersModel {
         if let id = editingId, let index = next.players.firstIndex(where: { $0.id == id }) {
             next.players[index] = Player(id: id, name: name, number: number)
         } else {
-            next.players.append(Player(id: next.nextId, name: name, number: number))
-            next.nextId += 1
+            next = next.adding(name: name, number: number)
         }
         editingId = nil
         persist(next)
