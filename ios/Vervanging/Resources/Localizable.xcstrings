@@ -1,0 +1,186 @@
+{
+  "sourceLanguage": "nl",
+  "strings": {
+    "#%@ %@ verwijderen?": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "#%@ %@ verwijderen?"
+          }
+        }
+      }
+    },
+    "%lld van %lld": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld van %lld"
+          }
+        }
+      }
+    },
+    "Annuleren": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Annuleren"
+          }
+        }
+      }
+    },
+    "Bewaren": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewaren"
+          }
+        }
+      }
+    },
+    "Een voornaam heeft hoogstens %lld tekens.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Een voornaam heeft hoogstens %lld tekens."
+          }
+        }
+      }
+    },
+    "Maximaal %lld spelers.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maximaal %lld spelers."
+          }
+        }
+      }
+    },
+    "Maximaal %lld spelers. Verwijder eerst een speler om er een toe te voegen.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maximaal %lld spelers. Verwijder eerst een speler om er een toe te voegen."
+          }
+        }
+      }
+    },
+    "Nog geen spelers. Voeg je spelers toe met voornaam en rugnummer.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nog geen spelers. Voeg je spelers toe met voornaam en rugnummer."
+          }
+        }
+      }
+    },
+    "Opslaan lukte niet: de telefoon weigert opslag.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opslaan lukte niet: de telefoon weigert opslag."
+          }
+        }
+      }
+    },
+    "Rugnummer": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rugnummer"
+          }
+        }
+      }
+    },
+    "Rugnummer %@ is al van %@.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rugnummer %@ is al van %@."
+          }
+        }
+      }
+    },
+    "Spelers": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spelers"
+          }
+        }
+      }
+    },
+    "Toevoegen": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toevoegen"
+          }
+        }
+      }
+    },
+    "Verwijder": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verwijder"
+          }
+        }
+      }
+    },
+    "Voornaam": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Voornaam"
+          }
+        }
+      }
+    },
+    "Vul een rugnummer van 0 tot 99 in.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vul een rugnummer van 0 tot 99 in."
+          }
+        }
+      }
+    },
+    "Vul een voornaam in.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vul een voornaam in."
+          }
+        }
+      }
+    },
+    "Wijzig": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wijzig"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}
