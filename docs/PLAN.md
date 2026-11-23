@@ -145,7 +145,7 @@ Index: [adr/README.md](adr/README.md).
 | A port bug | The native planner gives a plan the web app would not, and the coach loses trust | Exact shared examples (#35); the phase 3 exit test at a real match |
 | Glass hard to read in the hall | Names or the Wissel button get lost behind Liquid Glass under bright lights | The phase 3 exit test runs at a real match with Reduce Transparency off |
 | Mac overloaded | Xcode and simulator runs slow down or flake with parallel builders | 2 builders, one heavy run at a time (#47); A7 measures it |
-| History lost at the switch to the store build | The `.dev` build and the store build have different bundle IDs, so a history built on the free-ID build does not carry over | Accepted with #33 for now; the plan PR asks the owner whether phase 4 needs a move |
+| History lost at the switch to the store build | The `.dev` build and the store build have different bundle IDs, so a history built on the free-ID build does not carry over | Open: the owner decides before phase 4 whether to accept a fresh start or add a move (plan PR #90, Questions; agent's call to raise it, not in the grill log) |
 
 ## Plan of attack
 Phase 0 builds the smallest app a coach can use at a match: roster, setup, the planner for both schedules and the live

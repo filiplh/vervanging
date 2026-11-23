@@ -23,8 +23,9 @@ stay inside it. The shared examples in `shared/examples/` belong to the `web` ro
   bit (32-bit wrapping arithmetic), so the same seed gives the same plan. Never change an example to make Swift pass.
 - No game clock or timer of any kind (ADR-001). Minutes are blocks × block length.
 - Data stays on the phone (ADR-002): JSON files in the app's own storage, written after every tap and restored on
-  launch. No network calls, no SwiftData, no iCloud, no analytics. A stored shape that changes keeps loading the old
-  one or says why not under "Data impact".
+  launch. No network calls, no SwiftData, no iCloud, no analytics. A change to a stored shape gets a migration or
+  compatibility path and a test that old data still loads, unless the issue says otherwise; a migration or a break is
+  gate H7 (`.factory/reference/human-gates.md`).
 - SwiftUI with the system's Liquid Glass materials and controls; no custom glass look-alikes; UIKit only where SwiftUI
   cannot (plan decision #37).
 - On-screen text is Dutch, in the String Catalog, with the web app's terms and copy (`docs/GLOSSARY.md`).
