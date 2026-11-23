@@ -572,12 +572,21 @@ test('live screen: every Eruit row shows the player\'s name on its own line abov
   }
 });
 
-test('styles: a name row with buttons wraps, and its name takes the full width of the column', () => {
+// The layout itself was measured in a browser at 402 x 874 (#46); these guard the rules that measurement rests on.
+test('styles: a name row with buttons wraps, its name is never cut, and the buttons stay compact on one line', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
-  const rule = (selector) => css.match(new RegExp(`${selector.replace(/[.*]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
-  assert.match(rule('.names li.with-chips'), /flex-wrap:\s*wrap/);
-  assert.match(rule('.names li.with-chips .player'), /flex-basis:\s*100%/);
-  assert.match(rule('.names li.with-chips .player'), /white-space:\s*normal/, 'a long name wraps instead of being cut');
+  const rule = (selector) => css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*()]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+  assert.match(rule('.names li.with-chips'), /flex-wrap:\s*wrap/, 'buttons that do not fit go under the name');
+  const player = rule('.names li.with-chips .player');
+  assert.match(player, /white-space:\s*normal/, 'a long name wraps instead of being cut');
+  assert.doesNotMatch(player, /flex-basis:\s*100%/, 'the name does not force the buttons onto a line of their own');
+  assert.match(player, /flex:\s*1 1 auto/, 'the name is laid out at its full width before the buttons');
+  const chip = rule('.names li .chips button.chip');
+  assert.match(chip, /padding:\s*0 6px/, 'narrow buttons, so In the zone and Extra minuten fit side by side');
+  assert.match(chip, /font-size:\s*0\.8rem/);
+  assert.match(chip, /margin-left:\s*0/);
+  assert.doesNotMatch(chip, /min-height/, 'the buttons keep the 44 px tap height of button.chip');
+  assert.match(rule('.change'), /grid-template-columns:\s*minmax\(0, 1\.05fr\) minmax\(0, 1fr\)/, 'Eruit is a little wider');
 });
 
 // ---------- minutes at a glance (#32) ----------
