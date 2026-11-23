@@ -18,11 +18,19 @@
 			remoteGlobalIDString = A1000000000000000000F001;
 			remoteInfo = Vervanging;
 		};
+		A1000000000000000000D002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000E001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1000000000000000000F001;
+			remoteInfo = Vervanging;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000001001 /* Vervanging.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Vervanging.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000001002 /* VervangingUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VervangingUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000001003 /* VervangingTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VervangingTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -34,6 +42,11 @@
 		A10000000000000000002002 /* VervangingUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = VervangingUITests;
+			sourceTree = "<group>";
+		};
+		A10000000000000000002003 /* VervangingTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = VervangingTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -54,6 +67,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000003003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -62,6 +82,7 @@
 			children = (
 				A10000000000000000002001 /* Vervanging */,
 				A10000000000000000002002 /* VervangingUITests */,
+				A10000000000000000002003 /* VervangingTests */,
 				A10000000000000000004002 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -71,6 +92,7 @@
 			children = (
 				A10000000000000000001001 /* Vervanging.app */,
 				A10000000000000000001002 /* VervangingUITests.xctest */,
+				A10000000000000000001003 /* VervangingTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -124,6 +146,29 @@
 			productReference = A10000000000000000001002 /* VervangingUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A1000000000000000000F003 /* VervangingTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000006004 /* Build configuration list for PBXNativeTarget "VervangingTests" */;
+			buildPhases = (
+				A10000000000000000005006 /* Sources */,
+				A10000000000000000003003 /* Frameworks */,
+				A10000000000000000005007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A10000000000000000007002 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A10000000000000000002003 /* VervangingTests */,
+			);
+			name = VervangingTests;
+			packageProductDependencies = (
+			);
+			productName = VervangingTests;
+			productReference = A10000000000000000001003 /* VervangingTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -138,6 +183,10 @@
 						CreatedOnToolsVersion = 27.2;
 					};
 					A1000000000000000000F002 = {
+						CreatedOnToolsVersion = 27.2;
+						TestTargetID = A1000000000000000000F001;
+					};
+					A1000000000000000000F003 = {
 						CreatedOnToolsVersion = 27.2;
 						TestTargetID = A1000000000000000000F001;
 					};
@@ -162,6 +211,7 @@
 			targets = (
 				A1000000000000000000F001 /* Vervanging */,
 				A1000000000000000000F002 /* VervangingUITests */,
+				A1000000000000000000F003 /* VervangingTests */,
 			);
 		};
 /* End PBXProject section */
@@ -175,6 +225,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A10000000000000000005004 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000005007 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -198,6 +255,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000005006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -205,6 +269,11 @@
 			isa = PBXTargetDependency;
 			target = A1000000000000000000F001 /* Vervanging */;
 			targetProxy = A1000000000000000000D001 /* PBXContainerItemProxy */;
+		};
+		A10000000000000000007002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1000000000000000000F001 /* Vervanging */;
+			targetProxy = A1000000000000000000D002 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -342,6 +411,38 @@
 			};
 			name = Release;
 		};
+		A10000000000000000009007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.filiplh.vervanging.dev.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Vervanging.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Vervanging";
+			};
+			name = Debug;
+		};
+		A10000000000000000009008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.filiplh.vervanging.dev.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Vervanging.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Vervanging";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -368,6 +469,15 @@
 			buildConfigurations = (
 				A10000000000000000009005 /* Debug */,
 				A10000000000000000009006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000006004 /* Build configuration list for PBXNativeTarget "VervangingTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000009007 /* Debug */,
+				A10000000000000000009008 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
