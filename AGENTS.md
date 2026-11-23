@@ -14,7 +14,7 @@ this file says how to build well here. Changing it is a human gate.
 | Plan and scope | `docs/PLAN.md` |
 | Settled decisions (ADRs, decision log) | `docs/adr/` (index `docs/adr/README.md`); decisions table in `docs/PLAN.md` |
 | Glossary (the project's words, Dutch on screen, code names) | `docs/GLOSSARY.md` |
-| Spike write-ups | none yet |
+| Spike write-ups | `docs/spikes/`, one file per spike (`<year>-<slug>.md`, screenshots in a folder of the same name) |
 | Grill context (glossary, constraints and open questions the grill reads first) | `docs/grill/CONTEXT.md` (created by `factory-grill` when needed) |
 | Grill logs (one file per grill session) | `docs/grill/` (created by `factory-grill` when needed) |
 | Role files | `.factory/roles/<role>.md` (one per role in `factory.yaml` › `roles`; none without roles) |
