@@ -9,6 +9,8 @@
   --accent: #1f5f8b;
   --accent-text: #ffffff;
   --on: #2f8f4e;
+  --on-fill: #267a42;       /* on-court cells in the overview: 5.32:1 against --surface and with --on-fill-text */
+  --on-fill-text: #ffffff;
   --off: #e7eaee;
   --danger: #b3261e;
   --selected: #fff3c4;
@@ -26,6 +28,8 @@
     --accent: #5fa8dc;
     --accent-text: #0b1620;
     --on: #48b06a;
+    --on-fill: #48b06a;     /* 6.00:1 against --surface, 6.76:1 with --on-fill-text */
+    --on-fill-text: #121417;
     --off: #2a2f36;
     --danger: #f2a39d;
     --selected: #4a4220;
@@ -262,7 +266,8 @@ button.chip[aria-pressed="true"] { background: var(--selected); border-color: va
 }
 .overview .number { font-size: 0.75rem; }
 .overview .min { font-size: 0.95rem; font-weight: 600; }
-.overview li.on { border: 2px solid var(--on); padding: 1px 0; }
-.overview li.on .number { color: var(--text); font-weight: 600; }
+/* On court (#53): a filled cell, not only a border, so it stands apart from the others at 3:1 or more */
+.overview li.on { background: var(--on-fill); border-color: var(--on-fill); color: var(--on-fill-text); }
+.overview li.on .number { color: var(--on-fill-text); font-weight: 600; }
 .overview li.out { color: var(--muted); }
 .overview li.out .min { text-decoration: line-through; font-weight: normal; }
