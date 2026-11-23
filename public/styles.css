@@ -226,8 +226,10 @@ button.undo { width: 100%; }
 button.chip { min-height: var(--tap); padding: 0 12px; font-size: 0.9rem; margin-left: 8px; }
 button.chip[aria-pressed="true"] { background: var(--selected); border-color: var(--accent); font-weight: 600; }
 .zone-note { margin: 8px 0; padding: 8px 12px; background: var(--selected); border-radius: 8px; }
-.minutes td.act { text-align: right; width: 1%; white-space: nowrap; }
-.minutes tr.out th, .minutes tr.out td.min { color: var(--muted); text-decoration: line-through; }
+.minutes td.act, .minutes th.act { text-align: right; width: 1%; white-space: nowrap; }
+.minutes tr.out th, .minutes tr.out td.min { color: var(--muted); }
+/* Strike the name and the minutes, not the red uit tag next to the name (P3-3). */
+.minutes tr.out th .player, .minutes tr.out td.min { text-decoration: line-through; }
 .tag { font-size: 0.85rem; color: var(--danger); font-weight: 600; }
 
 /* Extra minuten (#31): a single toggle in the zone note, only for the chosen player (#52). On the note's fill it keeps
