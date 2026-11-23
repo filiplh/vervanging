@@ -10,12 +10,11 @@ struct VervangingApp: App {
     }
 }
 
-/// The first screen: empty for now, titled with the app's name. Later tickets put the setup screen here.
+/// The first screen: Spelers, with the roster saved on the phone (#100). Later tickets add the Match screen.
 struct RootView: View {
     var body: some View {
         NavigationStack {
-            Color.clear
-                .navigationTitle("Vervanging")
+            SpelersScreen(store: .standard())
         }
     }
 }

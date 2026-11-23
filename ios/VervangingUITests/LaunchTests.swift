@@ -1,6 +1,6 @@
 import XCTest
 
-/// The app starts and shows its first screen, titled "Vervanging".
+/// The app starts and shows its first screen, Spelers (#100).
 final class LaunchTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -10,6 +10,6 @@ final class LaunchTests: XCTestCase {
     func testLaunchShowsTheFirstScreen() {
         let app = XCUIApplication()
         app.launch()
-        XCTAssertTrue(app.navigationBars["Vervanging"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Spelers"].waitForExistence(timeout: 10))
     }
 }
