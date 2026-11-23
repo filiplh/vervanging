@@ -56,6 +56,7 @@ export const EXAMPLES = [
   ['match-equal-10-wissel', ['match', ...P(10, '1,2,3,4,5', 'equal', '--actions', 'wissel')]],
   ['match-equal-10-wissel-undo', ['match', ...P(10, '1,2,3,4,5', 'equal', '--actions', 'wissel,wissel,undo')]],
   ['match-equal-9-last-block', ['match', ...P(9, '1,2,3,4,5', 'equal', '--actions', 'wissel*11')]],
+  ['match-equal-9-uit-last-block', ['match', ...P(9, '1,2,3,4,5', 'equal', '--actions', 'wissel*11,uit=3')]],
   ['match-equal-9-ended', ['match', ...P(9, '1,2,3,4,5', 'equal', '--actions', 'wissel*12')]],
   ['match-five-8-ended', ['match', ...P(8, '1,2,3,4,5', 'five', '--actions', 'wissel*8')]],
   ['match-five-12-ended-undo', ['match', ...P(12, '1,2,3,4,5', 'five', '--actions', 'wissel*8,undo')]],

@@ -67,6 +67,32 @@ test('the list covers every kind, 8 to 12 players, both schedules, every sim act
   }
 });
 
+// uit in the last block takes the path where no next block exists (the replacement comes from the bench of the
+// current block); this example must stay in the list. Its uit player is on court in the last block before uit.
+test('an example applies uit to a player on court in the last block', () => {
+  const entry = EXAMPLES.find(([name]) => name === 'match-equal-9-uit-last-block');
+  assert.ok(entry, 'match-equal-9-uit-last-block is in the list');
+  const args = entry[1];
+  const i = args.indexOf('--actions');
+  const items = args[i + 1].split(',');
+  const uit = items.at(-1);
+  assert.match(uit, /^uit=\d+$/);
+  const player = Number(uit.slice('uit='.length));
+  const before = [...args.slice(0, i + 1), items.slice(0, -1).join(','), ...args.slice(i + 2)];
+  const sim = spawnSync(process.execPath, ['scripts/sim.mjs', ...before], { cwd: ROOT, encoding: 'utf8' });
+  assert.equal(sim.status, 0, sim.stderr);
+  const last = JSON.parse(sim.stdout);
+  assert.equal(last.block, last.blocks);
+  assert.equal(last.ended, false);
+  assert.ok(last.onCourt.includes(player), `player ${player} is on court in the last block`);
+  const example = JSON.parse(readFileSync(join(DIR, 'match-equal-9-uit-last-block.json'), 'utf8'));
+  assert.equal(example.exitStatus, 0);
+  const after = JSON.parse(example.stdout);
+  assert.equal(after.block, after.blocks);
+  assert.ok(!after.onCourt.includes(player));
+  assert.ok(after.overview.find((row) => row.player === player).out);
+});
+
 test('actionsOf lists the match actions an argument list uses, sorted, each once', () => {
   assert.deepEqual(actionsOf(['plan', '--players', '10']), []);
   assert.deepEqual(actionsOf(['match', '--actions', 'wissel*3,undo,wissel']), ['undo', 'wissel']);
