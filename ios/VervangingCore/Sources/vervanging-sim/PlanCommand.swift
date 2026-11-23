@@ -15,15 +15,9 @@ func javaScriptNumber(_ text: String) -> Double {
     while let last = scalars.last, isSpace(last) { scalars.removeLast() }
     let s = String(String.UnicodeScalarView(scalars))
     if s.isEmpty { return 0 }
-    for (prefix, radix) in [("0x", 16), ("0X", 16), ("0o", 8), ("0O", 8), ("0b", 2), ("0B", 2)] where s.hasPrefix(prefix) {
-        let digits = s.dropFirst(2)
-        guard !digits.isEmpty else { return .nan }
-        var value = 0.0
-        for c in digits {
-            guard let d = c.hexDigitValue, d < radix else { return .nan }
-            value = value * Double(radix) + Double(d)
-        }
-        return value
+    let radixBits: [Unicode.Scalar: Int] = ["x": 4, "X": 4, "o": 3, "O": 3, "b": 1, "B": 1]
+    if scalars.count >= 2 && scalars[0] == "0", let bits = radixBits[scalars[1]] {
+        return radixInteger(scalars.dropFirst(2), bitsPerDigit: bits)
     }
     var body = Substring(s)
     var sign = 1.0
@@ -62,6 +56,38 @@ func javaScriptNumber(_ text: String) -> Double {
     let literal = (whole.isEmpty ? "0" : whole) + "." + (fraction.isEmpty ? "0" : fraction) + exponent
     guard let value = Double(literal) else { return .nan }
     return sign * value
+}
+
+/// The value of the digits of a `0x`, `0o` or `0b` literal, as JavaScript's `Number()` reads them: only the ASCII
+/// digits of that radix (no fullwidth or other Unicode digits, no separators, at least one digit), and the whole
+/// integer rounded once to the nearest Double, ties to even, or Infinity when it is too large. Rounding digit by digit
+/// would give a different value for literals beyond 2^53.
+func radixInteger(_ digits: ArraySlice<Unicode.Scalar>, bitsPerDigit: Int) -> Double {
+    let radix = 1 << bitsPerDigit
+    var bits: [Bool] = []
+    for scalar in digits {
+        let value: Int
+        switch scalar.value {
+        case 0x30...0x39: value = Int(scalar.value - 0x30) // 0-9
+        case 0x41...0x46: value = Int(scalar.value - 0x41) + 10 // A-F
+        case 0x61...0x66: value = Int(scalar.value - 0x61) + 10 // a-f
+        default: return .nan
+        }
+        guard value < radix else { return .nan }
+        for shift in stride(from: bitsPerDigit - 1, through: 0, by: -1) { bits.append(value >> shift & 1 == 1) }
+    }
+    guard !digits.isEmpty else { return .nan }
+    guard let first = bits.firstIndex(of: true) else { return 0 }
+    let significant = bits[first...]
+    // A Double holds 53 significant bits: keep the top 53, round on the next bit and the ones after it.
+    var mantissa: UInt64 = 0
+    for bit in significant.prefix(53) { mantissa = mantissa << 1 | (bit ? 1 : 0) }
+    guard significant.count > 53 else { return Double(mantissa) }
+    let roundBit = significant[first + 53]
+    let sticky = significant[(first + 54)...].contains(true)
+    if roundBit && (sticky || mantissa & 1 == 1) { mantissa += 1 }
+    // mantissa ≤ 2^53, so Double(mantissa) is exact; scalbn is exact too, and gives Infinity beyond the largest Double.
+    return scalbn(Double(mantissa), significant.count - 53)
 }
 
 /// JavaScript's `Number.isInteger`.
