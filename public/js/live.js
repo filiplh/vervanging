@@ -13,10 +13,11 @@ import { normaliseHistory, recordMatch, forgetMatch, hasMatch, startedAfterClear
 
 const SAVE_FAILED = 'Opslaan lukte niet: de browser weigert opslag.';
 
-// The Dutch line for when the current block ends: "Wissel op 6:40", "Einde kwart" or "Einde match".
+// The Dutch line for when the current block ends: "Wissel op 6:40", "Einde kwart" or, in the last block, "Laatste blok"
+// ("Einde match" is the end screen's heading and the button's label, so the line does not say it while play goes on).
 export function subTimeText(state) {
   const time = subTime(state);
-  if (time.kind === 'endMatch') return 'Einde match';
+  if (time.kind === 'endMatch') return 'Laatste blok';
   if (time.kind === 'endQuarter') return 'Einde kwart';
   return `Wissel op ${formatSeconds(time.clockSeconds)}`;
 }
