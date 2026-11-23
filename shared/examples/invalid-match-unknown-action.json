@@ -1,0 +1,21 @@
+{
+  "name": "invalid-match-unknown-action",
+  "kind": "match",
+  "actions": [
+    "jump"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--actions",
+    "jump"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: unknown action \"jump\": use wissel, undo (optionally with *<count>), wissel:keep=P[:extra][:bench=Q], uit=P or terug=P\n"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "invalid-history-not-json",
+  "kind": "history",
+  "actions": [],
+  "args": [
+    "history",
+    "--history",
+    "scripts/sim.mjs"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: the history file \"scripts/sim.mjs\" is not valid JSON\n"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "invalid-plan-swap-starter-bench",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--swap",
+    "1,6"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: swap two starters or two bench players, so the starting five stays as picked\n"
+}

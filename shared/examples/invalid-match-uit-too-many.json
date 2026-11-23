@@ -1,0 +1,21 @@
+{
+  "name": "invalid-match-uit-too-many",
+  "kind": "match",
+  "actions": [
+    "uit"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "8",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "five",
+    "--actions",
+    "uit=6,uit=7,uit=8,uit=1"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: at least 5 players must be available\n"
+}

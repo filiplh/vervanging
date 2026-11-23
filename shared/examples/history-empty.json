@@ -1,0 +1,13 @@
+{
+  "name": "history-empty",
+  "kind": "history",
+  "actions": [],
+  "args": [
+    "history",
+    "--history",
+    "scripts/fixtures/history-empty.json"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"matches\":0,\"totals\":{}}\n",
+  "stderr": ""
+}

@@ -1,0 +1,20 @@
+{
+  "name": "plan-equal-12-use-history-catchup",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "12",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--history",
+    "scripts/fixtures/history-catchup.json",
+    "--use-history"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"blocks\":12,\"blockSeconds\":200,\"grid\":[[1,2,3,4,5],[1,4,5,10,12],[4,7,10,11,12],[6,7,9,11,12],[3,6,7,8,9],[2,3,5,8,9],[1,2,5,8,10],[1,4,5,10,12],[4,7,10,11,12],[3,6,7,11,12],[2,3,6,9,11],[1,2,6,8,9]],\"minutes\":{\"1\":1000,\"2\":1000,\"3\":1000,\"4\":1000,\"5\":1000,\"6\":1000,\"7\":1000,\"8\":800,\"9\":1000,\"10\":1000,\"11\":1000,\"12\":1200},\"subsPerChange\":[2,2,2,2,2,2,2,2,2,2,2],\"longestBenchSeconds\":800,\"sitLimitRelaxed\":false}\n",
+  "stderr": ""
+}

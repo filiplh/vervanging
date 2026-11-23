@@ -1,0 +1,22 @@
+{
+  "name": "plan-five-16-use-history-sit-relaxed",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "16",
+    "--start",
+    "15,8,16,7,13",
+    "--schedule",
+    "five",
+    "--seed",
+    "3",
+    "--history",
+    "scripts/fixtures/history-sit-relaxed.json",
+    "--use-history"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"blocks\":8,\"blockSeconds\":300,\"grid\":[[7,8,13,15,16],[7,10,11,13,14],[3,4,10,11,14],[3,4,5,10,12],[1,2,4,5,12],[1,2,6,9,12],[2,6,9,11,14],[1,3,5,6,9]],\"minutes\":{\"1\":900,\"2\":900,\"3\":900,\"4\":900,\"5\":900,\"6\":900,\"7\":600,\"8\":300,\"9\":900,\"10\":900,\"11\":900,\"12\":900,\"13\":600,\"14\":900,\"15\":300,\"16\":300},\"subsPerChange\":[3,2,2,2,2,2,3],\"longestBenchSeconds\":2100,\"sitLimitRelaxed\":true}\n",
+  "stderr": ""
+}

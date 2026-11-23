@@ -1,0 +1,21 @@
+{
+  "name": "match-five-8-ended",
+  "kind": "match",
+  "actions": [
+    "wissel"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "8",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "five",
+    "--actions",
+    "wissel*8"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"block\":8,\"blocks\":8,\"ended\":true,\"onCourt\":[1,2,6,7,8],\"minutes\":{\"1\":1500,\"2\":1500,\"3\":1500,\"4\":1500,\"5\":1500,\"6\":1500,\"7\":1500,\"8\":1500},\"extraSeconds\":{\"1\":0,\"2\":0,\"3\":0,\"4\":0,\"5\":0,\"6\":0,\"7\":0,\"8\":0},\"overview\":[{\"player\":1,\"seconds\":1500,\"onCourt\":true,\"out\":false},{\"player\":2,\"seconds\":1500,\"onCourt\":true,\"out\":false},{\"player\":3,\"seconds\":1500,\"onCourt\":false,\"out\":false},{\"player\":4,\"seconds\":1500,\"onCourt\":false,\"out\":false},{\"player\":5,\"seconds\":1500,\"onCourt\":false,\"out\":false},{\"player\":6,\"seconds\":1500,\"onCourt\":true,\"out\":false},{\"player\":7,\"seconds\":1500,\"onCourt\":true,\"out\":false},{\"player\":8,\"seconds\":1500,\"onCourt\":true,\"out\":false}]}\n",
+  "stderr": ""
+}
