@@ -160,8 +160,15 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake }) {
     return el('span', { className: 'player' }, el('span', { className: 'number' }, `#${p.number}`), ' ', p.name);
   };
   const sortedPlayers = (ids) => ids.map((id) => byId.get(id)).sort(byNumber).map((p) => p.id);
+  // A row with buttons (In the zone, Extra minuten, Op de bank) puts the name on its own line and the buttons under
+  // it, so the name is never squeezed to nothing in a half-width column (#46).
   const nameList = (ids, className, extra = () => null) => el('ul', { className: `names ${className}` },
-    sortedPlayers(ids).map((id) => el('li', {}, name(id), extra(id))));
+    sortedPlayers(ids).map((id) => {
+      const buttons = extra(id);
+      return buttons
+        ? el('li', { className: 'with-chips' }, name(id), el('span', { className: 'chips' }, buttons))
+        : el('li', {}, name(id));
+    }));
   const isOut = (id) => state.out.includes(id);
 
   function minutesTable(heading) {

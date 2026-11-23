@@ -189,8 +189,12 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .names.on li { font-weight: 600; }
 .names.off li { color: var(--muted); }
 h3 { font-size: 0.95rem; margin: 4px 0; color: var(--muted); }
-.change { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* Eruit is a little wider than Erin, so its two buttons fit side by side (#46); the headings sit tight to keep the
+   list above the sticky actions */
+.change { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 12px; }
 .change > div { min-width: 0; }
+.change h3 { margin: 2px 0; }
+.next h2 { margin: 8px 0 4px; }
 .live-actions {
   position: sticky; bottom: 0; z-index: 1;
   display: flex; flex-direction: column; gap: 8px;
@@ -217,6 +221,15 @@ button.chip[aria-pressed="true"] { background: var(--selected); border-color: va
 
 /* Extra minuten (#31) */
 button.chip.extra[aria-pressed="true"] { border-color: var(--on); }
+
+/* A name row with buttons under Eruit and Erin (#46). The name never shrinks: when it and the buttons don't fit on
+   one line, the buttons move to the line under it (a long name wraps rather than being cut). The buttons stay side
+   by side on one line, small enough to fit a column at 402 px, so a row is a name line plus one 44 px button line,
+   and a three-player change still shows the names and buttons main showed above the sticky Wissel bar. */
+.names li.with-chips { flex-wrap: wrap; gap: 0 6px; padding: 0; }
+.names li.with-chips .player { flex: 1 1 auto; white-space: normal; overflow-wrap: anywhere; line-height: 1.1; }
+.names li .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.names li .chips button.chip { margin-left: 0; padding: 0 6px; font-size: 0.8rem; }
 
 /* Minutes at a glance (#32): every player in one dense grid at the top, six cells a row, so twelve players fit in
    two rows on a phone 360 px wide or more (328 px between the gutters: cells of about 51 px) */
