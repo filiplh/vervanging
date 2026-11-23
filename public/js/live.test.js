@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createStore } from './store.js';
 import { makePlan } from './planner.js';
-import { startMatch, wissel, minutesSoFar } from './match.js';
+import { startMatch, wissel, uit, onCourt, minutesSoFar } from './match.js';
 import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory, createWakeLock, DOUBLE_TAP_MS } from './live.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
@@ -727,4 +727,97 @@ test('history: a match with Extra minuten records the extra seconds apart', () =
   const match = stored.matches.find((m) => m.id === setup.savedAt);
   assert.deepEqual(match.extra, { [off[0]]: 200 });
   assert.equal(match.seconds[off[0]] >= 200, true);
+});
+
+// ---------- a confirmation line after each action (#50, P2-2 in docs/spikes/2026-ui-review.md) ----------
+
+const messageOf = (view) => find(view, 'p', (e) => e.className === 'message')[0];
+const messageText = (view) => messageOf(view).text;
+const rowButton = (view, number, label) => {
+  const row = find(view, 'tr', (tr) => find(tr, 'span', (sp) => sp.className === 'number' && sp.text === `#${number}`).length > 0)[0];
+  return find(row, 'button', (b) => b.text === label)[0];
+};
+// Players in setupOf have id = number and name `Speler<id>`, so "#3 Speler3" is how the screen writes player 3.
+const playerLabel = (id) => `#${id} Speler${id}`;
+const cameOnIds = (before, after) => onCourt(after).filter((id) => !onCourt(before).includes(id)).sort((a, b) => a - b);
+
+test('confirmation: Wissel writes the new block and who came on, in jersey order', () => {
+  const { view, setup } = open();
+  const s0 = startMatch(planOf(setup), setup.savedAt);
+  const s1 = wissel(s0);
+  const s2 = wissel(s1);
+  assert.equal(messageText(view), '', 'no line before the first action');
+  wisselButton(view).fire('click'); // open() uses a clock that moves a second per read, so the next tap counts too
+  assert.equal(messageText(view), `Wissel gedaan: blok 2. Erin: ${cameOnIds(s0, s1).map(playerLabel).join(', ')}.`);
+  assert.equal(messageOf(view).attrs.role, 'status', 'a confirmation is a polite status, not an alert');
+  wisselButton(view).fire('click');
+  assert.equal(messageText(view), `Wissel gedaan: blok 3. Erin: ${cameOnIds(s1, s2).map(playerLabel).join(', ')}.`);
+});
+
+test('confirmation: Uit on court names the replacement; Uit of a bench player leaves out the erin part', () => {
+  const { view, setup } = open();
+  const s0 = startMatch(planOf(setup), setup.savedAt);
+  const [replacement] = cameOnIds(s0, uit(s0, 1));
+  rowButton(view, 1, 'Uit').fire('click');
+  assert.equal(messageText(view), `#1 Speler1 uit, ${playerLabel(replacement)} erin.`);
+  const bench = setup.players.map((p) => p.id).find((id) => !onCourt(s0).includes(id) && id !== replacement);
+  rowButton(view, bench, 'Uit').fire('click');
+  assert.equal(messageText(view), `${playerLabel(bench)} uit.`);
+});
+
+test('confirmation: Terug says the player is back from the next block, and undo says Ongedaan gemaakt', () => {
+  const { view } = open();
+  rowButton(view, 8, 'Uit').fire('click');
+  rowButton(view, 8, 'Terug').fire('click');
+  assert.equal(messageText(view), '#8 Speler8 terug vanaf het volgende blok.');
+  button(view, 'Ongedaan maken').fire('click');
+  assert.equal(messageText(view), 'Ongedaan gemaakt.');
+});
+
+test('confirmation: the line stays while choosing In the zone, and a reload starts without it', () => {
+  const env = open();
+  wisselButton(env.view).fire('click');
+  const line = messageText(env.view);
+  assert.match(line, /^Wissel gedaan: blok 2\./);
+  chips(env.view, 'In the zone')[0].fire('click');
+  assert.equal(messageText(env.view), line, 'In the zone is not an action, so the line stays');
+  assert.equal(messageText(env.reload()), '');
+});
+
+test('confirmation: Einde match writes no line, the end screen says it', () => {
+  const { view } = open();
+  for (let i = 1; i < 12; i++) wisselButton(view).fire('click');
+  assert.equal(wisselButton(view).text, 'Einde match');
+  wisselButton(view).fire('click');
+  assert.equal(h1(view), 'Einde match');
+  assert.equal(messageText(view), '');
+  button(view, 'Ongedaan maken').fire('click');
+  assert.equal(messageText(view), 'Ongedaan gemaakt.');
+});
+
+test('confirmation: errors keep their own text, never a confirmation', () => {
+  // An action the engine refuses: with 8 players, a fourth Uit would leave fewer than five.
+  const { view } = open();
+  for (const id of [6, 7, 8]) rowButton(view, id, 'Uit').fire('click');
+  assert.equal(messageText(view), '#8 Speler8 uit.');
+  rowButton(view, 5, 'Uit').fire('click');
+  assert.equal(messageText(view), 'Dat kan nu niet.');
+  assert.equal(messageOf(view).attrs.role, 'alert');
+
+  // A refused write: the save-failed message, not the confirmation line.
+  const env = open();
+  const data = new Map(env.data);
+  const store = createStore({ getItem: (k) => data.get(k) ?? null, setItem() { throw new Error('full'); }, removeItem() {} });
+  const refused = new FakeElement('main');
+  liveScreen(refused, { store, now: spacedClock() });
+  for (const tap of [() => wisselButton(refused), () => rowButton(refused, 1, 'Uit'), () => button(refused, 'Ongedaan maken')]) {
+    tap().fire('click');
+    assert.equal(messageText(refused), 'Opslaan lukte niet: de browser weigert opslag.');
+  }
+});
+
+test('buttons have a pressed (:active) style', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  assert.match(css, /button:active:not\(:disabled\)/);
+  assert.match(css, /button\.primary:active:not\(:disabled\)/);
 });
