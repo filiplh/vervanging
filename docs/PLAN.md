@@ -100,6 +100,7 @@ feeling".
 | 45 | The web app after phase 3 | Stays live and frozen as a fallback; retiring it is decided after phase 4 | No web work after phase 3 except fixes | Decided | [phase 3 D19](grill/2026-11-23-phase-3-native-ios.md#decisions) |
 | 46 | Name and icon | "Vervanging" under the icon; a new layered iOS 27 icon (light, dark, tinted, clear), 2–3 drafts, the owner picks | An icon item in phase 3 | Decided | [phase 3 D22](grill/2026-11-23-phase-3-native-ios.md#decisions) |
 | 47 | How the factory runs phase 3 | Team mode with roles `ios` (`ios/**`) and `web` (`public/**`, `shared/**`, `scripts/**`, `wrangler.jsonc`); this Mac capped at 2 builders in the owner's machine settings | Parallel builders; role files | Decided (role paths: agent's call) | [phase 3 D25](grill/2026-11-23-phase-3-native-ios.md#decisions) |
+| 48 | History at the switch to the store build | The free-ID build (`.dev` bundle ID) and the TestFlight or App Store build are separate apps on the phone; the history built on the free-ID build does not move to the store build, and the coach starts fresh again | No export or import code in phase 4 | Decided | owner on [plan PR #90](https://github.com/filiplh/vervanging/pull/90), 2026-11-23 (raised by the lead after the grill) |
 
 ## Architecture
 - [ADR-001](adr/001-fixed-blocks-no-game-clock.md) Fixed time blocks, no game clock (accepted): playing time is
@@ -145,7 +146,7 @@ Index: [adr/README.md](adr/README.md).
 | A port bug | The native planner gives a plan the web app would not, and the coach loses trust | Exact shared examples (#35); the phase 3 exit test at a real match |
 | Glass hard to read in the hall | Names or the Wissel button get lost behind Liquid Glass under bright lights | The phase 3 exit test runs at a real match with Reduce Transparency off |
 | Mac overloaded | Xcode and simulator runs slow down or flake with parallel builders | 2 builders, one heavy run at a time (#47); A7 measures it |
-| History lost at the switch to the store build | The `.dev` build and the store build have different bundle IDs, so a history built on the free-ID build does not carry over | Open: the owner decides before phase 4 whether to accept a fresh start or add a move (plan PR #90, Questions; agent's call to raise it, not in the grill log) |
+| History lost at the switch to the store build | The `.dev` build and the store build have different bundle IDs, so a history built on the free-ID build does not carry over | Accepted (#48): a fresh start again at the switch, as with #33 |
 
 ## Plan of attack
 Phase 0 builds the smallest app a coach can use at a match: roster, setup, the planner for both schedules and the live
