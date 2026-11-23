@@ -124,13 +124,15 @@ func planFrom(_ opts: [String: String]) throws -> Plan {
     let start = try numberList(startText, "start")
     // seededRandom takes `Number(seed) >>> 0`: the seed modulo 2^32.
     let seed = try opts["seed"].map { Int(UInt32(fmod(try positiveInt($0, "seed"), 4_294_967_296))) } ?? 1
-    if opts["history"] != nil {
-        throw UsageError("--history is not in the Swift sim yet: it comes with the history rules (#97)")
-    }
-    if opts["use-history"] != nil { throw UsageError("--use-history needs --history <file>") }
+    let history = try opts["history"].map(readHistory)
+    if opts["use-history"] != nil && history == nil { throw UsageError("--use-history needs --history <file>") }
     let schedule = opts["schedule"] ?? "equal"
-    if Planner.schedules[schedule] == nil { throw UsageError("unknown schedule \"\(schedule)\": use equal or five") }
-    var plan = try Planner.makePlan(players: players, start: start, schedule: schedule, seed: seed)
+    guard let shape = Planner.schedules[schedule] else {
+        throw UsageError("unknown schedule \"\(schedule)\": use equal or five")
+    }
+    let catchUp = opts["use-history"] != nil ? history!.catchUp(players, schedule: shape, seed: seed) : CatchUp()
+    var plan = try Planner.makePlan(players: players, start: start, schedule: schedule, seed: seed,
+                                    extraPriority: catchUp.priority, moves: catchUp.moves)
     if let swapText = opts["swap"] {
         let pair = try numberList(swapText, "swap")
         if pair.count != 2 { throw UsageError("--swap takes two player numbers") }
