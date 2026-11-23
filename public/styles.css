@@ -201,9 +201,15 @@ section:not([aria-labelledby]) { margin-top: 20px; }
 /* Live match screen: the Wissel button is big and sits under the thumb */
 .sub-time {
   margin: 4px 0 8px;
-  font-size: 1.6rem; font-weight: 700;
+  font-size: 1.6rem; font-weight: 700; line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
+/* The live screen's top sits tighter than the other screens (#77): 8 px over and under the heading instead of 16 and
+   12, 12 px over Op het veld instead of 20, and a 1.2 line height on the sub time (one line of large text). That gives
+   about 25 px back to the change, so three Eruit rows whose names need three lines each ("#11 / Mohammed- / Amine",
+   rows of about 54 px instead of 45) still sit above the sticky Wissel bar at 360-402 x 874 (#77 PR). */
+h1.live-title { margin: 8px 0; }
+#h-court { margin-top: 12px; }
 .names { list-style: none; margin: 0; padding: 0; }
 .names li { min-height: 32px; display: flex; align-items: center; border-bottom: 1px solid var(--line); }
 .names.on li { font-weight: 600; }
@@ -255,7 +261,8 @@ button.chip[aria-pressed="true"] { background: var(--selected); border-color: va
    A name breaks only between words or at a hyphen; only a word wider than the whole column is split (break-word).
    Measured in headless Chrome at 360-402 x 874 with 15 players and a three-player change: with long single names on
    all three players due off, every Eruit name and button sits above the sticky Wissel bar (#74 PR). A hyphenated name
-   that needs three lines ("Mohammed-Amine" at 360 px) still makes its row taller. */
+   that needs three lines ("Mohammed-Amine" at 360 px) still makes its row taller (about 54 px); the tighter top of
+   the live screen (h1.live-title, #h-court, .sub-time) leaves room for three such rows (#77). */
 .names li.with-chips { flex-wrap: nowrap; gap: 0 6px; padding: 0; }
 .names li.with-chips .player { flex: 1 1 0; min-width: 0; white-space: normal; overflow-wrap: break-word; line-height: 1.1; }
 .names li .chips { display: flex; flex: 0 0 auto; gap: 4px; }
