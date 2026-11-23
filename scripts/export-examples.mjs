@@ -5,7 +5,8 @@
 //   node scripts/export-examples.mjs [--dir <path>]          writes the files (and removes stale ones)
 //   node scripts/export-examples.mjs --check [--dir <path>]  compares the files with what the JS gives now
 // --check exits 0 with "<n> examples match" as its last line, or exits 1 naming every example that differs, is
-// missing or is not in the list. Paths in the examples' arguments are relative to the repo root; sim runs from there.
+// missing or is not in the list; the last line counts the examples that do not match and the stray files apart.
+// Paths in the examples' arguments are relative to the repo root; sim runs from there.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -164,10 +165,15 @@ function main(argv) {
     }
     if (readFileSync(file, 'utf8') !== run(name, args)) problems.push(`out of date: ${name}.json`);
   }
+  // A stray file is not one of the examples: it is named, but the summary counts it apart (issue #113).
   for (const f of stale) problems.push(`not in the list: ${f}`);
   if (problems.length > 0) {
     for (const p of problems) process.stdout.write(`${p}\n`);
-    process.stdout.write(`${problems.length} of ${EXAMPLES.length} examples do not match; run node scripts/export-examples.mjs\n`);
+    const off = problems.length - stale.length;
+    const parts = [];
+    if (off > 0) parts.push(`${off} of ${EXAMPLES.length} examples do not match`);
+    if (stale.length > 0) parts.push(`${stale.length} ${stale.length === 1 ? 'file is' : 'files are'} not in the list`);
+    process.stdout.write(`${parts.join(', ')}; run node scripts/export-examples.mjs\n`);
     return 1;
   }
   process.stdout.write(`${EXAMPLES.length} examples match\n`);
