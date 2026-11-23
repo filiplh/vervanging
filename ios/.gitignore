@@ -1,0 +1,7 @@
+# Build output stays inside the worktree and out of git.
+VervangingCore/.build/
+VervangingCore/.swiftpm/
+.build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
