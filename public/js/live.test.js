@@ -982,3 +982,38 @@ test('live screen: a toggle already above the Wissel bar does not move the page'
     assert.deepEqual(scrolls, []);
   });
 });
+
+// ---------- the minutes table's header (#55, P3-3 in docs/spikes/2026-ui-review.md) ----------
+
+const minutesTables = (view) => find(view, 'table', (e) => e.className === 'minutes');
+const headerCells = (table) => find(find(table, 'thead')[0], 'th');
+const cellsOf = (tr) => tr.children.filter((c) => c instanceof FakeElement);
+
+test('minutes table: a header cell for every column, the Uit/Terug one visually hidden', () => {
+  const env = open(setupOf({ schedule: 'five' }));
+  chips(env.view, 'Uit')[0].fire('click');
+  const [live] = minutesTables(env.view);
+  const head = headerCells(live);
+  for (const tr of find(live, 'tbody')[0].children) assert.equal(cellsOf(tr).length, head.length, 'as many header cells as row cells');
+  assert.deepEqual(head.map((th) => th.text), ['Speler', 'Minuten', 'Actie']);
+  assert.ok(head.every((th) => th.attrs.scope === 'col'));
+  const [hidden] = find(head[2], 'span');
+  assert.equal(hidden.className, 'visually-hidden', 'screen readers announce it; the layout stays the same');
+
+  for (let i = 0; i < 8; i++) wisselButton(env.view).fire('click');
+  assert.equal(h1(env.view), 'Einde match');
+  const [end] = minutesTables(env.view);
+  const endHead = headerCells(end);
+  assert.deepEqual(endHead.map((th) => th.text), ['Speler', 'Minuten'], 'no action column at the end, so no header for it');
+  for (const tr of find(end, 'tbody')[0].children) assert.equal(cellsOf(tr).length, endHead.length);
+});
+
+test('styles: the uit tag is not struck through with the name', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  const struck = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter(([, , body]) => /text-decoration:\s*line-through/.test(body))
+    .flatMap(([, sel]) => sel.split(',').map((s) => s.trim()))
+    .filter((s) => s.startsWith('.minutes'));
+  assert.ok(struck.includes('.minutes tr.out th .player'), 'the name is struck through');
+  assert.ok(!struck.some((s) => /tr\.out th$/.test(s) || /\.tag\b/.test(s)), `not the whole cell or the tag: ${struck.join(' | ')}`);
+});

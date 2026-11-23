@@ -251,7 +251,9 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
       el('caption', {}, heading),
       el('thead', {}, el('tr', {},
         el('th', { scope: 'col' }, 'Speler'),
-        el('th', { scope: 'col', className: 'min' }, 'Minuten'))),
+        el('th', { scope: 'col', className: 'min' }, 'Minuten'),
+        // The Uit/Terug column gets a header too (P3-3): read by screen readers, hidden on screen.
+        !state.ended && el('th', { scope: 'col', className: 'act' }, el('span', { className: 'visually-hidden' }, 'Actie')))),
       el('tbody', {}, sortedPlayers(setup.players.map((p) => p.id)).map((id) =>
         el('tr', { className: court.includes(id) ? 'on' : isOut(id) ? 'out' : null },
           el('th', { scope: 'row' }, name(id),
