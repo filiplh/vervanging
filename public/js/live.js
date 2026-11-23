@@ -182,8 +182,12 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   const label = (id) => `#${byId.get(id).number} ${byId.get(id).name}`;
   const cameOn = (before, after) => sortedPlayers(onCourt(after).filter((id) => !onCourt(before).includes(id)));
   // The Einde match tap shows the end screen itself, so it writes no line.
-  const wisselLine = (before, after) => (after.ended ? ''
-    : `Wissel gedaan: blok ${after.block}. Erin: ${cameOn(before, after).map(label).join(', ')}.`);
+  // With exactly five available players nobody comes on, so the Erin part is left out.
+  const wisselLine = (before, after) => {
+    if (after.ended) return '';
+    const on = cameOn(before, after);
+    return `Wissel gedaan: blok ${after.block}.${on.length ? ` Erin: ${on.map(label).join(', ')}.` : ''}`;
+  };
   const uitLine = (id) => (before, after) => {
     const replacement = cameOn(before, after)[0];
     return replacement === undefined ? `${label(id)} uit.` : `${label(id)} uit, ${label(replacement)} erin.`;
