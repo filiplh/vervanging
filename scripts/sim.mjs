@@ -77,7 +77,8 @@ function planFrom(opts) {
   const history = opts.history === undefined ? null : readHistory(opts.history);
   if (opts['use-history'] && !history) throw new UsageError('--use-history needs --history <file>');
   const schedule = opts.schedule ?? 'equal';
-  if (!SCHEDULES[schedule]) throw new UsageError(`unknown schedule "${schedule}": use equal or five`);
+  // Own properties only: "constructor", "toString" and "__proto__" are on every object but are no schedule.
+  if (!Object.hasOwn(SCHEDULES, schedule)) throw new UsageError(`unknown schedule "${schedule}": use equal or five`);
   const { priority, moves } = opts['use-history']
     ? catchUp(history, players, SCHEDULES[schedule], seed) : { priority: [], moves: [] };
   let plan = makePlan({ players, start, schedule, seed, extraPriority: priority, moves });

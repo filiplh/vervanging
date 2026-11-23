@@ -1,0 +1,17 @@
+{
+  "name": "invalid-plan-schedule-tostring",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "toString"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: unknown schedule \"toString\": use equal or five\n"
+}
