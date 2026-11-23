@@ -67,6 +67,16 @@ export function initialAttendance(roster, raw) {
   return ids.filter((id) => last.includes(id));
 }
 
+// Who is in the basisvijf when setup opens (#56, P3-4 in docs/spikes/2026-ui-review.md): the last started match's
+// basisvijf, read from the saved match setup, keeping only the players ticked present now (`presentIds`, already
+// limited to the roster, so a deleted player drops out). Fewer than five left: those, and the coach picks the rest.
+// No saved setup yet (the first match) or a damaged one: nobody.
+export function initialStartingFive(presentIds, rawSetup) {
+  const last = normaliseMatchSetup(rawSetup)?.startingFive ?? [];
+  const present = new Set(presentIds);
+  return last.filter((id) => present.has(id));
+}
+
 // A match setup read from the store, or null when it is missing or its shape is damaged, so no screen
 // (the live screen, live.js) ever renders from broken data.
 export function normaliseMatchSetup(raw) {
@@ -250,7 +260,7 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
   const players = roster.players.slice().sort(byNumber);
   const byId = new Map(players.map((p) => [p.id, p]));
   const present = new Set(initialAttendance(roster, store.load('attendance')));
-  let start = [];
+  let start = initialStartingFive([...present], store.load('matchSetup'));
   let schedule = 'equal';
   let opponent = '';
   let seed = newSeed();
@@ -488,5 +498,6 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
     ].filter(Boolean));
   }
 
+  replan(); // a remembered basisvijf of five shows its plan at once; Start still needs a plan, as before
   render();
 }

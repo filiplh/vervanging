@@ -11,7 +11,7 @@ import { liveScreen } from './live.js';
 import {
   MAX_PLAYERS, normaliseRoster, checkPlayer, addPlayer, editPlayer, removePlayer, normaliseAttendance,
   initialAttendance, normaliseMatchSetup, formatSeconds, playerLabel, rosterScreen, setupScreen, isInstalled,
-  formatDuration, seasonNote, hasRunningMatch,
+  formatDuration, seasonNote, hasRunningMatch, initialStartingFive,
 } from './setup.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
@@ -135,6 +135,23 @@ test('attendance: last selection pre-ticked, everyone when none, damaged values 
   assert.deepEqual(initialAttendance(roster, [null, '2', 3]), [3]);
   assert.deepEqual(normaliseAttendance([1, null, 'x', 2.5, 4]), [1, 4]);
   assert.equal(normaliseAttendance('1,2'), null);
+});
+
+// A valid saved match setup for rosterOf(n)'s players `ids`, with `five` as its basisvijf.
+function savedSetup(n, ids, five) {
+  const players = rosterOf(n).players.filter((p) => ids.includes(p.id));
+  const plan = makePlan({ players: ids, start: five, schedule: 'equal', seed: 7 });
+  return { savedAt: '2026-11-23T10:00:00.000Z', opponent: '', schedule: 'equal', seed: 7, players, startingFive: five, plan };
+}
+
+test('initialStartingFive: the last basisvijf among the players present; nobody on a first match or damaged data', () => {
+  const last = savedSetup(8, [1, 2, 3, 4, 5, 6, 7, 8], [2, 4, 6, 7, 8]);
+  assert.deepEqual(initialStartingFive([1, 2, 3, 4, 5, 6, 7, 8], last), [2, 4, 6, 7, 8]);
+  assert.deepEqual(initialStartingFive([1, 2, 3, 5, 6, 8], last), [2, 6, 8], 'absent ones are left out');
+  assert.deepEqual(initialStartingFive([1, 3, 5], last), []);
+  assert.deepEqual(initialStartingFive([1, 2, 3], null), [], 'first match ever');
+  assert.deepEqual(initialStartingFive([1, 2, 3], { startingFive: [1, 2, 3] }), [], 'a damaged setup gives nobody');
+  assert.deepEqual(initialStartingFive([1, 2, 3], 'x'), []);
 });
 
 test('formatSeconds and playerLabel', () => {
@@ -324,8 +341,17 @@ function openSetup({ players = 10, attendance, history, installed } = {}) {
   return env;
 }
 
+const basisButtons = (view) => find(view, 'button', (e) => e.text === 'Basis');
+const basisOn = (view) => basisButtons(view).map((b) => b.attrs['aria-pressed'] === 'true');
+
+// Picks up to n more basisvijf players. A setup after an earlier Start may already have the last basisvijf
+// pre-selected (#56); then there is nothing left to pick and it stops.
 function pickFive(view, n = 5) {
-  for (let i = 0; i < n; i++) find(view, 'button', (e) => e.text === 'Basis' && !e.disabled && e.attrs['aria-pressed'] === 'false')[0].fire('click');
+  for (let i = 0; i < n; i++) {
+    const next = basisButtons(view).find((e) => !e.disabled && e.attrs['aria-pressed'] === 'false');
+    if (!next) return;
+    next.fire('click');
+  }
 }
 
 test('setup screen: asks for more players when the roster has fewer than 5', () => {
@@ -434,6 +460,72 @@ test('setup screen: Start saves the setup and the attendance', () => {
   const next = new FakeElement('main');
   setupScreen(next, { store, onStart() {} });
   assert.deepEqual(checkboxes(next).map((b) => b.checked), [...Array(10).fill(true), false]);
+});
+
+// The last basisvijf pre-selected after "Nieuwe match" (#56, P3-4 in docs/spikes/2026-ui-review.md).
+function startedWith({ players = 11, absent = [], five = [1, 2, 3, 4, 5] } = {}) {
+  const env = openSetup({ players });
+  for (const id of absent) checkboxes(env.view)[id - 1].fire('change');
+  for (const id of five) basisButtons(env.view)[id - 1].fire('click');
+  button(env.view, 'Start').fire('click');
+  assert.equal(env.started.length, 1);
+  return env;
+}
+
+test('setup screen: a first match ever has no basisvijf pre-selected', () => {
+  const { view } = openSetup();
+  assert.deepEqual(basisOn(view), Array(10).fill(false));
+  assert.match(pageText(view), /Basisvijf: 0 van 5/);
+  assert.equal(button(view, 'Start'), undefined);
+});
+
+test('setup screen: after Start, the next setup pre-selects the last basisvijf and shows its plan', () => {
+  const env = startedWith({ absent: [11], five: [2, 4, 6, 8, 10] });
+  const view = setupView(env);
+  assert.deepEqual(basisOn(view), [false, true, false, true, false, true, false, true, false, true, false]);
+  assert.match(pageText(view), /Aanwezig: 10 · Basisvijf: 5 van 5/);
+  assert.equal(rows(view).length, 10, 'the plan is shown at once');
+  assert.deepEqual(rows(view).slice(0, 5).map((r) => find(r, 'span', (e) => e.className === 'number')[0].text),
+    ['#2', '#4', '#6', '#8', '#10'], 'the remembered five start');
+  assert.ok(button(view, 'Start'));
+});
+
+test('setup screen: the coach can still change a pre-selected basisvijf', () => {
+  const env = startedWith();
+  const view = setupView(env);
+  basisButtons(view)[0].fire('click');
+  assert.match(pageText(view), /Basisvijf: 4 van 5/);
+  assert.equal(find(view, 'table').length, 0, 'no plan and no Start with four');
+  assert.equal(button(view, 'Start'), undefined);
+  basisButtons(view)[6].fire('click');
+  assert.deepEqual(basisOn(view), [false, true, true, true, true, false, true, false, false, false, false]);
+  button(view, 'Start').fire('click');
+  assert.deepEqual(env.raw('matchSetup').startingFive.slice().sort((a, b) => a - b), [2, 3, 4, 5, 7]);
+});
+
+test('setup screen: absent or deleted players of the last basisvijf are left out; the coach picks the rest', () => {
+  const env = startedWith();
+  // Player 2 was deleted from the squad; player 4 is not ticked present any more.
+  env.store.save('roster', removePlayer(rosterOf(11), 2));
+  env.store.save('attendance', [1, 3, 5, 6, 7, 8, 9, 10, 11]);
+  const view = setupView(env);
+  assert.deepEqual(basisOn(view), [true, true, false, true, false, false, false, false, false, false],
+    'ids 1, 3 and 5 of the ten players left');
+  assert.match(pageText(view), /Basisvijf: 3 van 5/);
+  assert.match(pageText(view), /Kies precies 5/);
+  assert.equal(button(view, 'Start'), undefined, 'no Start until the coach picks five');
+  pickFive(view, 2);
+  assert.ok(button(view, 'Start'));
+
+  // Unticking a pre-selected starter takes them out of the basisvijf, as with one picked by hand.
+  checkboxes(view)[0].fire('change');
+  assert.match(pageText(view), /Basisvijf: 4 van 5/);
+});
+
+test('setup screen: a damaged saved setup pre-selects nobody', () => {
+  const env = startedWith();
+  env.store.save('matchSetup', { ...env.raw('matchSetup'), plan: null });
+  assert.deepEqual(basisOn(setupView(env)), Array(11).fill(false));
 });
 
 test('setup screen: Start with refused storage shows a message and does not leave', () => {
