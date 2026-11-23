@@ -15,7 +15,8 @@ import Foundation
 // 2018 Python Software Foundation; All Rights Reserved
 // Licence: the Python Software Foundation License Version 2 (V8 based the file on CPython's listobject.c), in
 // third_party/v8/builtins/LICENSE, kept unchanged next to this file in JavaScriptSortLicense.swift.
-// ⚠ PSF-2.0 is not in factory.yaml › licences.allow; this translation waits for the owner's approval (gate H2).
+// PSF-2.0 is not in factory.yaml › licences.allow; the owner approved this translation (gate H2):
+// https://github.com/filiplh/vervanging/pull/127#issuecomment-7113793009
 //
 // Changes from the source (the summary the licence asks for): translated from Torque to Swift, by hand, with no line
 // copied. Kept: the algorithm and the order of every comparison and element move (ArrayTimSortImpl,

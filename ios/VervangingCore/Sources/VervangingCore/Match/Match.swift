@@ -3,8 +3,8 @@ import Foundation
 // The match engine, ported from public/js/match.js (ADR-003); the JS file is the reference, and every function here
 // gives exactly what its JS twin gives, so the shared examples in shared/examples/ hold for both apps. Decisions:
 // docs/PLAN.md #4 (blocks, minutes = blocks × length; no clock, ADR-001), #8 and #9 (in the zone), #12 (live
-// screen), #17 (undo, one step), #24 and #25 (Extra minuten), #27 (minutes at a glance). Uit and terug (#11) come in
-// the next slice (#99); the state already carries `out` and `replaced` for them.
+// screen), #11 and #21 (uit and terug, the sub rule for players marked uit), #17 (undo, one step), #24 and #25 (Extra
+// minuten), #27 (minutes at a glance).
 
 /// Who goes off and who comes on at the next wissel, each ascending.
 public struct NextChange: Equatable, Sendable {
@@ -29,10 +29,12 @@ public struct MinutesEntry: Equatable, Sendable {
     public var out: Bool
 }
 
-/// A live action as the runner writes it (applyAction in match.js). Uit and terug come with #99.
+/// A live action as the runner writes it (applyAction in match.js).
 public enum MatchAction: Equatable, Sendable {
     case wissel(keep: Int? = nil, bench: Int? = nil, extra: Bool = false)
     case undo
+    case uit(Int)
+    case terug(Int)
 }
 
 /// The sub rule for a live plan (decision #21), as capHolds and subsAllowed in match.js.
@@ -178,6 +180,8 @@ extension MatchState {
         switch action {
         case let .wissel(keep, bench, extra): return try wissel(keep: keep, bench: bench, extra: extra)
         case .undo: return undo()
+        case let .uit(player): return try uit(player)
+        case let .terug(player): return try terug(player)
         }
     }
 
@@ -287,5 +291,113 @@ extension MatchState {
             }
         }
         return result
+    }
+}
+
+// Uit and terug (decision #11, and the owner's decision on #9 of 22 Nov 2026), ported from match.js.
+extension MatchState {
+    /// "uit": `player` plays no more this match. On court, they leave at once and a replacement comes on: a player due
+    /// on at the next wissel when there is one, else a bench player; fewest minutes first, ties to the lowest number.
+    /// The current block still counts for the player who started it. The rest of the plan is recalculated only when
+    /// `player` was planned in a later block. Possible in the last block too.
+    public func uit(_ player: Int) throws -> MatchState {
+        if ended { throw MatchError("the match has ended") }
+        if !players.contains(player) { throw MatchError("player \(player) is not in this match") }
+        if out.contains(player) { throw MatchError("player \(player) is already out") }
+        let newOut = (out + [player]).sorted()
+        if players.count - newOut.count < Planner.onCourt {
+            throw MatchError("at least \(Planner.onCourt) players must be available")
+        }
+        let court = onCourt
+        let minutes = minutesSoFar
+        func fewest(_ a: Int, _ b: Int) -> Bool { minutes[a]! != minutes[b]! ? minutes[a]! < minutes[b]! : a < b }
+        let nextRow = block < blocks ? grid[block] : nil
+        var newReplaced = replaced
+        var fromNext = false
+        if court.contains(player) {
+            // A starter of this block who already left it (uit, even when back with terug, which counts from the next
+            // block) does not come back on in the same block.
+            let startedHere = grid[block - 1]
+            func pick(_ list: [Int]) -> Int? {
+                list.filter { !newOut.contains($0) && !court.contains($0) && !startedHere.contains($0) }
+                    .sorted(by: fewest).first
+            }
+            let early = nextRow.flatMap(pick)
+            guard let replacement = early ?? pick(players) else { throw MatchError("no player is left to come on") }
+            fromNext = early != nil
+            if let i = newReplaced.firstIndex(where: { $0.replacement == player }) {
+                newReplaced[i].replacement = replacement // the player was a replacement already
+            } else {
+                newReplaced.append(Replacement(starter: player, replacement: replacement))
+            }
+        }
+        var next = self
+        next.out = newOut
+        next.replaced = newReplaced
+        next.previous = snapshot
+        let plannedLater = grid[block...].contains { $0.contains(player) }
+        if !plannedLater { return next }
+        // The replacement came from the next wissel, so that wissel stays as planned, without the uit player: a player
+        // due off stays on in their place when one is needed (fewest minutes first). Only the blocks after it are
+        // recalculated.
+        var fixedNext: [Int]?
+        if fromNext, let nextRow {
+            var row = nextRow.filter { $0 != player }
+            if row.count < Planner.onCourt {
+                let now = Match.actualRow(grid[block - 1], newReplaced)
+                let free = { (list: [Int]) in list.filter { !newOut.contains($0) && !row.contains($0) }.sorted(by: fewest) }
+                // Always found: at least five players are available and the row holds four of them.
+                guard let stay = free(now).first ?? free(players).first else {
+                    throw MatchError("no player is left to come on")
+                }
+                row.append(stay)
+            }
+            fixedNext = row
+        }
+        next.grid = try respread(out: newOut, replaced: newReplaced, fixedNext: fixedNext)
+        return next
+    }
+
+    /// "terug": `player` is available again from the next block on.
+    public func terug(_ player: Int) throws -> MatchState {
+        if ended { throw MatchError("the match has ended") }
+        if !out.contains(player) { throw MatchError("player \(player) is not out") }
+        if block >= blocks { throw MatchError("no block left: this is the last block") }
+        let newOut = out.filter { $0 != player }
+        var next = self
+        next.grid = try respread(out: newOut, replaced: replaced, fixedNext: nil)
+        next.out = newOut
+        next.previous = snapshot
+        return next
+    }
+
+    /// Re-spreads the blocks after the current one over the players who are not out (decision #11). Targets come
+    /// from the credited grid (minutes); the search plans from the current block as it is on court, so a replacement
+    /// already on is not counted as coming on, and the current block keeps its credited line-up afterwards. With
+    /// `fixedNext`, the next block is set to that line-up first and only the blocks after it are planned.
+    func respread(out newOut: [Int], replaced newReplaced: [Replacement], fixedNext: [Int]?) throws -> [[Int]] {
+        let avail = players.filter { !newOut.contains($0) }
+        if avail.count < Planner.onCourt { throw MatchError("at least \(Planner.onCourt) players must be available") }
+        var base = grid
+        if let fixedNext { base[block] = fixedNext.sorted() }
+        let fromBlock = fixedNext != nil ? block + 1 : block
+        let targets = try Planner.evenTargets(grid: base, players: players, available: avail, fromBlock: fromBlock)
+        let actual = Match.actualGrid(base, block: block, newReplaced)
+        let credited = Planner.blockCounts(Array(base.prefix(fromBlock)), players: players)
+        let onCourtCounts = Planner.blockCounts(Array(actual.prefix(fromBlock)), players: players)
+        let searchTargets = Dictionary(players.map { ($0, targets[$0]! + onCourtCounts[$0]! - credited[$0]!) },
+                                       uniquingKeysWith: { $1 })
+        var planned: [[Int]]
+        do {
+            planned = try Planner.replanRemaining(grid: actual, players: players, available: avail,
+                                                  fromBlock: fromBlock, targets: searchTargets,
+                                                  blockSeconds: blockSeconds, seed: block)
+        } catch {
+            // No plan meets the targets under the sub rule: never refuse a player who is out, repair instead.
+            planned = try Planner.repairRemaining(grid: actual, players: players, available: avail,
+                                                  fromBlock: fromBlock)
+        }
+        planned[block - 1] = grid[block - 1]
+        return planned
     }
 }

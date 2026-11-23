@@ -41,6 +41,19 @@ private func match(_ players: Int, _ actions: String, schedule: String = "equal"
 
 private func invalid(_ message: String) -> SimRun { SimRun(status: 2, stdout: "", stderr: "sim: \(message)\n") }
 
+/// The match command's JSON line for players 1 to `seconds.count` with no Extra minuten, in sim.mjs's key order.
+private func json(block: Int, blocks: Int, ended: Bool = false, onCourt: [Int], seconds: [Int], out: [Int]) -> String {
+    let players = Array(1...seconds.count)
+    let minutes = players.map { "\"\($0)\":\(seconds[$0 - 1])" }.joined(separator: ",")
+    let extra = players.map { "\"\($0)\":0" }.joined(separator: ",")
+    let overview = players.map {
+        "{\"player\":\($0),\"seconds\":\(seconds[$0 - 1]),\"onCourt\":\(onCourt.contains($0)),\"out\":\(out.contains($0))}"
+    }.joined(separator: ",")
+    let court = onCourt.map(String.init).joined(separator: ",")
+    return "{\"block\":\(block),\"blocks\":\(blocks),\"ended\":\(ended),\"onCourt\":[\(court)],\"minutes\":{\(minutes)},"
+        + "\"extraSeconds\":{\(extra)},\"overview\":[\(overview)]}\n"
+}
+
 private let unknownAction = ": use wissel, undo (optionally with *<count>), wissel:keep=P[:extra][:bench=Q], uit=P or "
     + "terug=P"
 
@@ -115,26 +128,58 @@ private let unknownAction = ": use wissel, undo (optionally with *<count>), wiss
             == invalid("player 9223372036854776000 is not due on at this change"))
     }
 
-    @Test func uitAndTerugAreNotRunYet() throws {
-        #expect(try match(10, "uit=3") == invalid("uit and terug are not in the Swift sim yet"))
-        #expect(try match(10, "wissel,terug=1") == invalid("uit and terug are not in the Swift sim yet"))
+    // Contracts C2 to C4 of #99: uit and terug, uit in the last block, uit for a bench player (Node's output).
+    @Test func uitAndTerugGiveWhatSimMjsGives() throws {
+        #expect(try match(10, "wissel,uit=3,wissel,terug=3", schedule: "five") == SimRun(status: 0, stdout: json(
+            block: 3, blocks: 8, onCourt: [1, 6, 8, 9, 10], seconds: [900, 300, 600, 600, 300, 600, 0, 600, 300, 300],
+            out: []), stderr: ""))
+        #expect(try match(12, "wissel*11,uit=1") == SimRun(status: 0, stdout: json(
+            block: 12, blocks: 12, onCourt: [2, 3, 7, 8, 10], seconds: Array(repeating: 1000, count: 12), out: [1]),
+            stderr: ""))
+        #expect(try match(12, "uit=12,wissel") == SimRun(status: 0, stdout: json(
+            block: 2, blocks: 12, onCourt: [1, 4, 5, 8, 10], seconds: [400, 200, 200, 400, 400, 0, 0, 200, 0, 200, 0, 0],
+            out: [12]), stderr: ""))
     }
 
-    // Contract C1 of #98, and the uit and terug examples named as skipped until #99.
-    @Test func checkExamplesRunsTheMatchExamples() throws {
+    @Test func uitAndTerugRefuseAsMatchJsDoes() throws {
+        #expect(try match(12, "uit=13") == invalid("player 13 is not in this match"))
+        #expect(try match(12, "uit=0") == invalid("player 0 is not in this match"))
+        #expect(try match(12, "uit=1,uit=1") == invalid("player 1 is already out"))
+        #expect(try match(12, "terug=4") == invalid("player 4 is not out"))
+        #expect(try match(8, "uit=1,uit=2,uit=3,uit=4") == invalid("at least 5 players must be available"))
+        #expect(try match(12, "wissel*12,uit=1") == invalid("the match has ended"))
+        #expect(try match(12, "wissel*12,terug=1") == invalid("the match has ended"))
+        #expect(try match(12, "uit=1,wissel*11,terug=1") == invalid("no block left: this is the last block"))
+        #expect(try match(12, "uit=1,wissel:keep=1") == invalid("player 1 is out and cannot stay on"))
+        #expect(try match(12, "uit=007") == (try match(12, "uit=7")), "digits read as a number")
+    }
+
+    @Test func aHugeUitOrTerugPlayerNumberPrintsAsJavaScriptPrintsIt() throws {
+        #expect(try match(12, "uit=99999999999999999999999") == invalid("player 1e+23 is not in this match"))
+        #expect(try match(12, "uit=9223372036854775807") == invalid("player 9223372036854776000 is not in this match"))
+        #expect(try match(12, "uit=9007199254740993") == invalid("player 9007199254740992 is not in this match"))
+        #expect(try match(12, "terug=99999999999999999999999") == invalid("player 1e+23 is not out"))
+    }
+
+    // Contract C1 of #99: every shared example runs and matches; nothing is skipped any more.
+    @Test func checkExamplesRunsEverySharedExample() throws {
+        let files = try FileManager.default.contentsOfDirectory(
+            at: repoRoot.appendingPathComponent("shared/examples"), includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent != "README.md" }
+        let all = try sim(["check-examples", "shared/examples"])
+        #expect(all == SimRun(status: 0, stdout: "\(files.count)/\(files.count) examples match\n", stderr: ""))
+
+        let matchOnly = try sim(["check-examples", "shared/examples", "--only", "match"])
+        #expect(matchOnly.status == 0)
+        #expect(!matchOnly.stdout.contains("skipped"), "\(matchOnly.stdout)")
+        let uit = files.filter { $0.lastPathComponent.hasPrefix("match-") && $0.lastPathComponent.contains("-uit") }
+        #expect(uit.count >= 6, "the uit and terug examples are in the folder")
+        // Leaving out uit and terug leaves fewer match examples, all matching.
         let filtered = try sim(["check-examples", "shared/examples", "--only", "match", "--without", "uit,terug"])
         #expect(filtered.status == 0)
-        let lines = filtered.stdout.split(separator: "\n")
-        #expect(lines.count == 1, "nothing skipped, nothing mismatched: \(filtered.stdout)")
-        let counts = lines.last!.split(separator: " ")[0].split(separator: "/")
-        #expect(lines.last!.hasSuffix(" match examples match") && counts.count == 2 && counts[0] == counts[1]
-                && Int(counts[0])! > 0)
-
-        let all = try sim(["check-examples", "shared/examples", "--only", "match"])
-        #expect(all.status == 0)
-        #expect(all.stdout.contains("(the Swift sim has no uit or terug yet): "))
-        #expect(all.stdout.contains("match-equal-10-uit-terug.json"))
-        #expect(all.stdout.hasSuffix(lines.last! + "\n"), "the same examples run; the others are named")
+        func count(_ run: SimRun) -> Int { Int(run.stdout.split(separator: "/")[0])! }
+        #expect(count(filtered) > 0 && count(filtered) + uit.count <= count(matchOnly))
+        #expect(filtered.stdout.split(separator: "\n").count == 1, "\(filtered.stdout)")
     }
 
     @Test func withoutTakesCommaSeparatedActionWords() throws {
