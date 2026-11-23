@@ -38,6 +38,29 @@ test('--check names an example that changed, one that is missing and one that is
     assert.match(run.stdout, /^out of date: plan-equal-10\.json$/m);
     assert.match(run.stdout, /^missing: history-sample\.json$/m);
     assert.match(run.stdout, /^not in the list: plan-old\.json$/m);
+    // Two examples differ and one file is no example: the summary counts them apart.
+    assert.equal(run.stdout.trim().split('\n').at(-1), `2 of ${EXAMPLES.length} examples do not match, 1 file is not in the list; run node scripts/export-examples.mjs`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--check names a stray file without counting it as an example (issue #113)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vervanging-examples-'));
+  try {
+    cpSync(DIR, dir, { recursive: true });
+    writeFileSync(join(dir, 'plan-old.json'), '{}\n');
+    const run = exportExamples('--check', '--dir', dir);
+    assert.equal(run.status, 1);
+    assert.equal(run.stderr, '');
+    assert.deepEqual(run.stdout.trim().split('\n'), [
+      'not in the list: plan-old.json',
+      '1 file is not in the list; run node scripts/export-examples.mjs',
+    ]);
+    cpSync(join(dir, 'plan-old.json'), join(dir, 'plan-older.json'));
+    const two = exportExamples('--check', '--dir', dir);
+    assert.equal(two.status, 1);
+    assert.equal(two.stdout.trim().split('\n').at(-1), '2 files are not in the list; run node scripts/export-examples.mjs');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
