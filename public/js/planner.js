@@ -38,9 +38,9 @@ function shuffled(list, random) {
 }
 
 function scheduleOf(name) {
-  const schedule = SCHEDULES[name];
-  if (!schedule) throw new PlanError(`unknown schedule "${name}": use equal or five`);
-  return schedule;
+  // Own properties only: "constructor", "toString" and "__proto__" are on every object but are no schedule.
+  if (!Object.hasOwn(SCHEDULES, name)) throw new PlanError(`unknown schedule "${name}": use equal or five`);
+  return SCHEDULES[name];
 }
 
 function checkPlayers(players, start) {

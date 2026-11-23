@@ -12,7 +12,7 @@
 // and fails, printing the new line to paste, when a cached file or this worker changed and VERSION did not. So every
 // release gets its own cache: phones see the new worker, and it never writes into the cache the open app is using.
 
-const VERSION = '303865d4ed81130a';
+const VERSION = 'd70a533185e7dfb9';
 const CACHE = `vervanging-${VERSION}`;
 
 // Paths relative to this file (served at /sw.js). './' is the page itself (index.html); it is cached under '/' only,
