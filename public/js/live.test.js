@@ -2,6 +2,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createStore } from './store.js';
+import { formatSeconds } from './setup.js';
 import { makePlan } from './planner.js';
 import { startMatch, wissel, uit, onCourt, minutesSoFar } from './match.js';
 import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory, createWakeLock, DOUBLE_TAP_MS } from './live.js';
@@ -106,7 +107,7 @@ test('live screen: block, sub time, on court, off and on next, Wissel, Ongedaan 
   assert.equal(button(view, 'Ongedaan maken').disabled, true, 'nothing to undo yet');
   const rows = minuteRows(view);
   assert.equal(rows.length, 8);
-  for (const r of rows) assert.equal(r.minutes, grid[0].includes(r.number) ? '3:20' : '0:00');
+  for (const r of rows) assert.equal(r.minutes, '0:00', 'nothing played yet at tip-off (#54)');
 });
 
 test('live screen: one tap per wissel moves one block, saves, and undo goes back', () => {
@@ -804,7 +805,7 @@ test('minutes at a glance: a player who went uit is marked out, and the end scre
   const row = find(view, 'tr', (tr) => find(tr, 'span', (sp) => sp.className === 'number' && sp.text === '#1').length > 0)[0];
   find(row, 'button', (b) => b.text === 'Uit')[0].fire('click');
   const one = overviewCells(view).find((c) => c.number === '#1');
-  assert.deepEqual({ on: one.on, out: one.out, minutes: one.minutes }, { on: false, out: true, minutes: '3:20' });
+  assert.deepEqual({ on: one.on, out: one.out, minutes: one.minutes }, { on: false, out: true, minutes: '0:00' });
   assert.match(one.text, /\(uit\)/);
   for (let b = 0; b < 12; b++) wisselButton(view).fire('click');
   assert.equal(h1(view), 'Einde match');
@@ -1016,4 +1017,70 @@ test('styles: the uit tag is not struck through with the name', () => {
     .filter((s) => s.startsWith('.minutes'));
   assert.ok(struck.includes('.minutes tr.out th .player'), 'the name is struck through');
   assert.ok(!struck.some((s) => /tr\.out th$/.test(s) || /\.tag\b/.test(s)), `not the whole cell or the tag: ${struck.join(' | ')}`);
+});
+
+// ---------- "Minuten tot nu" counts finished blocks only (#54, P3-2 in docs/spikes/2026-ui-review.md) ----------
+
+// The seconds from the plan's grid for the first `played` blocks, by player.
+const playedFrom = (grid, played, ids) => Object.fromEntries(ids.map((id) => [id,
+  grid.slice(0, played).filter((row) => row.includes(id)).length * 200]));
+const shown = (cellsOrRows) => Object.fromEntries(cellsOrRows.map((c) => [Number(String(c.number).replace('#', '')), c.minutes]));
+const asText = (seconds) => Object.fromEntries(Object.entries(seconds).map(([id, s]) => [Number(id), formatSeconds(s)]));
+
+test('minutes so far: the overview and the table count only finished blocks, at every block', () => {
+  const env = open(); // open() uses a clock that moves a second per read, so every Wissel tap counts
+  const { grid } = env.setup.plan;
+  const ids = env.setup.players.map((p) => p.id);
+  for (let block = 1; block <= 12; block++) {
+    assert.match(h1(env.view), new RegExp(`^Blok ${block} van 12`));
+    const want = asText(playedFrom(grid, block - 1, ids));
+    assert.deepEqual(shown(minuteRows(env.view)), want, `table, block ${block}`);
+    assert.deepEqual(shown(overviewCells(env.view)), want, `overview, block ${block}`);
+    assert.equal(find(env.view, 'caption')[0].text, 'Minuten tot nu');
+    wisselButton(env.view).fire('click');
+  }
+  assert.equal(h1(env.view), 'Einde match');
+  assert.deepEqual(shown(minuteRows(env.view)), asText(playedFrom(grid, 12, ids)), 'the end screen: every block, full totals');
+  assert.equal(find(env.view, 'caption')[0].text, 'Minuten per speler');
+});
+
+test('minutes so far: the end screen and the history keep the full totals', () => {
+  const env = open(setupOf({ n: 9, schedule: 'five' }));
+  endMatch(env.view, 8);
+  const state = JSON.parse(env.data.get('vervanging.match.v1'));
+  const full = minutesSoFar(state);
+  assert.deepEqual(shown(minuteRows(env.view)), asText(full));
+  assert.deepEqual(storedHistory(env.data).matches[0].seconds, JSON.parse(JSON.stringify(full)));
+  button(env.view, 'Ongedaan maken').fire('click');
+  assert.match(h1(env.view), /^Blok 8 van 8/);
+  const lastPlaying = JSON.parse(env.data.get('vervanging.match.v1'));
+  assert.deepEqual(shown(minuteRows(env.view)), asText(minutesSoFar({ ...lastPlaying, block: 7 })),
+    'back in the last block, it is not counted until the match ends');
+});
+
+test('minutes so far: a starter taken uit keeps the block once it is played; the replacement does not get it', () => {
+  const { view, setup } = open();
+  const { grid } = setup.plan;
+  const starter = grid[0][0];
+  rowButton(view, starter, 'Uit').fire('click');
+  const replacement = numbers(listOf(view, 'court')).find((p) => !grid[0].includes(p));
+  assert.equal(shown(minuteRows(view))[starter], '0:00', 'block 1 is not finished yet');
+  wisselButton(view).fire('click');
+  assert.equal(shown(minuteRows(view))[starter], '3:20', 'the block counts for the starter (as the screen says)');
+  assert.equal(shown(overviewCells(view))[starter], '3:20');
+  assert.equal(shown(minuteRows(view))[replacement], '0:00', 'the replacement is not credited for block 1');
+});
+
+test('minutes so far: an Extra minuten block counts once it is played', () => {
+  const { view, setup } = open();
+  const { grid } = setup.plan;
+  const keep = grid[0].filter((p) => !grid[1].includes(p))[0];
+  chips(view, 'In the zone')[0].fire('click');
+  chips(view, 'Extra minuten (niet teruggeven)')[0].fire('click');
+  wisselButton(view).fire('click');
+  assert.deepEqual(numbers(listOf(view, 'court')).includes(keep), true, 'kept on for block 2');
+  assert.equal(shown(minuteRows(view))[keep], '3:20', 'only block 1 is finished');
+  wisselButton(view).fire('click');
+  assert.equal(shown(minuteRows(view))[keep], '6:40', 'the extra block counts after it is played');
+  assert.equal(shown(overviewCells(view))[keep], '6:40');
 });
