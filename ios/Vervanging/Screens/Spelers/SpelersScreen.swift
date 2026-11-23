@@ -44,8 +44,9 @@ struct SpelersScreen: View {
                     .accessibilityIdentifier("spelers.full")
             } else {
                 TextField("Voornaam", text: $name)
-                    // Autocorrect off, and with it the system's default spellcheck, so a name such as Fien or Lien
-                    // stays as typed (as in the web app, #61).
+                    // Autocorrect off, so a name such as Fien or Lien stays as typed (as in the web app, #61).
+                    // ⚠ Spellcheck is left at the system default, which UIKit documents as on only while autocorrect
+                    // is on; SwiftUI has no spellcheck modifier and a UI test cannot read the setting.
                     .autocorrectionDisabled(true)
                     .textInputAutocapitalization(.words)
                     .textContentType(nil)
