@@ -297,7 +297,7 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
       plan = makePlan({ players: ids, start, schedule, seed, extraPriority: priority, moves });
     } catch (error) {
       if (!(error instanceof PlanError)) throw error;
-      message = 'Er kon geen plan gemaakt worden. Probeer "Ander plan".';
+      message = 'Er kon geen plan gemaakt worden. Probeer „Ander plan”.';
     }
   }
 

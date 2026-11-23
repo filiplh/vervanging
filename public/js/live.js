@@ -4,7 +4,7 @@
 // saved setup shows a Dutch message instead of breaking the page.
 
 import { el, normaliseMatchSetup, formatSeconds, byNumber } from './setup.js';
-import { SCHEDULES } from './planner.js';
+import { SCHEDULES, ON_COURT } from './planner.js';
 import {
   startMatch, wissel, undo, uit, terug, canUndo, onCourt, nextChange, subTime, quarterOf, minutesSoFar, extraSeconds,
   normaliseMatchState, proposedBench, replacements, minutesOverview, MatchError,
@@ -12,6 +12,18 @@ import {
 import { normaliseHistory, recordMatch, forgetMatch, hasMatch, startedAfterClear } from './history.js';
 
 const SAVE_FAILED = 'Opslaan lukte niet: de browser weigert opslag.';
+
+// A refused action says why when the reason helps the coach (#62, the owner's wording of 2026-11-23). The engine's
+// MatchError messages are matched whole, built from the same constant (ON_COURT) the engine uses, so another refusal
+// that merely shares words never gets a wrong reason; anything else keeps the plain line.
+const REFUSED = 'Dat kan nu niet.';
+const REFUSAL_REASONS = new Map([
+  [`at least ${ON_COURT} players must be available`, `Dat kan nu niet: er moeten minstens ${ON_COURT} spelers overblijven.`],
+  ['no block left: this is the last block', 'Dat kan nu niet: dit is het laatste blok.'],
+]);
+export function refusalText(error) {
+  return REFUSAL_REASONS.get(error?.message) ?? REFUSED;
+}
 
 // The Dutch line for when the current block ends: "Wissel op 6:40", "Einde kwart" or, in the last block, "Laatste blok"
 // ("Einde match" is the end screen's heading and the button's label, so the line does not say it while play goes on).
@@ -176,7 +188,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
       }
     } catch (error) {
       if (!(error instanceof MatchError)) throw error;
-      message = 'Dat kan nu niet.';
+      message = refusalText(error);
     }
     zone = null;
     render();
@@ -318,7 +330,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
           el('div', {}, el('h3', {}, 'Eruit'), change.off.length
             ? nameList(change.off, 'off', (id) => !isOut(id) && el('button', {
               type: 'button', className: 'chip', 'aria-pressed': zone && zone.keep === id ? 'true' : 'false',
-              onclick: () => toggleZone(id),
+              onclick: () => toggleZone(id), lang: 'en',
             }, 'In the zone'))
             : el('p', { className: 'note' }, 'Niemand')),
           el('div', {}, el('h3', {}, 'Erin'), change.on.length
@@ -330,7 +342,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
         zone && el('div', { className: 'zone-note' },
           zone.extra
             ? el('p', {}, name(zone.keep), ' speelt een extra blok (extra minuten, niet teruggegeven), ', name(zone.bench), ' blijft op de bank.')
-            : el('p', {}, name(zone.keep), ' blijft in the zone op het veld, ', name(zone.bench), ' blijft op de bank.'),
+            : el('p', {}, name(zone.keep), ' blijft ', el('span', { lang: 'en' }, 'in the zone'), ' op het veld, ', name(zone.bench), ' blijft op de bank.'),
           extraToggle = el('button', {
             type: 'button', className: 'chip extra', 'aria-pressed': zone.extra ? 'true' : 'false', onclick: toggleExtra,
           }, 'Extra minuten (niet teruggeven)'))),

@@ -4,8 +4,10 @@ import { readFileSync } from 'node:fs';
 import { createStore } from './store.js';
 import { formatSeconds } from './setup.js';
 import { makePlan } from './planner.js';
-import { startMatch, wissel, uit, onCourt, minutesSoFar } from './match.js';
-import { liveScreen, subTimeText, planOf, restoreMatch, syncHistory, createWakeLock, DOUBLE_TAP_MS } from './live.js';
+import { startMatch, wissel, uit, terug, onCourt, minutesSoFar, MatchError } from './match.js';
+import {
+  liveScreen, subTimeText, planOf, restoreMatch, syncHistory, createWakeLock, DOUBLE_TAP_MS, refusalText,
+} from './live.js';
 
 // ---------- test doubles: in-memory localStorage and a minimal DOM (no dependency) ----------
 
@@ -908,7 +910,7 @@ test('confirmation: errors keep their own text, never a confirmation', () => {
   for (const id of [6, 7, 8]) rowButton(view, id, 'Uit').fire('click');
   assert.equal(messageText(view), '#8 Speler8 uit.');
   rowButton(view, 5, 'Uit').fire('click');
-  assert.equal(messageText(view), 'Dat kan nu niet.');
+  assert.equal(messageText(view), 'Dat kan nu niet: er moeten minstens 5 spelers overblijven.');
   assert.equal(messageOf(view).attrs.role, 'alert');
 
   // A refused write: the save-failed message, not the confirmation line.
@@ -1083,4 +1085,54 @@ test('minutes so far: an Extra minuten block counts once it is played', () => {
   wisselButton(view).fire('click');
   assert.equal(shown(minuteRows(view))[keep], '6:40', 'the extra block counts after it is played');
   assert.equal(shown(overviewCells(view))[keep], '6:40');
+});
+
+// ---------- small copy and markup points (#62, P3-10 in docs/spikes/2026-ui-review.md) ----------
+
+test('live screen: "In the zone" is marked as English inside the Dutch page, on the buttons and in the zone note', () => {
+  const { view } = open();
+  const zoneButtons = chips(view, 'In the zone');
+  assert.ok(zoneButtons.length > 0);
+  for (const b of zoneButtons) assert.equal(b.attrs.lang, 'en', 'each In the zone button has lang="en"');
+  zoneButtons[0].fire('click');
+  assert.match(zoneText(view), /blijft in the zone op het veld/, 'the sentence reads as before');
+  const terms = find(zoneNote(view), 'span', (s) => s.text === 'in the zone');
+  assert.equal(terms.length, 1, 'the English term in the sentence is its own element');
+  assert.equal(terms[0].attrs.lang, 'en');
+  // Only the English words are marked: the Dutch sentence and the Dutch toggle keep the page language.
+  assert.equal(find(zoneNote(view), 'p')[0].attrs.lang, undefined);
+  assert.equal(chips(view, EXTRA)[0].attrs.lang, undefined);
+});
+
+test('refusal: Uit with five players left says why', () => {
+  const { view } = open(setupOf({ n: 6 }));
+  rowButton(view, 6, 'Uit').fire('click');
+  assert.equal(messageText(view), '#6 Speler6 uit.');
+  rowButton(view, 5, 'Uit').fire('click');
+  assert.equal(messageText(view), 'Dat kan nu niet: er moeten minstens 5 spelers overblijven.');
+  assert.equal(messageOf(view).attrs.role, 'alert');
+});
+
+test('refusal: the reason comes from the engine\'s own refusals, matched whole', () => {
+  const setup = setupOf();
+  let state = startMatch(planOf(setup), setup.savedAt);
+  // Uit until five are left: the engine's refusal for the next one.
+  for (const id of [6, 7, 8]) state = uit(state, id);
+  const tooFew = (() => { try { uit(state, 5); } catch (e) { return e; } })();
+  assert.ok(tooFew instanceof MatchError);
+  assert.equal(refusalText(tooFew), 'Dat kan nu niet: er moeten minstens 5 spelers overblijven.');
+
+  // Terug on the last block (the screen hides Terug there, so only the engine can show this refusal).
+  let last = uit(startMatch(planOf(setup), setup.savedAt), 8);
+  while (last.block < last.blocks) last = wissel(last);
+  const lastBlock = (() => { try { terug(last, 8); } catch (e) { return e; } })();
+  assert.ok(lastBlock instanceof MatchError);
+  assert.equal(refusalText(lastBlock), 'Dat kan nu niet: dit is het laatste blok.');
+
+  // Any other refusal keeps the plain line, also one that shares words with a mapped one.
+  const ended = (() => { try { wissel(last); return terug(wissel(last), 8); } catch (e) { return e; } })();
+  assert.ok(ended instanceof MatchError);
+  assert.equal(refusalText(ended), 'Dat kan nu niet.');
+  assert.equal(refusalText(new MatchError('no change left: this is the last block')), 'Dat kan nu niet.');
+  assert.equal(refusalText(new MatchError('at least 5 players must be available, really')), 'Dat kan nu niet.');
 });
