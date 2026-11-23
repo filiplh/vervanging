@@ -209,6 +209,35 @@ private func minutes(_ plan: Plan) -> [Int: Int] { Planner.planStats(plan).minut
         #expect(!h.has("e"))
     }
 
+    // Review of #121 (P2): escaped lone surrogates became U+FFFD, so "\ud800" and "\ud801" were one id and the later
+    // match replaced the earlier one, which changed the totals and the catch-up plan.
+    @Test func escapedLoneSurrogatesInIDsStayDistinctAsInJavaScript() throws {
+        let h = try History(json: #"{"matches":[{"id":"\ud800","seconds":{"1":200}},{"id":"\ud801","seconds":{"2":300}}]}"#)
+        #expect(h.matches.map(\.id) == [JSString(utf16: [0xD800]), JSString(utf16: [0xD801])])
+        #expect(h.seasonSummary().json == #"{"matches":2,"totals":{"1":200,"2":300}}"#)
+        #expect(h.has(JSString(utf16: [0xD800])) && !h.has("\u{FFFD}"))
+        #expect(h.recording(JSString(utf16: [0xD801]), seconds: ["3": 5]).matches.count == 2, "the same id replaces")
+        #expect(h.recording("\u{FFFD}", seconds: ["3": 5]).matches.count == 3, "U+FFFD is another id")
+    }
+
+    @Test func aLiteralAndAnEscapedFFFDAreOneIDApartFromALoneSurrogate() throws {
+        // What JSON.stringify(normaliseHistory(JSON.parse(text))) printed in Node: "�" and the literal U+FFFD are
+        // the same id (the later wins), "\ud800" is another; lone surrogates are written back escaped, pairs as they
+        // are.
+        let text = #"""
+            {"clearedAt":null,"matches":[{"id":"\ud800","seconds":{"1":1}},{"id":"�","seconds":{"1":2}},
+            {"id":"\udc00\ud800x😀","seconds":{"1":4}},{"id":"�","seconds":{"1":3}}]}
+            """#
+        let h = try History(json: text)
+        #expect(h.json == #"""
+            {"useHistory":false,"clearedAt":null,"matches":[{"id":"\ud800","seconds":{"1":1}},\#
+            {"id":"\udc00\ud800x😀","seconds":{"1":4}},{"id":"�","seconds":{"1":3}}]}
+            """#)
+        #expect(try History(json: h.json) == h)
+        #expect(h.matches.map(\.id) == [JSString(utf16: [0xD800]), JSString(utf16: [0xDC00, 0xD800, 0x78, 0xD83D, 0xDE00]),
+                                        JSString(utf16: [0xFFFD])])
+    }
+
     @Test func theStoredJSONIsWhatJSONStringifyWrites() throws {
         let h = try History(json: """
             {"useHistory":true,"clearedAt":"2026-11-22T10:00:00.000Z",

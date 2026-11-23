@@ -18,11 +18,12 @@ import Foundation
 
 /// One finished match: seconds per player id, and the part of them earned through Extra minuten (nil when none).
 public struct HistoryMatch: Equatable, Sendable {
-    public var id: String
+    /// The id with its UTF-16 code units exactly as stored, so two ids are the same match only when JavaScript says so.
+    public var id: JSString
     public var seconds: JSObject<Double>
     public var extra: JSObject<Double>?
 
-    public init(id: String, seconds: JSObject<Double>, extra: JSObject<Double>? = nil) {
+    public init(id: JSString, seconds: JSObject<Double>, extra: JSObject<Double>? = nil) {
         self.id = id
         self.seconds = seconds
         self.extra = extra
@@ -76,14 +77,17 @@ public struct History: Equatable, Sendable {
         var history = History()
         guard case .object = raw else { return history }
         history.useHistory = raw["useHistory"] == .bool(true)
-        if case .string(let text)? = raw["clearedAt"], javaScriptISOTime(text) != nil { history.clearedAt = text }
+        // A text Date.parse takes is ASCII, so it is the same as a Swift String.
+        if case .string(let text)? = raw["clearedAt"], javaScriptISOTime(text.string) != nil {
+            history.clearedAt = text.string
+        }
         guard case .array(let entries)? = raw["matches"] else { return history }
         for entry in entries {
             guard case .string(let id)? = entry["id"], !id.isEmpty else { continue }
             guard case .object(let seconds)? = entry["seconds"] else { continue }
             let clean = cleanSeconds(seconds)
             let extra = cleanExtra(entry["extra"], clean)
-            history.matches.removeAll { sameCodeUnits($0.id, id) }
+            history.matches.removeAll { $0.id == id }
             history.matches.append(HistoryMatch(id: id, seconds: clean, extra: extra.isEmpty ? nil : extra))
         }
         return history
@@ -101,24 +105,24 @@ public struct History: Equatable, Sendable {
 
     /// The history with this match's seconds recorded under `id`, replacing an earlier entry for the same match.
     /// `extra` holds the seconds each player got through Extra minuten (`recordMatch`).
-    public func recording(_ id: String, seconds: JSObject<Double>, extra: JSObject<Double> = [:]) -> History {
+    public func recording(_ id: JSString, seconds: JSObject<Double>, extra: JSObject<Double> = [:]) -> History {
         let clean = History.cleanSeconds(seconds)
         let extraClean = History.cleanExtra(extra, clean)
         var history = self
-        history.matches.removeAll { sameCodeUnits($0.id, id) }
+        history.matches.removeAll { $0.id == id }
         history.matches.append(HistoryMatch(id: id, seconds: clean, extra: extraClean.isEmpty ? nil : extraClean))
         return history
     }
 
     /// `forgetMatch`.
-    public func forgetting(_ id: String) -> History {
+    public func forgetting(_ id: JSString) -> History {
         var history = self
-        history.matches.removeAll { sameCodeUnits($0.id, id) }
+        history.matches.removeAll { $0.id == id }
         return history
     }
 
     /// `hasMatch`.
-    public func has(_ id: String) -> Bool { matches.contains { sameCodeUnits($0.id, id) } }
+    public func has(_ id: JSString) -> Bool { matches.contains { $0.id == id } }
 
     /// "Wis geschiedenis" (`clearHistory`): no matches left, and `now` (an ISO time) remembered as the moment of
     /// clearing; the switch keeps its setting.
@@ -233,7 +237,7 @@ public struct History: Equatable, Sendable {
         return cleanExtra(cleanSeconds(object), seconds)
     }
 
-    static func isPlayerID(_ id: String) -> Bool {
-        !id.isEmpty && id.utf8.allSatisfy { (0x30...0x39).contains($0) }
+    static func isPlayerID(_ id: JSString) -> Bool {
+        !id.isEmpty && id.utf16.allSatisfy { (0x30...0x39).contains($0) }
     }
 }

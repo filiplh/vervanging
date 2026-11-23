@@ -95,6 +95,29 @@ private func invalid(_ message: String) -> SimRun { SimRun(status: 2, stdout: ""
         #expect(try sim(base + ["--history", "scripts/fixtures/history-catchup.json", "--use-history"]) != plain)
     }
 
+    // Review of #121 (P2): the reviewer's reproducer. Swift printed one match and gave player 1 the extra block that
+    // Node gives player 11.
+    @Test func distinctLoneSurrogateIDsAreTwoMatchesForHistoryAndCatchUp() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vervanging-surrogates-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("history.json")
+        try Data(#"{"matches":[{"id":"\ud800","seconds":{"1":200}},{"id":"\ud801","seconds":{"2":300}}]}"#.utf8)
+            .write(to: file)
+
+        #expect(try sim(["history", "--history", file.path, "--json"])
+            == SimRun(status: 0, stdout: "{\"matches\":2,\"totals\":{\"1\":200,\"2\":300}}\n", stderr: ""))
+        #expect(try sim(["plan", "--players", "11", "--start", "9,7,6,3,8", "--schedule", "five", "--seed", "3993809586",
+                         "--history", file.path, "--use-history", "--json"]) == SimRun(status: 0, stdout: """
+            {"blocks":8,"blockSeconds":300,"grid":[[3,6,7,8,9],[5,7,8,9,11],[1,4,5,7,11],[1,2,4,10,11],[2,3,4,6,10],\
+            [6,7,8,9,10],[3,5,6,8,9],[1,3,4,5,11]],"minutes":{"1":900,"2":600,"3":1200,"4":1200,"5":1200,"6":1200,\
+            "7":1200,"8":1200,"9":1200,"10":900,"11":1200},"subsPerChange":[2,2,2,2,3,2,3],"longestBenchSeconds":900,\
+            "sitLimitRelaxed":false}
+
+            """, stderr: ""))
+    }
+
     // Validation of #119 ("Also seen"): an unreadable example dropped out of the count, so the last line read as a
     // full match.
     @Test func checkExamplesCountsAnUnreadableExampleAsAMismatch() throws {

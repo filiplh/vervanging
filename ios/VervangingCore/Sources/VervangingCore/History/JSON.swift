@@ -2,62 +2,79 @@ import Foundation
 
 // What the history needs of JavaScript's JSON and objects (public/js/history.js stores its value with JSON.stringify
 // and reads it back with JSON.parse), so the Swift history reads the same files and gives the same totals in the same
-// key order as the web app (ADR-003). Strings are compared by their UTF-16 code units, as JavaScript compares them:
-// Swift's `==` on String would also call canonically equivalent texts equal ("é" and "e" + U+0301).
+// key order as the web app (ADR-003). Strings read from JSON keep their UTF-16 code units (JSString) and are compared
+// by them, as JavaScript compares strings.
 
-/// A key compared by its UTF-16 code units, as a JavaScript property key is.
-struct CodeUnitKey: Hashable, Sendable {
-    let units: [UInt16]
-    init(_ text: String) { units = Array(text.utf16) }
+/// A JavaScript string: its UTF-16 code units, kept exactly, a lone surrogate (half of a UTF-16 pair) included.
+/// Equal when the code units are equal, as JavaScript compares strings. A Swift String cannot hold a lone surrogate,
+/// and its `==` would also call canonically equivalent texts equal ("é" and "e" + U+0301), so ids read from JSON
+/// stay in this form.
+public struct JSString: Hashable, Sendable, ExpressibleByStringLiteral, CustomStringConvertible {
+    public let utf16: [UInt16]
+
+    public init(_ text: String) { utf16 = Array(text.utf16) }
+    public init(utf16: [UInt16]) { self.utf16 = utf16 }
+    public init(stringLiteral value: String) { self.init(value) }
+
+    public var isEmpty: Bool { utf16.isEmpty }
+
+    /// The text as a Swift String, with U+FFFD for each lone surrogate: for showing, never for comparing.
+    public var string: String { String(decoding: utf16, as: UTF16.self) }
+    public var description: String { string }
 }
-
-/// True when `a` and `b` are the same JavaScript string: the same UTF-16 code units.
-func sameCodeUnits(_ a: String, _ b: String) -> Bool { a.utf16.elementsEqual(b.utf16) }
 
 /// True when `key` is an array index (a whole number from 0 to 2^32 − 2 written without leading zeros). A JavaScript
 /// object lists those keys first, in ascending order, and its other keys after them in the order they were added.
-func isArrayIndex(_ key: String) -> Bool {
-    let units = Array(key.utf8)
+func isArrayIndex(_ key: JSString) -> Bool {
+    let units = key.utf16
     guard !units.isEmpty, units.count <= 10, units.allSatisfy({ (0x30...0x39).contains($0) }) else { return false }
     if units.count > 1 && units[0] == 0x30 { return false }
-    return UInt64(key)! <= 4_294_967_294
+    return arrayIndexValue(key) <= 4_294_967_294
 }
+
+/// The number an all-digit key spells (at most ten digits, so it fits).
+private func arrayIndexValue(_ key: JSString) -> UInt64 { key.utf16.reduce(0) { $0 * 10 + UInt64($1 - 0x30) } }
 
 /// An object with JavaScript's key order: array-index keys first in ascending order, then the other keys in the order
 /// they were first added. Setting a key that is already there changes its value and keeps its place, as in
 /// JavaScript. Equality ignores the order, as `assert.deepStrictEqual` does.
 public struct JSObject<Value>: Sendable where Value: Sendable {
-    private var insertionKeys: [String] = []
+    private var insertionKeys: [JSString] = []
     private var values: [Value] = []
-    private var positions: [CodeUnitKey: Int] = [:]
+    private var positions: [JSString: Int] = [:]
 
     public init() {}
 
-    public subscript(key: String) -> Value? {
-        get { positions[CodeUnitKey(key)].map { values[$0] } }
+    public subscript(key: JSString) -> Value? {
+        get { positions[key].map { values[$0] } }
         set {
             guard let newValue else { preconditionFailure("JSObject keys are never removed") }
-            if let at = positions[CodeUnitKey(key)] {
+            if let at = positions[key] {
                 values[at] = newValue
             } else {
-                positions[CodeUnitKey(key)] = values.count
+                positions[key] = values.count
                 insertionKeys.append(key)
                 values.append(newValue)
             }
         }
     }
 
+    public subscript(key: String) -> Value? {
+        get { self[JSString(key)] }
+        set { self[JSString(key)] = newValue }
+    }
+
     public var count: Int { values.count }
     public var isEmpty: Bool { values.isEmpty }
 
     /// The keys in the order `Object.keys` gives them.
-    public var keys: [String] {
-        let indices = insertionKeys.filter(isArrayIndex).sorted { UInt64($0)! < UInt64($1)! }
+    public var keys: [JSString] {
+        let indices = insertionKeys.filter(isArrayIndex).sorted { arrayIndexValue($0) < arrayIndexValue($1) }
         return indices + insertionKeys.filter { !isArrayIndex($0) }
     }
 
     /// The entries in the order `Object.entries` gives them.
-    public var entries: [(key: String, value: Value)] { keys.map { ($0, self[$0]!) } }
+    public var entries: [(key: JSString, value: Value)] { keys.map { ($0, values[positions[$0]!]) } }
 }
 
 extension JSObject: ExpressibleByDictionaryLiteral {
@@ -75,7 +92,7 @@ extension JSObject: Equatable where Value: Equatable {
 
 extension JSObject: CustomStringConvertible {
     public var description: String {
-        "[" + entries.map { "\"\($0.key)\": \($0.value)" }.joined(separator: ", ") + "]"
+        "[" + entries.map { "\"\($0.key.string)\": \($0.value)" }.joined(separator: ", ") + "]"
     }
 }
 
@@ -85,7 +102,7 @@ indirect enum JSONValue: Equatable, Sendable {
     case null
     case bool(Bool)
     case number(Double)
-    case string(String)
+    case string(JSString)
     case array([JSONValue])
     case object(JSObject<JSONValue>)
     case deeper(isArray: Bool)
@@ -106,9 +123,8 @@ extension JSONValue {
     /// later duplicate key replaces the value and keeps the first place. Arrays and objects nested `keep` levels deep
     /// or more are checked but not kept (`.deeper`). The parser keeps its own stack, so any nesting depth that
     /// JSON.parse reads is read here too, without running out of call stack.
-    ///
-    /// ⚠ A `\u` escape of a lone surrogate (half of a UTF-16 pair) becomes U+FFFD here, where JavaScript keeps the lone
-    /// code unit: two texts that differ only there would read as the same. The web app never writes one.
+    /// Strings and keys keep their UTF-16 code units exactly, so a `\u` escape of a lone surrogate stays that code
+    /// unit, as in JavaScript.
     static func parse(_ text: String, keep: Int) throws(NotJSON) -> JSONValue {
         var parser = JSONParser(units: Array(text.utf16), keep: keep)
         return try parser.parse()
@@ -125,7 +141,7 @@ private struct JSONParser {
         let kept: Bool
         var elements: [JSONValue] = []
         var object = JSObject<JSONValue>()
-        var key = ""
+        var key = JSString(utf16: [])
     }
 
     init(units: [UInt16], keep: Int) {
@@ -216,7 +232,7 @@ private struct JSONParser {
         for unit in word.utf16 { try expect(unit) }
     }
 
-    private mutating func readString() throws(NotJSON) -> String {
+    private mutating func readString() throws(NotJSON) -> JSString {
         pos += 1 // the opening quote
         var out: [UInt16] = []
         while true {
@@ -224,7 +240,7 @@ private struct JSONParser {
             let unit = units[pos]
             pos += 1
             switch unit {
-            case 0x22: return String(decoding: out, as: UTF16.self)
+            case 0x22: return JSString(utf16: out)
             case 0x00...0x1F: throw NotJSON()
             case 0x5C: // backslash
                 guard pos < units.count else { throw NotJSON() }
@@ -289,27 +305,40 @@ private struct JSONParser {
 }
 
 /// JSON.stringify of a string (ECMAScript QuoteJSONString): `"` and `\` escaped, the short escapes for backspace,
-/// tab, line feed, form feed and carriage return, `\u00xx` (lower-case hex) for the other control characters, and
-/// everything else as it is. A Swift string holds no lone surrogate, so the escape for one is never needed.
-func javaScriptQuoted(_ text: String) -> String {
-    var out = "\""
-    for scalar in text.unicodeScalars {
-        switch scalar {
-        case "\"": out += "\\\""
-        case "\\": out += "\\\\"
-        case "\u{08}": out += "\\b"
-        case "\u{09}": out += "\\t"
-        case "\u{0A}": out += "\\n"
-        case "\u{0C}": out += "\\f"
-        case "\u{0D}": out += "\\r"
-        case "\u{00}"..."\u{1F}":
-            let hex = String(scalar.value, radix: 16)
-            out += "\\u" + String(repeating: "0", count: 4 - hex.count) + hex
-        default: out.unicodeScalars.append(scalar)
-        }
+/// tab, line feed, form feed and carriage return, `\u00xx` (lower-case hex) for the other control characters and
+/// `\udxxx` for a lone surrogate, and everything else as it is.
+func javaScriptQuoted(_ text: JSString) -> String {
+    func escape(_ unit: UInt16) -> [UInt16] {
+        let hex = String(unit, radix: 16)
+        return Array(("\\u" + String(repeating: "0", count: 4 - hex.count) + hex).utf16)
     }
-    return out + "\""
+    let units = text.utf16
+    var out: [UInt16] = [0x22]
+    var i = 0
+    while i < units.count {
+        let unit = units[i]
+        switch unit {
+        case 0x22: out += [0x5C, 0x22]
+        case 0x5C: out += [0x5C, 0x5C]
+        case 0x08: out += [0x5C, 0x62]
+        case 0x09: out += [0x5C, 0x74]
+        case 0x0A: out += [0x5C, 0x6E]
+        case 0x0C: out += [0x5C, 0x66]
+        case 0x0D: out += [0x5C, 0x72]
+        case 0x00...0x1F: out += escape(unit)
+        case 0xD800...0xDBFF where i + 1 < units.count && (0xDC00...0xDFFF).contains(units[i + 1]):
+            out += [unit, units[i + 1]]
+            i += 1
+        case 0xD800...0xDFFF: out += escape(unit)
+        default: out.append(unit)
+        }
+        i += 1
+    }
+    out.append(0x22)
+    return String(decoding: out, as: UTF16.self) // well formed now: every lone surrogate is escaped
 }
+
+func javaScriptQuoted(_ text: String) -> String { javaScriptQuoted(JSString(text)) }
 
 /// JSON.stringify of a number: its JavaScript text, or `null` for NaN and ±Infinity.
 func javaScriptJSONNumber(_ value: Double) -> String { value.isFinite ? value.javaScriptString : "null" }
