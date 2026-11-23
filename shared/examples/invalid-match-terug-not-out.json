@@ -1,0 +1,21 @@
+{
+  "name": "invalid-match-terug-not-out",
+  "kind": "match",
+  "actions": [
+    "terug"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--actions",
+    "terug=1"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: player 1 is not out\n"
+}

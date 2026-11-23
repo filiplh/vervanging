@@ -1,0 +1,22 @@
+{
+  "name": "invalid-match-keep-not-due-off",
+  "kind": "match",
+  "actions": [
+    "keep",
+    "wissel"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--actions",
+    "wissel:keep=10"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: player 10 is not due off at this change\n"
+}

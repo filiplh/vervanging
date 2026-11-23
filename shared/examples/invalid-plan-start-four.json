@@ -1,0 +1,17 @@
+{
+  "name": "invalid-plan-start-four",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4",
+    "--schedule",
+    "equal"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: the starting five must have 5 different players\n"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "history-reward",
+  "kind": "history",
+  "actions": [],
+  "args": [
+    "history",
+    "--history",
+    "scripts/fixtures/history-reward.json"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"matches\":3,\"totals\":{\"1\":3000,\"2\":3000,\"3\":3000,\"4\":3000,\"5\":3200,\"6\":3000,\"7\":3000,\"8\":3000,\"9\":3000,\"10\":3000,\"11\":3000,\"12\":3000}}\n",
+  "stderr": ""
+}

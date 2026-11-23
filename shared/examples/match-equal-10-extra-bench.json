@@ -1,0 +1,24 @@
+{
+  "name": "match-equal-10-extra-bench",
+  "kind": "match",
+  "actions": [
+    "bench",
+    "extra",
+    "keep",
+    "wissel"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--actions",
+    "wissel:keep=4:extra:bench=8"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"block\":2,\"blocks\":12,\"ended\":false,\"onCourt\":[1,2,3,4,10],\"minutes\":{\"1\":400,\"2\":400,\"3\":400,\"4\":400,\"5\":200,\"6\":0,\"7\":0,\"8\":0,\"9\":0,\"10\":200},\"extraSeconds\":{\"1\":0,\"2\":0,\"3\":0,\"4\":200,\"5\":0,\"6\":0,\"7\":0,\"8\":0,\"9\":0,\"10\":0},\"overview\":[{\"player\":1,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":2,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":3,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":4,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":5,\"seconds\":200,\"onCourt\":false,\"out\":false},{\"player\":6,\"seconds\":0,\"onCourt\":false,\"out\":false},{\"player\":7,\"seconds\":0,\"onCourt\":false,\"out\":false},{\"player\":8,\"seconds\":0,\"onCourt\":false,\"out\":false},{\"player\":9,\"seconds\":0,\"onCourt\":false,\"out\":false},{\"player\":10,\"seconds\":200,\"onCourt\":true,\"out\":false}]}\n",
+  "stderr": ""
+}

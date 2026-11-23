@@ -1,0 +1,13 @@
+{
+  "name": "history-sample",
+  "kind": "history",
+  "actions": [],
+  "args": [
+    "history",
+    "--history",
+    "scripts/fixtures/history-sample.json"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"matches\":2,\"totals\":{\"1\":0,\"2\":0,\"3\":0,\"4\":0,\"5\":3000,\"6\":3000,\"7\":3000,\"8\":3000,\"9\":3000,\"10\":3000,\"11\":3000,\"12\":3000}}\n",
+  "stderr": ""
+}

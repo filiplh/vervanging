@@ -1,0 +1,13 @@
+{
+  "name": "invalid-history-missing-file",
+  "kind": "history",
+  "actions": [],
+  "args": [
+    "history",
+    "--history",
+    "scripts/fixtures/does-not-exist.json"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: cannot read the history file \"scripts/fixtures/does-not-exist.json\" (ENOENT)\n"
+}
