@@ -191,8 +191,16 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   const terugLine = (id) => () => `${label(id)} terug vanaf het volgende blok.`;
   const undoLine = () => 'Ongedaan gemaakt.';
 
-  function toggleZone(keep, extra = false) {
-    zone = zone && zone.keep === keep && zone.extra === extra ? null : { keep, bench: proposedBench(state), extra };
+  // In the zone on a row chooses that player, or cancels the choice when the player was already chosen (also after
+  // switching to Extra minuten). Extra minuten is only a toggle in the zone note, for the chosen player: it keeps the
+  // bench player, so switching to it and back changes nothing else (#52, P2-4 in docs/spikes/2026-ui-review.md).
+  function toggleZone(keep) {
+    zone = zone && zone.keep === keep ? null : { keep, bench: proposedBench(state), extra: false };
+    render();
+  }
+
+  function toggleExtra() {
+    if (zone) zone = { ...zone, extra: !zone.extra };
     render();
   }
 
@@ -206,7 +214,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
     return el('span', { className: 'player' }, el('span', { className: 'number' }, `#${p.number}`), ' ', p.name);
   };
   const sortedPlayers = (ids) => ids.map((id) => byId.get(id)).sort(byNumber).map((p) => p.id);
-  // A row with buttons (In the zone, Extra minuten, Op de bank) puts the name on its own line and the buttons under
+  // A row with buttons (In the zone, Op de bank) puts the name on its own line and the buttons under
   // it, so the name is never squeezed to nothing in a half-width column (#46).
   const nameList = (ids, className, extra = () => null) => el('ul', { className: `names ${className}` },
     sortedPlayers(ids).map((id) => {
@@ -276,16 +284,10 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
         el('h2', { id: 'h-next' }, 'Bij de volgende wissel'),
         el('div', { className: 'change' },
           el('div', {}, el('h3', {}, 'Eruit'), change.off.length
-            ? nameList(change.off, 'off', (id) => !isOut(id) && [
-              el('button', {
-                type: 'button', className: 'chip', 'aria-pressed': zone && zone.keep === id && !zone.extra ? 'true' : 'false',
-                onclick: () => toggleZone(id, false),
-              }, 'In the zone'),
-              el('button', {
-                type: 'button', className: 'chip extra', 'aria-pressed': zone && zone.keep === id && zone.extra ? 'true' : 'false',
-                onclick: () => toggleZone(id, true),
-              }, 'Extra minuten'),
-            ])
+            ? nameList(change.off, 'off', (id) => !isOut(id) && el('button', {
+              type: 'button', className: 'chip', 'aria-pressed': zone && zone.keep === id ? 'true' : 'false',
+              onclick: () => toggleZone(id),
+            }, 'In the zone'))
             : el('p', { className: 'note' }, 'Niemand')),
           el('div', {}, el('h3', {}, 'Erin'), change.on.length
             ? nameList(change.on, 'on', (id) => zone && el('button', {
@@ -293,11 +295,13 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
               onclick: () => chooseBench(id),
             }, 'Op de bank'))
             : el('p', { className: 'note' }, 'Niemand'))),
-        zone && (zone.extra
-          ? el('p', { className: 'zone-note' },
-            name(zone.keep), ' speelt een extra blok (extra minuten, niet teruggegeven), ', name(zone.bench), ' blijft op de bank.')
-          : el('p', { className: 'zone-note' },
-            name(zone.keep), ' blijft in the zone op het veld, ', name(zone.bench), ' blijft op de bank.'))),
+        zone && el('div', { className: 'zone-note' },
+          zone.extra
+            ? el('p', {}, name(zone.keep), ' speelt een extra blok (extra minuten, niet teruggegeven), ', name(zone.bench), ' blijft op de bank.')
+            : el('p', {}, name(zone.keep), ' blijft in the zone op het veld, ', name(zone.bench), ' blijft op de bank.'),
+          el('button', {
+            type: 'button', className: 'chip extra', 'aria-pressed': zone.extra ? 'true' : 'false', onclick: toggleExtra,
+          }, 'Extra minuten (niet teruggeven)'))),
       status(),
       el('div', { className: 'live-actions' },
         el('button', {

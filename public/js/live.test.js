@@ -591,19 +591,100 @@ test('live screen: keeps the screen awake while the match runs, not after the en
   assert.deepEqual(missing, [false], 'no match: not kept awake');
 });
 
-test('live screen: Extra minuten next to In the zone; the note says the block is not given back', () => {
+// ---------- Extra minuten behind In the zone (#52, P2-4 in docs/spikes/2026-ui-review.md) ----------
+
+const EXTRA = 'Extra minuten (niet teruggeven)';
+const zoneNote = (view) => find(view, 'div', (d) => d.className === 'zone-note')[0];
+const zoneText = (view) => find(zoneNote(view), 'p')[0].text;
+const pressed = (b) => b.attrs['aria-pressed'] === 'true';
+
+test('live screen: Extra minuten shows only for the chosen player, as one toggle in the zone note', () => {
+  const { view, setup } = open();
+  const { grid } = setup.plan;
+  const off = grid[0].filter((p) => !grid[1].includes(p));
+  assert.equal(chips(view, 'In the zone').length, off.length);
+  assert.equal(find(view, 'button', (b) => /Extra minuten/.test(b.text)).length, 0, 'no Extra minuten before a choice');
+  assert.equal(zoneNote(view), undefined);
+  chips(view, 'In the zone')[1].fire('click');
+  const extra = find(view, 'button', (b) => /Extra minuten/.test(b.text));
+  assert.equal(extra.length, 1, 'one Extra minuten toggle, for the chosen player only');
+  assert.equal(extra[0].text, EXTRA);
+  assert.ok(find(zoneNote(view), 'button').includes(extra[0]), 'the toggle sits in the zone note');
+  assert.equal(pressed(extra[0]), false, 'In the zone is the choice until the coach turns Extra minuten on');
+  assert.match(zoneText(view), /blijft in the zone op het veld/);
+  for (const ul of [listOf(view, 'off'), listOf(view, 'on')]) {
+    assert.equal(find(ul, 'button', (b) => /Extra minuten/.test(b.text)).length, 0, 'never on a row');
+  }
+});
+
+test('live screen: In the zone, then Extra minuten and back, keeps the player and the bench player', () => {
   const { view, setup, data } = open();
   const { grid } = setup.plan;
   const off = grid[0].filter((p) => !grid[1].includes(p));
-  assert.equal(chips(view, 'Extra minuten').length, off.length);
-  chips(view, 'Extra minuten')[0].fire('click');
-  assert.equal(chips(view, 'Extra minuten')[0].attrs['aria-pressed'], 'true');
-  assert.match(find(view, 'p', (p) => p.className === 'zone-note')[0].text, /extra minuten, niet teruggegeven/);
+  chips(view, 'In the zone')[0].fire('click');
+  const bench = chips(view, 'Op de bank');
+  const other = bench.findIndex((b) => !pressed(b));
+  if (other >= 0) bench[other].fire('click');
+  const benchChoice = () => chips(view, 'Op de bank').findIndex(pressed);
+  const chosenBench = benchChoice();
+
+  chips(view, EXTRA)[0].fire('click');
+  assert.equal(pressed(chips(view, EXTRA)[0]), true, 'switched to Extra minuten');
+  assert.equal(pressed(chips(view, 'In the zone')[0]), true, 'the same player stays chosen');
+  assert.equal(benchChoice(), chosenBench, 'the bench choice is kept');
+  assert.match(zoneText(view), /extra minuten, niet teruggegeven/);
+
+  chips(view, EXTRA)[0].fire('click');
+  assert.equal(pressed(chips(view, EXTRA)[0]), false, 'and back to In the zone');
+  assert.equal(benchChoice(), chosenBench);
+  assert.match(zoneText(view), /blijft in the zone op het veld/);
+  wisselButton(view).fire('click');
+  assert.deepEqual(JSON.parse(data.get('vervanging.match.v1')).extra, [], 'back to In the zone plays no extra minuten');
+  assert.ok(numbers(listOf(view, 'court')).includes(off[0]), 'the zone player stays on court');
+});
+
+test('live screen: Extra minuten plays an Extra minuten wissel as before, and undo takes it back', () => {
+  const { view, setup, data } = open();
+  const { grid } = setup.plan;
+  const off = grid[0].filter((p) => !grid[1].includes(p));
+  chips(view, 'In the zone')[0].fire('click');
+  chips(view, EXTRA)[0].fire('click');
   wisselButton(view).fire('click');
   const saved = JSON.parse(data.get('vervanging.match.v1'));
   assert.deepEqual(saved.extra, [off[0]]);
+  assert.ok(numbers(listOf(view, 'court')).includes(off[0]));
+  assert.equal(zoneNote(view), undefined, 'the choice is used up by the wissel');
   button(view, 'Ongedaan maken').fire('click');
   assert.deepEqual(JSON.parse(data.get('vervanging.match.v1')).extra, []);
+  assert.match(h1(view), /^Blok 1 van 12/);
+});
+
+test('live screen: tapping In the zone again cancels the choice, also after switching to Extra minuten', () => {
+  const { view, data } = open();
+  chips(view, 'In the zone')[0].fire('click');
+  chips(view, 'In the zone')[0].fire('click');
+  assert.equal(zoneNote(view), undefined, 'cancelled: no note, no toggle');
+  assert.equal(chips(view, 'Op de bank').length, 0);
+  assert.equal(chips(view, 'In the zone').filter(pressed).length, 0);
+
+  chips(view, 'In the zone')[0].fire('click');
+  chips(view, EXTRA)[0].fire('click');
+  chips(view, 'In the zone')[0].fire('click');
+  assert.equal(zoneNote(view), undefined, 'cancelled from Extra minuten too');
+  assert.equal(chips(view, EXTRA).length, 0);
+  wisselButton(view).fire('click');
+  const saved = JSON.parse(data.get('vervanging.match.v1'));
+  assert.deepEqual(saved.extra, [], 'the wissel after a cancel plays the plan');
+
+  // Choosing another player starts that player on In the zone, not on Extra minuten.
+  chips(view, 'In the zone')[0].fire('click');
+  chips(view, EXTRA)[0].fire('click');
+  if (chips(view, 'In the zone').length > 1) {
+    chips(view, 'In the zone')[1].fire('click');
+    assert.equal(pressed(chips(view, 'In the zone')[1]), true);
+    assert.equal(pressed(chips(view, 'In the zone')[0]), false);
+    assert.equal(pressed(chips(view, EXTRA)[0]), false, 'a new choice starts as In the zone');
+  }
 });
 
 // ---------- names next to the zone buttons (#46) ----------
@@ -616,7 +697,7 @@ const rows = (ul) => find(ul, 'li').map((li) => ({
   buttons: find(li, 'button').map((b) => b.text),
 }));
 
-test('live screen: every Eruit row shows the player\'s name on its own line above In the zone and Extra minuten', () => {
+test('live screen: every Eruit row shows the player\'s name on its own line above its one button, In the zone', () => {
   for (const n of [11, 15]) {
     const { view, setup } = open(setupOf({ n }));
     const byId = new Map(setup.players.map((p) => [p.id, p]));
@@ -628,7 +709,7 @@ test('live screen: every Eruit row shows the player\'s name on its own line abov
       const number = Number(find(row.first, 'span', (s) => s.className === 'number')[0].text.slice(1));
       assert.equal(row.first.text, `#${number} ${byId.get(number).name}`, 'the full name is in the row');
       assert.ok(row.chips, 'the buttons sit in their own group');
-      assert.deepEqual(find(row.chips, 'button').map((b) => b.text), ['In the zone', 'Extra minuten']);
+      assert.deepEqual(find(row.chips, 'button').map((b) => b.text), ['In the zone'], 'only In the zone on a row (#52)');
     }
     for (const row of rows(listOf(view, 'on'))) assert.equal(row.className, '', 'no wrap on Erin before a zone choice');
     chips(view, 'In the zone')[0].fire('click');
@@ -651,7 +732,7 @@ test('styles: a name row with buttons wraps, its name is never cut, and the butt
   assert.doesNotMatch(player, /flex-basis:\s*100%/, 'the name does not force the buttons onto a line of their own');
   assert.match(player, /flex:\s*1 1 auto/, 'the name is laid out at its full width before the buttons');
   const chip = rule('.names li .chips button.chip');
-  assert.match(chip, /padding:\s*0 6px/, 'narrow buttons, so In the zone and Extra minuten fit side by side');
+  assert.match(chip, /padding:\s*0 6px/, 'narrow buttons, so a button fits beside a short name');
   assert.match(chip, /font-size:\s*0\.8rem/);
   assert.match(chip, /margin-left:\s*0/);
   assert.doesNotMatch(chip, /min-height/, 'the buttons keep the 44 px tap height of button.chip');
@@ -722,7 +803,8 @@ test('history: a match with Extra minuten records the extra seconds apart', () =
   const { view, data, setup } = env;
   const { grid } = setup.plan;
   const off = grid[0].filter((p) => !grid[1].includes(p));
-  chips(view, 'Extra minuten')[0].fire('click');
+  chips(view, 'In the zone')[0].fire('click');
+  chips(view, 'Extra minuten (niet teruggeven)')[0].fire('click');
   wisselButton(view).fire('click');
   endMatch(view, 11);
   const stored = storedHistory(data);
