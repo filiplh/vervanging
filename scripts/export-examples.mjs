@@ -87,6 +87,9 @@ export const EXAMPLES = [
   // Invalid input: exit status 2, one line on stderr, nothing on stdout.
   ['invalid-plan-no-players', ['plan', '--start', '1,2,3,4,5', '--schedule', 'equal']],
   ['invalid-plan-unknown-schedule', ['plan', ...P(10, '1,2,3,4,5', 'six')]],
+  ['invalid-plan-schedule-constructor', ['plan', ...P(10, '1,2,3,4,5', 'constructor')]],
+  ['invalid-plan-schedule-tostring', ['plan', ...P(10, '1,2,3,4,5', 'toString')]],
+  ['invalid-plan-schedule-proto', ['plan', ...P(10, '1,2,3,4,5', '__proto__')]],
   ['invalid-plan-start-four', ['plan', ...P(10, '1,2,3,4', 'equal')]],
   ['invalid-plan-four-players', ['plan', ...P(4, '1,2,3,4', 'equal')]],
   ['invalid-plan-swap-one', ['plan', ...P(10, '1,2,3,4,5', 'equal', '--swap', '1')]],
