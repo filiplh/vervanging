@@ -139,3 +139,25 @@ test('makePlan moves: each [to, from] pair moves one block; a bad list is refuse
     assert.throws(() => makePlan({ players: range(12), start: [1, 2, 3, 4, 5], schedule: 'equal', moves }), PlanError, JSON.stringify(moves));
   }
 });
+
+// #41: when the plain plan only fits with the sit limit relaxed (the last search level), catch-up moves are tried
+// up to that level only; a move list that does not fit there gives no error.
+test('makePlan moves: when the plain plan relaxes the sit limit and no move fits, it is the plain plan', () => {
+  const base = { players: range(16), start: [1, 2, 14, 11, 4], schedule: 'five', seed: 3 };
+  const plain = makePlan(base);
+  assert.equal(plain.sitLimitRelaxed, true);
+  assert.deepEqual(makePlan({ ...base, moves: [[3, 5]] }), plain);
+});
+
+// The case from #40's review: priority and moves are what catchUp gives for scripts/fixtures/history-sit-relaxed.json
+// with these players, the five-minute schedule and seed 3. All four moves do not fit at the last level; the plan
+// takes the first three, which do.
+test('makePlan moves: when the plain plan relaxes the sit limit, it takes the moves from the front that still fit', () => {
+  const base = {
+    players: range(16), start: [15, 8, 16, 7, 13], schedule: 'five', seed: 3,
+    extraPriority: [14, 9, 4, 2, 5, 6, 10, 1, 3, 12, 11, 13, 7, 16, 8, 15],
+  };
+  assert.equal(makePlan(base).sitLimitRelaxed, true);
+  const moves = [[3, 15], [12, 8], [11, 16], [13, 7]];
+  assert.deepEqual(makePlan({ ...base, moves }), makePlan({ ...base, moves: moves.slice(0, 3) }));
+});
