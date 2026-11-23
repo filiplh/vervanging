@@ -564,6 +564,47 @@ test('setup screen: a first-ever Start, or one after a finished match and Nieuwe
   assert.equal(env.raw('matchSetup').schedule, 'five');
 });
 
+// "Terug naar de match" at the top of the setup screen while a match runs (#48, P1-2 in docs/spikes/2026-ui-review.md).
+const backLinks = (view) => find(view, 'a', (e) => e.text === 'Terug naar de match');
+function setupView(env) {
+  const view = new FakeElement('main');
+  setupScreen(view, { store: env.store, onStart() {} });
+  return view;
+}
+
+test('setup screen: "Terug naar de match" is the first thing under the title while a match runs, and leads to #start', () => {
+  const { env, live } = startedUntouched();
+  for (const tapped of [false, true]) {
+    if (tapped) tapWissel(live);
+    const view = setupView(env);
+    const links = backLinks(view);
+    assert.equal(links.length, 1, tapped ? 'saved match in play' : 'started, no tap yet');
+    assert.equal(links[0].attrs.href, '#start');
+    assert.ok(links[0].className.split(' ').includes('primary'), 'styled as a primary button');
+    assert.deepEqual(view.children.slice(0, 2).map((c) => c.tag), ['h1', 'a']);
+    assert.equal(view.children[1], links[0], 'right under the title, above everything else');
+  }
+  assert.match(liveTitle(openLive(env)), /^Blok 2 van /, 'the live screen it leads to resumes the saved block');
+});
+
+test('setup screen: no "Terug naar de match" with no match, an ended one or a damaged setup', () => {
+  assert.equal(backLinks(openSetup().view).length, 0, 'no match yet');
+  assert.equal(backLinks(openSetup({ players: 4 }).view).length, 0, 'fewer than 5 players, no match');
+  const { env, live } = startedUntouched();
+  playToEnd(env, live);
+  assert.equal(backLinks(setupView(env)).length, 0, 'ended match');
+  env.store.save('matchSetup', { damaged: true });
+  assert.equal(backLinks(setupView(env)).length, 0, 'damaged setup');
+});
+
+test('setup screen: with fewer than 5 players left, a running match still shows the way back', () => {
+  const { env } = startedUntouched();
+  env.store.save('roster', rosterOf(4));
+  const view = setupView(env);
+  assert.match(pageText(view), /minstens 5 spelers/);
+  assert.equal(backLinks(view)[0]?.attrs.href, '#start');
+});
+
 // ---------- team history on the setup screen (decision #10) ----------
 
 const minutesById = (view) => Object.fromEntries(rows(view).map((r) => {

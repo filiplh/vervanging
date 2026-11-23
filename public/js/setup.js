@@ -461,10 +461,16 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
         el('button', { type: 'button', className: 'primary', onclick: startMatch }, 'Start')));
   }
 
+  // While a match is running, the Match tab still opens setup (to restart on purpose), and this leads back to it
+  // (P1-2 in docs/spikes/2026-ui-review.md).
+  const backToMatch = hasRunningMatch(store)
+    && el('a', { className: 'button primary back-to-match', href: '#start' }, 'Terug naar de match');
+
   function render() {
     if (players.length < ON_COURT) {
       root.replaceChildren(...[
         el('h1', {}, 'Match'),
+        backToMatch,
         el('p', { className: 'note' }, `Voeg eerst minstens ${ON_COURT} spelers toe bij Spelers.`),
         el('a', { className: 'button primary', href: '#spelers' }, 'Naar Spelers'),
         !installed && installHint()].filter(Boolean));
@@ -472,6 +478,7 @@ export function setupScreen(root, { store, onStart, installed = isInstalled() })
     }
     root.replaceChildren(...[
       el('h1', {}, 'Match'),
+      backToMatch,
       !installed && installHint(),
       attendanceSection(),
       scheduleSection(),
