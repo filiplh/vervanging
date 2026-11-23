@@ -5,9 +5,26 @@ import Foundation
 // comparison that answers at random, so the order it gives depends on exactly which comparisons V8 makes and in what
 // order. A plain Swift sort would make other comparisons, draw other random numbers and give another plan. This port
 // makes the same calls in the same order and moves the elements the same way, so the same draws give the same order.
-// Source: V8 12.4 (the version in Node 22.23.1, 12.4.254.21-node.56), third_party/v8/builtins/array-sort.tq,
-// https://github.com/v8/v8, BSD-3-Clause (itself after CPython's listsort). Rewritten in Swift step for step, no code
-// copied verbatim; checked against Node 22 by JavaScriptSortTests.
+// Checked against Node 22 by JavaScriptSortTests.
+//
+// Source (third-party code, translated): third_party/v8/builtins/array-sort.tq in V8 at commit
+// 8ab91836885699b9ef686c3a30df4778501ef7d1 (tag 12.4.254.21), blob 0b4e51226822f76eceb57e7f9dcc8b8d64286207:
+// https://github.com/v8/v8/blob/8ab91836885699b9ef686c3a30df4778501ef7d1/third_party/v8/builtins/array-sort.tq
+// Node 22.23.1 (V8 12.4.254.21-node.56, .node-version) ships the same blob in deps/v8.
+// Copyright (c) 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017,
+// 2018 Python Software Foundation; All Rights Reserved
+// Licence: the Python Software Foundation License Version 2 (V8 based the file on CPython's listobject.c), in
+// third_party/v8/builtins/LICENSE, kept unchanged next to this file in JavaScriptSortLicense.swift.
+// ⚠ PSF-2.0 is not in factory.yaml › licences.allow; this translation waits for the owner's approval (gate H2).
+//
+// Changes from the source (the summary the licence asks for): translated from Torque to Swift, by hand, with no line
+// copied. Kept: the algorithm and the order of every comparison and element move (ArrayTimSortImpl,
+// ComputeMinRunLength, CountAndMakeRun with ReverseRange, BinaryInsertionSort, MergeCollapse, MergeForceCollapse,
+// MergeAt, GallopLeft, GallopRight, MergeLow, MergeHigh; kMinGallopWins 7 and the starting minGallop 7). Left out:
+// what a plain Swift array does not need: element accessors and their bailouts, holes and undefined, the copy into and
+// out of a work array, the default comparison without a comparator, the Smi overflow guard on gallop offsets and the
+// result conversion of the comparator (here it returns a Double). Changed: generic over the element type, a new
+// temporary array per merge instead of a reused one, and the Succeed and CopyA or CopyB labels as a MergeExit value.
 
 /// V8's TimSort over `array`. `compare(a, b)` returns a number: below 0 when `a` comes before `b`. Like V8, every
 /// comparison asks `compare`, even an inconsistent one, and the result is always a permutation of `array`.
