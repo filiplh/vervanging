@@ -6,7 +6,8 @@ decisions table and the grill logs. Cite them in code, issues and PRs as `ADR-NN
 | ADR | Title | Status |
 | --- | --- | --- |
 | [001](001-fixed-blocks-no-game-clock.md) | Fixed time blocks, no game clock | accepted |
-| [002](002-one-phone-local-storage.md) | One phone, data only on the device | accepted |
+| [002](002-one-phone-local-storage.md) | One phone, data only on the device (web and native) | accepted |
+| [003](003-native-rules-ported-to-swift.md) | The native app ports the rules to Swift, refereed by shared exact examples | accepted |
 
 ## Format
 Each ADR has Status, Date, Context, Decision, Consequences, and where useful Alternatives considered and References.

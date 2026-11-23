@@ -20,8 +20,16 @@ often have poor reception.
   phase 1), so phase 1 adds the home-screen install and a hint.
 - A second device (an assistant) or a season export would need a new ADR.
 
+## Native app (phase 3)
+The decision carries over to the native iPhone app unchanged
+([phase 3 D10](../grill/2026-11-23-phase-3-native-ios.md#decisions), 2026-11-23): roster, the running match and the
+team history are small JSON files in the app's own storage, written after every tap and restored on launch. No
+SwiftData, no iCloud sync, no login. A normal iPhone backup includes the files. Nothing moves from the web app: the
+native app starts with an empty history and the roster is entered again by hand
+([phase 3 D5](../grill/2026-11-23-phase-3-native-ios.md#decisions)).
+
 ## Alternatives considered
 - Sync through a small backend (Workers KV or D1): shared data, but accounts, secrets and far more than four hours.
 
 ## References
-[grill D5](../grill/2026-11-22-whole-product.md#decisions) · [grill D18](../grill/2026-11-22-whole-product.md#decisions) · plan decisions #5, #10, #14, #18
+[grill D5](../grill/2026-11-22-whole-product.md#decisions) · [grill D18](../grill/2026-11-22-whole-product.md#decisions) · plan decisions #5, #10, #14, #18 · [phase 3 D5, D10](../grill/2026-11-23-phase-3-native-ios.md#decisions) · plan decisions #33, #38
