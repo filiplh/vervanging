@@ -80,18 +80,18 @@ function open(setup = setupOf(), env = memoryStore()) {
 const h1 = (view) => find(view, 'h1')[0].text;
 const subLine = (view) => find(view, 'p', (e) => e.className === 'sub-time')[0]?.text;
 
-test('subTimeText: wissel op m:ss inside a quarter, einde kwart, einde match', () => {
+test('subTimeText: wissel op m:ss inside a quarter, einde kwart, laatste blok', () => {
   let state = startMatch(planOf(setupOf()));
   const lines = [];
   for (let b = 0; b < 12; b++) { lines.push(subTimeText(state)); state = wissel(state); }
   assert.deepEqual(lines, [
     'Wissel op 6:40', 'Wissel op 3:20', 'Einde kwart', 'Wissel op 6:40', 'Wissel op 3:20', 'Einde kwart',
-    'Wissel op 6:40', 'Wissel op 3:20', 'Einde kwart', 'Wissel op 6:40', 'Wissel op 3:20', 'Einde match',
+    'Wissel op 6:40', 'Wissel op 3:20', 'Einde kwart', 'Wissel op 6:40', 'Wissel op 3:20', 'Laatste blok',
   ]);
   state = startMatch(planOf(setupOf({ schedule: 'five' })));
   const five = [];
   for (let b = 0; b < 8; b++) { five.push(subTimeText(state)); state = wissel(state); }
-  assert.deepEqual(five, ['Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde match']);
+  assert.deepEqual(five, ['Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Einde kwart', 'Wissel op 5:00', 'Laatste blok']);
 });
 
 test('live screen: block, sub time, on court, off and on next, Wissel, Ongedaan maken and minutes', () => {
@@ -149,7 +149,7 @@ test('end-of-match screen lists every present player with minutes as m:ss, and u
   assert.equal(find(view, 'a', (a) => a.attrs.href === '#match').length, 1, 'a way to a new match');
   button(view, 'Ongedaan maken').fire('click');
   assert.match(h1(view), /^Blok 8 van 8/);
-  assert.equal(subLine(view), 'Einde match');
+  assert.equal(subLine(view), 'Laatste blok');
 });
 
 test('live screen: a refused write shows a Dutch message and the tap still counts on screen', () => {
@@ -240,6 +240,8 @@ test('live screen: the button reads Einde match at the last block', () => {
     wisselButton(view).fire('click');
   }
   assert.equal(wisselButton(view).text, 'Einde match');
+  assert.equal(subLine(view), 'Laatste blok', 'the line under the heading names the last block, not the end screen');
+  assert.match(h1(view), /^Blok 12 van 12/);
   assert.equal(chips(view, 'Uit').length, 8, 'uit is possible in the last block too');
   wisselButton(view).fire('click');
   assert.equal(h1(view), 'Einde match');
