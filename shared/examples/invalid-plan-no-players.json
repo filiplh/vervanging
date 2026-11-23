@@ -1,0 +1,15 @@
+{
+  "name": "invalid-plan-no-players",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: --players is required\n"
+}

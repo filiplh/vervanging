@@ -1,0 +1,20 @@
+{
+  "name": "invalid-plan-equal-16-no-plan",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "16",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--history",
+    "scripts/fixtures/history-sit-relaxed.json",
+    "--use-history"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: no plan found within the substitution limit of 3\n"
+}

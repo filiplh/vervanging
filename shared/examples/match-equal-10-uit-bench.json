@@ -1,0 +1,22 @@
+{
+  "name": "match-equal-10-uit-bench",
+  "kind": "match",
+  "actions": [
+    "uit",
+    "wissel"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--actions",
+    "uit=10,wissel*3"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"block\":4,\"blocks\":12,\"ended\":false,\"onCourt\":[2,3,6,7,9],\"minutes\":{\"1\":400,\"2\":400,\"3\":400,\"4\":600,\"5\":400,\"6\":600,\"7\":400,\"8\":400,\"9\":400,\"10\":0},\"extraSeconds\":{\"1\":0,\"2\":0,\"3\":0,\"4\":0,\"5\":0,\"6\":0,\"7\":0,\"8\":0,\"9\":0,\"10\":0},\"overview\":[{\"player\":1,\"seconds\":400,\"onCourt\":false,\"out\":false},{\"player\":2,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":3,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":4,\"seconds\":600,\"onCourt\":false,\"out\":false},{\"player\":5,\"seconds\":400,\"onCourt\":false,\"out\":false},{\"player\":6,\"seconds\":600,\"onCourt\":true,\"out\":false},{\"player\":7,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":8,\"seconds\":400,\"onCourt\":false,\"out\":false},{\"player\":9,\"seconds\":400,\"onCourt\":true,\"out\":false},{\"player\":10,\"seconds\":0,\"onCourt\":false,\"out\":true}]}\n",
+  "stderr": ""
+}

@@ -1,0 +1,19 @@
+{
+  "name": "invalid-plan-swap-one",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--swap",
+    "1"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: --swap takes two player numbers\n"
+}

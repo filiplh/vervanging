@@ -1,0 +1,17 @@
+{
+  "name": "invalid-plan-unknown-schedule",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "six"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: unknown schedule \"six\": use equal or five\n"
+}

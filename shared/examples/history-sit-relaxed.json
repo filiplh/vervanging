@@ -1,0 +1,13 @@
+{
+  "name": "history-sit-relaxed",
+  "kind": "history",
+  "actions": [],
+  "args": [
+    "history",
+    "--history",
+    "scripts/fixtures/history-sit-relaxed.json"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"matches\":1,\"totals\":{\"1\":0,\"2\":0,\"3\":600,\"4\":0,\"5\":0,\"6\":0,\"7\":1200,\"8\":2100,\"9\":0,\"10\":0,\"11\":900,\"12\":600,\"13\":900,\"14\":0,\"15\":2100,\"16\":1800}}\n",
+  "stderr": ""
+}

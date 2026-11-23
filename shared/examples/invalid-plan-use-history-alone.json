@@ -1,0 +1,18 @@
+{
+  "name": "invalid-plan-use-history-alone",
+  "kind": "plan",
+  "actions": [],
+  "args": [
+    "plan",
+    "--players",
+    "10",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "equal",
+    "--use-history"
+  ],
+  "exitStatus": 2,
+  "stdout": "",
+  "stderr": "sim: --use-history needs --history <file>\n"
+}

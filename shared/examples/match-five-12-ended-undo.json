@@ -1,0 +1,22 @@
+{
+  "name": "match-five-12-ended-undo",
+  "kind": "match",
+  "actions": [
+    "undo",
+    "wissel"
+  ],
+  "args": [
+    "match",
+    "--players",
+    "12",
+    "--start",
+    "1,2,3,4,5",
+    "--schedule",
+    "five",
+    "--actions",
+    "wissel*8,undo"
+  ],
+  "exitStatus": 0,
+  "stdout": "{\"block\":8,\"blocks\":8,\"ended\":false,\"onCourt\":[6,8,9,10,11],\"minutes\":{\"1\":900,\"2\":900,\"3\":1200,\"4\":900,\"5\":1200,\"6\":900,\"7\":1200,\"8\":900,\"9\":900,\"10\":900,\"11\":1200,\"12\":900},\"extraSeconds\":{\"1\":0,\"2\":0,\"3\":0,\"4\":0,\"5\":0,\"6\":0,\"7\":0,\"8\":0,\"9\":0,\"10\":0,\"11\":0,\"12\":0},\"overview\":[{\"player\":1,\"seconds\":900,\"onCourt\":false,\"out\":false},{\"player\":2,\"seconds\":900,\"onCourt\":false,\"out\":false},{\"player\":3,\"seconds\":1200,\"onCourt\":false,\"out\":false},{\"player\":4,\"seconds\":900,\"onCourt\":false,\"out\":false},{\"player\":5,\"seconds\":1200,\"onCourt\":false,\"out\":false},{\"player\":6,\"seconds\":900,\"onCourt\":true,\"out\":false},{\"player\":7,\"seconds\":1200,\"onCourt\":false,\"out\":false},{\"player\":8,\"seconds\":900,\"onCourt\":true,\"out\":false},{\"player\":9,\"seconds\":900,\"onCourt\":true,\"out\":false},{\"player\":10,\"seconds\":900,\"onCourt\":true,\"out\":false},{\"player\":11,\"seconds\":1200,\"onCourt\":true,\"out\":false},{\"player\":12,\"seconds\":900,\"onCourt\":false,\"out\":false}]}\n",
+  "stderr": ""
+}
