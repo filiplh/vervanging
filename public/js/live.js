@@ -22,6 +22,15 @@ export function subTimeText(state) {
   return `Wissel op ${formatSeconds(time.clockSeconds)}`;
 }
 
+// "Minuten tot nu" (#54, the owner's choice of 2026-11-23): only the blocks already played count, so at tip-off
+// everyone shows 0:00 and the block being played counts once its wissel (or the end) is tapped. After the end every
+// block is finished, so this is minutesSoFar, the totals the history stores. A block counts for its credited line-up:
+// a starter taken uit during the block keeps it (as the screen says, "Het blok telt voor …"), and an Extra minuten
+// block counts when it has been played.
+export function minutesPlayed(state) {
+  return minutesSoFar(state.ended ? state : { ...state, block: state.block - 1 });
+}
+
 // The plan the engine plays, built only from the parts normaliseMatchSetup checked (the schedule, the players and
 // the grid), so a damaged block length or player list in the saved plan cannot reach the screen.
 export function planOf(setup) {
@@ -245,7 +254,7 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   const isOut = (id) => state.out.includes(id);
 
   function minutesTable(heading) {
-    const minutes = minutesSoFar(state);
+    const minutes = minutesPlayed(state);
     const court = state.ended ? [] : onCourt(state);
     return el('table', { className: 'minutes' },
       el('caption', {}, heading),
@@ -268,7 +277,8 @@ export function liveScreen(root, { store, keepAwake = keepScreenAwake, now = Dat
   // Every player's minutes at a glance (decision #27): a dense grid of small cells in jersey order, number above
   // minutes, players on court marked, so all of them fit on a phone without scrolling. The full table stays below.
   function overview() {
-    const entries = new Map(minutesOverview(state).map((e) => [e.player, e]));
+    const minutes = minutesPlayed(state);
+    const entries = new Map(minutesOverview(state).map((e) => [e.player, { ...e, seconds: minutes[e.player] }]));
     return el('ol', { className: 'overview', 'aria-label': 'Minuten tot nu per speler' },
       sortedPlayers(setup.players.map((p) => p.id)).map((id) => {
         const e = entries.get(id);
