@@ -31,6 +31,26 @@
         }
       }
     },
+    "%@ · Tegen %@": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Tegen %@"
+          }
+        }
+      }
+    },
+    "%@, op het veld": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, op het veld"
+          }
+        }
+      }
+    },
     "%lld blokken: %@ · %@": {
       "localizations": {
         "nl": {
@@ -131,12 +151,52 @@
         }
       }
     },
+    "Bij de volgende wissel": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bij de volgende wissel"
+          }
+        }
+      }
+    },
+    "Blok %lld van %lld": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Blok %lld van %lld"
+          }
+        }
+      }
+    },
     "Blokken van 5 minuten": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Blokken van 5 minuten"
+          }
+        }
+      }
+    },
+    "Dat kan nu niet.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dat kan nu niet."
+          }
+        }
+      }
+    },
+    "De lopende match stoppen en een nieuwe beginnen?": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "De lopende match stoppen en een nieuwe beginnen?"
           }
         }
       }
@@ -151,12 +211,52 @@
         }
       }
     },
+    "Einde kwart": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einde kwart"
+          }
+        }
+      }
+    },
+    "Einde match": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einde match"
+          }
+        }
+      }
+    },
     "Er kon geen plan gemaakt worden. Probeer „Ander plan”.": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Er kon geen plan gemaakt worden. Probeer „Ander plan”."
+          }
+        }
+      }
+    },
+    "Erin": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erin"
+          }
+        }
+      }
+    },
+    "Eruit": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eruit"
           }
         }
       }
@@ -187,6 +287,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Kies precies %lld spelers voor de basisvijf om het plan te zien."
+          }
+        }
+      }
+    },
+    "Laatste blok": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Laatste blok"
           }
         }
       }
@@ -241,12 +351,72 @@
         }
       }
     },
+    "Minuten": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minuten"
+          }
+        }
+      }
+    },
+    "Minuten per speler": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minuten per speler"
+          }
+        }
+      }
+    },
+    "Minuten tot nu": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minuten tot nu"
+          }
+        }
+      }
+    },
+    "Minuten tot nu per speler": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minuten tot nu per speler"
+          }
+        }
+      }
+    },
     "Naar Spelers": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Naar Spelers"
+          }
+        }
+      }
+    },
+    "Niemand": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Niemand"
+          }
+        }
+      }
+    },
+    "Nieuwe match": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nieuwe match"
           }
         }
       }
@@ -267,6 +437,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nog geen spelers. Voeg je spelers toe met voornaam en rugnummer."
+          }
+        }
+      }
+    },
+    "Ongedaan gemaakt.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ongedaan gemaakt."
+          }
+        }
+      }
+    },
+    "Ongedaan maken": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ongedaan maken"
+          }
+        }
+      }
+    },
+    "Op het veld": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Op het veld"
           }
         }
       }
@@ -361,12 +561,32 @@
         }
       }
     },
+    "Tegen %@": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tegen %@"
+          }
+        }
+      }
+    },
     "Tegenstander (niet verplicht)": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Tegenstander (niet verplicht)"
+          }
+        }
+      }
+    },
+    "Terug naar de match": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terug naar de match"
           }
         }
       }
@@ -471,12 +691,52 @@
         }
       }
     },
+    "Wissel": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wissel"
+          }
+        }
+      }
+    },
     "Wissel %@ en %@ kan niet: %@.": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Wissel %@ en %@ kan niet: %@."
+          }
+        }
+      }
+    },
+    "Wissel gedaan: blok %lld.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wissel gedaan: blok %lld."
+          }
+        }
+      }
+    },
+    "Wissel gedaan: blok %lld. Erin: %@.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wissel gedaan: blok %lld. Erin: %@."
+          }
+        }
+      }
+    },
+    "Wissel op %@": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wissel op %@"
           }
         }
       }
@@ -517,6 +777,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "die ruil past niet in het plan"
+          }
+        }
+      }
+    },
+    "kwart %lld": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "kwart %lld"
           }
         }
       }
