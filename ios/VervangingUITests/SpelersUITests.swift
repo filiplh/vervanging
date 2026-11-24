@@ -77,7 +77,7 @@ final class SpelersUITests: XCTestCase {
     func testEditChangesNameAndNumberAndIsSaved() throws {
         launch()
         addPlayer("Lotte", "7")
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
 
         expectShown(app.buttons["Bewaren"])
         expectShown(app.buttons["Annuleren"])
@@ -104,14 +104,14 @@ final class SpelersUITests: XCTestCase {
         addPlayer("Lotte", "7")
 
         // Saving with the player's own number is fine (the number is not "taken" by herself).
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
         replace(field("spelers.name"), with: "Lotje")
         tap(submitButton)
         expectRow("7", containing: "Lotje")
         expectGone(app.staticTexts["spelers.message"])
 
         // Annuleren drops the change.
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
         replace(field("spelers.name"), with: "Iemand")
         tap(app.buttons["Annuleren"])
         expectShown(app.buttons["Toevoegen"])
@@ -128,7 +128,7 @@ final class SpelersUITests: XCTestCase {
         addPlayer("Fien", "12")
 
         // "Annuleren" keeps her.
-        tap(app.buttons["spelers.remove.7"])
+        tapInRow(app.buttons["spelers.remove.7"])
         let alert = app.alerts["#7 Lotte verwijderen?"]
         expectShown(alert)
         tap(alert.buttons["Annuleren"])
@@ -137,7 +137,7 @@ final class SpelersUITests: XCTestCase {
         expectShown(app.staticTexts["2 van 15"])
 
         // "Verwijder" removes her.
-        tap(app.buttons["spelers.remove.7"])
+        tapInRow(app.buttons["spelers.remove.7"])
         expectShown(alert)
         tap(alert.buttons["Verwijder"])
         expectGone(row("7"))
@@ -200,7 +200,7 @@ final class SpelersUITests: XCTestCase {
         expectShown(keyboard, "the keyboard stays up for the next player")
 
         // Editing: the keyboard's button saves, as Bewaren does.
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
         replace(field("spelers.number"), with: "8")
         let save = app.buttons["spelers.keyboardSubmit"]
         expectShown(save)
@@ -294,12 +294,12 @@ final class SpelersUITests: XCTestCase {
         expectGone(field("spelers.name"))
 
         // Editing a player is still possible on a full roster.
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
         expectShown(app.buttons["Bewaren"])
         tap(app.buttons["Annuleren"])
 
         // Removing one makes room again.
-        tap(app.buttons["spelers.remove.7"])
+        tapInRow(app.buttons["spelers.remove.7"])
         tap(app.alerts["#7 Lotte verwijderen?"].buttons["Verwijder"])
         expectShown(field("spelers.name"))
         expectShown(app.staticTexts["14 van 15"])
@@ -471,6 +471,18 @@ final class SpelersUITests: XCTestCase {
     /// Whether the text field has the keyboard focus.
     private func hasFocus(_ element: XCUIElement) -> Bool {
         (element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false
+    }
+
+    /// Taps a button in a player's row. After Toevoegen the keyboard stays up (quick entry), and on a shorter screen
+    /// such as the iPhone 17 Pro the keyboard toolbar covers the first rows, so a tap would land on the toolbar. Hide
+    /// the keyboard with Klaar first, as a coach would (#145).
+    private func tapInRow(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let done = app.buttons["spelers.keyboardDone"]
+        if done.exists {
+            done.tap()
+            expectGone(keyboard, "Klaar hides the keyboard before a row is tapped", file: file, line: line)
+        }
+        tap(element, file: file, line: line)
     }
 
     /// Taps an element once it is there, instead of failing at once when the screen is still catching up.
