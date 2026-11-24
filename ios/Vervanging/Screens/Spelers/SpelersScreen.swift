@@ -14,6 +14,12 @@ struct SpelersScreen: View {
 
     private enum Field { case name, number }
 
+    /// The content type for the name and number fields: an empty one, not nil (#145). With nil, iOS still guesses
+    /// from the field and offers the owner's own contact card (a home address on a field called Voornaam); an empty
+    /// content type tells the system the field holds none of the AutoFill kinds, so the suggestion bar offers none.
+    /// ⚠ Seen in the simulator only; to confirm on the owner's iPhone.
+    static let noAutoFill = UITextContentType(rawValue: "")
+
     init(store: RosterStore, history: HistoryStore? = nil) {
         _model = State(initialValue: SpelersModel(store: store, history: history))
     }
@@ -23,6 +29,23 @@ struct SpelersScreen: View {
             entrySection
             playersSection
             if !model.roster.players.isEmpty { historySection }
+        }
+        // The number pad has no return key and quick entry keeps the keyboard up after Toevoegen, so the keyboard
+        // gets a way down (#145): dragging the list down hides it, and so does Klaar above the keyboard.
+        .scrollDismissesKeyboard(.interactively)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                // On the number field, the last one to fill, the player can be added from here too (the same action
+                // as the form's button), so entering a roster stays quick.
+                if focus == .number {
+                    Button(model.editing == nil ? "Toevoegen" : "Bewaren", action: submit)
+                        .accessibilityIdentifier("spelers.keyboardSubmit")
+                }
+                Spacer()
+                // ⚠ "Klaar" is new copy, to confirm with the owner.
+                Button("Klaar") { focus = nil }
+                    .accessibilityIdentifier("spelers.keyboardDone")
+            }
         }
         // A match can end, or the history be cleared, while this tab is not shown: read the totals again each time.
         .onAppear { model.reloadHistory() }
@@ -59,7 +82,7 @@ struct SpelersScreen: View {
                     // is on; SwiftUI has no spellcheck modifier and a UI test cannot read the setting.
                     .autocorrectionDisabled(true)
                     .textInputAutocapitalization(.words)
-                    .textContentType(nil)
+                    .textContentType(Self.noAutoFill)
                     .submitLabel(.next)
                     .focused($focus, equals: .name)
                     .onSubmit { focus = .number }
@@ -69,7 +92,7 @@ struct SpelersScreen: View {
                     .accessibilityIdentifier("spelers.name")
                 TextField("Rugnummer", text: $number)
                     .keyboardType(.numberPad)
-                    .textContentType(nil)
+                    .textContentType(Self.noAutoFill)
                     .focused($focus, equals: .number)
                     .onChange(of: number) { _, new in
                         if new.count > SpelersModel.maxNumber { number = String(new.prefix(SpelersModel.maxNumber)) }
