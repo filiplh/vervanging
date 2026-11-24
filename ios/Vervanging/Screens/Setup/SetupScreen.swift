@@ -26,11 +26,15 @@ struct SetupScreen: View {
             }
         }
         .navigationTitle("Match")
-        // The roster can change on the Spelers screen in between: open setup again from the stored roster then, as the
-        // web app draws its setup again from the store each time the Match screen opens.
+        // The roster can change on the Spelers screen in between, and the team history when a match ends or is cleared
+        // (#104): open setup again from the stored roster and history then, as the web app draws its setup again from
+        // the store each time the Match screen opens. The history file sits beside the setup file.
         .onAppear {
             let roster = rosterStore.load()
-            if model?.roster != roster { model = SetupModel(roster: roster, store: setupStore) }
+            let matches = HistoryStore(directory: setupStore.fileURL.deletingLastPathComponent()).load().matches
+            if model?.roster != roster || model?.history.matches != matches {
+                model = SetupModel(roster: roster, store: setupStore, matches: matches)
+            }
         }
     }
 }

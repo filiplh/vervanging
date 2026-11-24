@@ -1,25 +1,31 @@
 import SwiftUI
+import VervangingCore
 
 /// The Spelers screen: add, edit and remove players (first name and jersey number, up to 15; plan decision #14).
+/// Each player's season total sits under the name (decision #26), and "Wis geschiedenis" below the list resets them.
 /// Copy and behaviour follow the web app's roster screen (`rosterScreen` in `public/js/setup.js`).
 struct SpelersScreen: View {
     @State private var model: SpelersModel
     @State private var name = ""
     @State private var number = ""
     @State private var removing: Player?
+    @State private var clearing = false
     @FocusState private var focus: Field?
 
     private enum Field { case name, number }
 
-    init(store: RosterStore) {
-        _model = State(initialValue: SpelersModel(store: store))
+    init(store: RosterStore, history: HistoryStore? = nil) {
+        _model = State(initialValue: SpelersModel(store: store, history: history))
     }
 
     var body: some View {
         List {
             entrySection
             playersSection
+            if !model.roster.players.isEmpty { historySection }
         }
+        // A match can end, or the history be cleared, while this tab is not shown: read the totals again each time.
+        .onAppear { model.reloadHistory() }
         .navigationTitle("Spelers")
         .navigationSubtitle("\(model.roster.players.count) van \(Roster.maxPlayers)")
         .alert(
@@ -31,6 +37,10 @@ struct SpelersScreen: View {
                 model.remove(player)
                 if model.editingId == nil { clearFields() }
             }
+            Button("Annuleren", role: .cancel) {}
+        }
+        .alert(Text("De geschiedenis van alle vorige matchen wissen?"), isPresented: $clearing) {
+            Button("Wis geschiedenis", role: .destructive) { model.clearHistory() }
             Button("Annuleren", role: .cancel) {}
         }
     }
@@ -100,18 +110,52 @@ struct SpelersScreen: View {
                     row(player)
                 }
             }
+        } header: {
+            if !model.roster.players.isEmpty {
+                Text(SpelersModel.seasonNote(model.season.matches))
+                    .textCase(nil)
+                    .accessibilityIdentifier("spelers.season")
+            }
+        }
+    }
+
+    /// "Wis geschiedenis" (decision #10): asks first, then empties the team history, so every total is back to 0. The
+    /// web app has it on the Match screen under the history switch; here it sits under the totals it resets.
+    /// ⚠ Placement chosen by the agent.
+    private var historySection: some View {
+        Section {
+            Button("Wis geschiedenis", role: .destructive) { clearing = true }
+                .disabled(model.season.matches == 0)
+                .accessibilityIdentifier("spelers.clearHistory")
+        } footer: {
+            if !model.historyMessage.isEmpty {
+                Text(model.historyMessage)
+                    .foregroundStyle(model.historyFailed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                    .accessibilityIdentifier("spelers.historyMessage")
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
         }
     }
 
     private func row(_ player: Player) -> some View {
         HStack(spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(verbatim: "#\(player.number)").monospacedDigit().foregroundStyle(.secondary)
-                Text(verbatim: player.name).lineLimit(2)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(verbatim: "#\(player.number)").monospacedDigit().foregroundStyle(.secondary)
+                    Text(verbatim: player.name).lineLimit(2)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("spelers.player.\(player.number)")
+                // The season total under the name, so a long name keeps the width beside the buttons (#60).
+                let total = SpelersModel.formatDuration(model.seasonSeconds(player))
+                Text("\(total) min")
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(Text("speeltijd \(total) min"))
+                    .accessibilityIdentifier("spelers.total.\(player.number)")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("spelers.player.\(player.number)")
             Button("Wijzig") {
                 model.startEditing(player)
                 name = player.name
