@@ -119,6 +119,27 @@ extension MatchState {
         return minutes
     }
 
+    /// "Minuten tot nu", ported from minutesPlayed in public/js/live.js (#54): seconds per player over the blocks
+    /// already played. At tip-off everyone has 0; the block being played counts once its wissel (or the end) is
+    /// tapped; after the end every block is played, so this is `minutesSoFar`. A block counts for its credited line-up
+    /// (a starter taken uit during it keeps it), and an Extra minuten block counts once it has been played.
+    public var minutesPlayed: [Int: Int] {
+        var minutes = Dictionary(players.map { ($0, 0) }, uniquingKeysWith: { $1 })
+        for court in grid.prefix(ended ? block : block - 1) {
+            for p in court { minutes[p, default: 0] += blockSeconds }
+        }
+        return minutes
+    }
+
+    /// The minutes at a glance and the minutes table as the live screen shows them: one entry per player in player
+    /// order with `minutesPlayed`, marked on court while the match runs (nobody after the end) and out.
+    public var playedOverview: [MinutesEntry] {
+        let minutes = minutesPlayed
+        let court = ended ? [] : onCourt
+        return players.map { MinutesEntry(player: $0, seconds: minutes[$0]!, onCourt: court.contains($0),
+                                          out: out.contains($0)) }
+    }
+
     /// Seconds each player got through Extra minuten in this match.
     public var extraSeconds: [Int: Int] {
         var seconds = Dictionary(players.map { ($0, 0) }, uniquingKeysWith: { $1 })

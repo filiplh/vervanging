@@ -15,7 +15,7 @@ struct LiveScreen: View {
         ScrollView {
             // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
             // 15-player match (#77).
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 if model.isRunning { playing } else { ended }
             }
             .padding(.horizontal, 16)
@@ -55,6 +55,9 @@ struct LiveScreen: View {
         // The change comes before Op het veld (the web app has it after), so on the Duo's short outer screen the Eruit
         // and Erin rows still sit above the Wissel bar with long names (#77). ⚠ Order chosen by the agent.
         if let change = model.nextChange { nextChange(change) }
+        // The line under the last action sits in the page, under the change, as on the web: in the Wissel bar a
+        // confirmation naming three long names would make the bar taller and cover the Eruit and Erin rows (#77).
+        message
         court
         MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes)
     }
@@ -99,22 +102,29 @@ struct LiveScreen: View {
 
     @ViewBuilder
     private var ended: some View {
+        message
         MinutesTable(heading: String(localized: "Minuten per speler"), rows: model.minutes)
     }
 
     // MARK: - The Wissel bar
 
+    /// The confirmation of the last action, or why it failed.
+    @ViewBuilder
+    private var message: some View {
+        if !model.message.isEmpty {
+            Text(model.message)
+                .font(.callout)
+                .foregroundStyle(model.confirmed ? AnyShapeStyle(.primary) : AnyShapeStyle(.red))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("live.message")
+                .accessibilityAddTraits(.updatesFrequently)
+        }
+    }
+
+    /// Ongedaan maken and Wissel (or Nieuwe match after the end), always the same height.
     private var actions: some View {
         VStack(spacing: 8) {
-            if !model.message.isEmpty {
-                Text(model.message)
-                    .font(.callout)
-                    .foregroundStyle(model.confirmed ? AnyShapeStyle(.primary) : AnyShapeStyle(.red))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("live.message")
-                    .accessibilityAddTraits(.updatesFrequently)
-            }
             HStack(spacing: 12) {
                 Button(action: model.undo) {
                     Text("Ongedaan maken")
@@ -195,12 +205,17 @@ private struct PlayerName: View {
     }
 }
 
-/// Every player's minutes at a glance (decision #27): small cells in jersey order, six to a row, the number above the
-/// minutes, players on court filled, so all of them fit on a phone without scrolling. The full table is below.
+/// Every player's minutes at a glance (decision #27): small cells in jersey order, six or eight to a row, the number
+/// above the minutes, players on court filled, so all of them fit on a phone without scrolling. The full table is
+/// below.
 private struct MinutesOverview: View {
     let rows: [MinutesRow]
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 6)
+    /// Six to a row (as on the web) up to twelve players; eight to a row for 13 to 15, so the grid never takes more
+    /// than two rows and the change below it stays above the Wissel bar on the Duo's outer screen (#77).
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 4), count: rows.count > 12 ? 8 : 6)
+    }
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 4) {
@@ -211,7 +226,8 @@ private struct MinutesOverview: View {
                 }
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.7)
+                .padding(.horizontal, 3)
                 .foregroundStyle(row.onCourt ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
                 .frame(maxWidth: .infinity, minHeight: 38)
                 .background(row.onCourt ? AnyShapeStyle(.tint) : AnyShapeStyle(.fill.tertiary),

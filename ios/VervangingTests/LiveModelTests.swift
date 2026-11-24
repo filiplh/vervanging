@@ -68,16 +68,14 @@ struct LiveModelTests {
         #expect(model.minutes.allSatisfy { !$0.onCourt })
     }
 
-    @Test func theMinutesAreTheEnginesMinutesUpToTheLastFinishedBlock() throws {
+    @Test func theMinutesAreTheEnginesPlayedOverview() throws {
         let clock = Clock()
         let model = model(try Self.started(10), clock: clock)
         wissel(model, clock, times: 4)
-        var finished = model.state
-        finished.block = 4
-        let expected = finished.minutesSoFar
+        let expected = Dictionary(uniqueKeysWithValues: model.state.playedOverview.map { ($0.player, $0) })
         for row in model.minutes {
-            #expect(row.seconds == expected[row.player.id])
-            #expect(row.onCourt == model.state.onCourt.contains(row.player.id))
+            #expect(row.seconds == expected[row.player.id]?.seconds)
+            #expect(row.onCourt == expected[row.player.id]?.onCourt)
         }
         #expect(model.minutes.map(\.player.number) == (1...10).map(String.init), "by jersey number")
     }

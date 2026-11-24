@@ -124,27 +124,39 @@ final class LiveUITests: XCTestCase {
     // MARK: - Long names (#77)
 
     @MainActor
-    func testLongNamesOnAThreePlayerChangeStayAboveTheWisselBar() throws {
-        // The longest first names the roster takes (20 characters), on all fifteen players.
-        let long = (0..<15).map { "Mohammed-Amine-Kar\(String(UnicodeScalar(UInt8(65 + $0))))\(String(UnicodeScalar(UInt8(97 + $0))))" }
+    func testThreeLineNamesOnAThreePlayerChangeStayAboveTheWisselBarAfterAWissel() throws {
+        // Three-word names of 20 characters (the longest the roster takes). At the default text size they take at most
+        // two lines in the half-width Eruit and Erin columns, so the app runs one text size up (XL): there they wrap
+        // to three ("Wassim / Mohammed / AmAa") and stay on one line in the full-width Op het veld list.
+        let long = (0..<15).map { "Wassim Mohammed Am\(String(UnicodeScalar(UInt8(65 + $0))))\(String(UnicodeScalar(UInt8(97 + $0))))" }
         try plantRoster(15, names: long)
+        app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXL"]
         try startMatch(basisvijf: ["4", "7", "8", "10", "11"])
+        // Wissel at least once, until three players go off at the next change: the confirmation line is then on screen.
         var block = 1
-        while labels("live.off.").count < 3 {
+        repeat {
             block += 1
             XCTAssertLessThan(block, 12, "no change of three players in this plan")
             tapWissel(expecting: "Blok \(block) van 12")
-        }
+        } while labels("live.off.").count < 3
+        XCTAssertTrue(message()?.hasPrefix("Wissel gedaan: blok \(block).") == true, message() ?? "no message")
+
         let bar = app.descendants(matching: .any)["live.actions"]
         XCTAssertTrue(bar.waitForExistence(timeout: 5))
         let barTop = bar.frame.minY
+        // A one-line row: the same names fit on one line in the full-width Op het veld list.
+        let oneLine = try XCTUnwrap(elements("live.court.").map { $0.frame.height }.max())
         let whole = Set((0..<15).map { "#\(numbers[$0]) \(long[$0])" })
-        for prefix in ["live.off.", "live.on."] {
-            for element in elements(prefix) {
-                XCTAssertTrue(element.isHittable, element.label)
-                XCTAssertLessThanOrEqual(element.frame.maxY, barTop, "\(element.label) sits above the Wissel bar")
-                XCTAssertTrue(whole.contains(element.label), "\(element.label) is the whole name")
-            }
+        let rows = elements("live.off.") + elements("live.on.")
+        XCTAssertEqual(elements("live.off.").count, 3)
+        XCTAssertGreaterThanOrEqual(rows.count, 4)
+        for row in rows {
+            let frame = row.frame
+            XCTAssertTrue(row.isHittable, row.label)
+            XCTAssertGreaterThanOrEqual(frame.height, 2.4 * oneLine,
+                                        "\(row.label) wraps to three lines (\(frame.height) pt; one line is \(oneLine) pt)")
+            XCTAssertLessThanOrEqual(frame.maxY, barTop, "\(row.label): the whole row sits above the Wissel bar")
+            XCTAssertTrue(whole.contains(row.label), "\(row.label) is the whole name")
         }
     }
 

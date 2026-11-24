@@ -15,7 +15,7 @@ struct MinutesRow: Equatable, Identifiable, Sendable {
 /// played, the line under the last action, and Wissel and Ongedaan maken.
 ///
 /// The model never computes a rule itself: every step is the engine's (`MatchState.wissel`, `undo`), and what the
-/// screen shows comes from the engine's `onCourt`, `nextChange`, `subTime`, `quarter` and `minutesSoFar`. The match is
+/// screen shows comes from the engine's `onCourt`, `nextChange`, `subTime`, `quarter` and `playedOverview`. The match is
 /// saved after every tap that changes it (ADR-002). No timer of any kind (ADR-001): the only time read is the moment
 /// of a Wissel tap, to ignore a second tap that follows it too soon (#49).
 @MainActor
@@ -92,15 +92,13 @@ final class LiveModel {
         state.nextChange.map { (sorted($0.off), sorted($0.on)) }
     }
 
-    /// "Minuten tot nu" (`minutesPlayed` in live.js, #54): only the blocks already played count, so at tip-off everyone
-    /// has 0:00 and the block being played counts once its Wissel (or Einde match) is tapped. After the end every block
-    /// is played. The seconds are the engine's `minutesSoFar` up to the last finished block.
+    /// "Minuten tot nu": the engine's `playedOverview` (`minutesPlayed` in live.js, #54), by jersey number. Only the
+    /// blocks already played count, and after the end every block.
     var minutes: [MinutesRow] {
-        var played = state
-        if !played.ended { played.block -= 1 }
-        let seconds = played.minutesSoFar
-        let court = state.ended ? [] : state.onCourt
-        return players.map { MinutesRow(player: $0, seconds: seconds[$0.id] ?? 0, onCourt: court.contains($0.id)) }
+        let entries = Dictionary(state.playedOverview.map { ($0.player, $0) }, uniquingKeysWith: { a, _ in a })
+        return players.compactMap { player in
+            entries[player.id].map { MinutesRow(player: player, seconds: $0.seconds, onCourt: $0.onCourt) }
+        }
     }
 
     // MARK: - Actions
