@@ -136,23 +136,12 @@ final class WideLayoutUITests: XCTestCase {
 
     // MARK: - The wide arrangement (#143)
 
-    /// The turned wide live screen puts the match in three columns that all start at the top: the coming wissel (its
-    /// time, the change, In the zone and the last action) on the left, the minutes at a glance and the court in the
-    /// middle, the minutes table with Uit on the right. Each column is short enough for the room the turned inner screen
-    /// leaves between the bars, so on it the whole match is in view without scrolling.
+    /// The turned wide live screen puts the coming wissel and the court on the left, the minutes on the right, both from
+    /// the top: the minutes at a glance above the table, and the table in two halves side by side, so 15 players take
+    /// eight rows.
     @MainActor
-    func testTheTurnedWideLiveScreenPutsTheMatchInThreeColumns() throws {
-        try checkThreeColumns(players: 12)
-    }
-
-    /// The same with the most players a match takes, 15: the table's rows are shorter still.
-    @MainActor
-    func testTheTurnedWideLiveScreenFitsFifteenPlayers() throws {
-        try checkThreeColumns(players: 15)
-    }
-
-    @MainActor private func checkThreeColumns(players: Int) throws {
-        try plantRoster(players)
+    func testTheTurnedWideLiveScreenPutsTheWisselLeftAndTheMinutesRight() throws {
+        try plantRoster(15)
         app.launchEnvironment["VERVANGING_WIDE_LAYOUT_MIN"] = "500x0"
         launchOnSetup()
         for number in numbers.prefix(5) { tapReveal(app.buttons["setup.basis.\(number)"]) }
@@ -161,23 +150,214 @@ final class WideLayoutUITests: XCTestCase {
         tapWissel(expecting: "Blok 2 van 12")
         try turnToLandscape()
         XCTAssertTrue(waitUntil { self.isWideLive() }, "the minutes table sits beside the court")
-        save("live-wide-turned-\(players)")
-        XCTAssertTrue(app.descendants(matching: .any)["live.zone.keep"].exists, "In the zone is on the screen")
-        XCTAssertTrue(app.staticTexts["live.message"].exists, "the confirmation line is on the screen")
+        save("live-wide-turned-15")
 
-        let left = leftColumn(), middle = middleColumn(), right = rightColumn()
-        for (name, column) in [("left", left), ("middle", middle), ("right", right)] {
-            XCTAssertFalse(column.isEmpty, "the \(name) column has its elements")
+        let left = span(wisselAndCourt()), right = span(minutesElements())
+        XCTAssertLessThanOrEqual(left.maxX, right.minX, "the coming wissel and the court sit left of the minutes")
+        XCTAssertLessThan(abs(left.minY - right.minY), 30, "both columns start at the top")
+        let sorted = (numbers + extraNumbers).sorted { Int($0)! < Int($1)! }
+        let first = tableRow(sorted[0]).frame, secondHalf = tableRow(sorted[8]).frame
+        XCTAssertGreaterThan(secondHalf.minX, first.maxX, "the table's second half sits beside the first")
+        XCTAssertLessThan(abs(secondHalf.minY - first.minY), 4, "both halves start level")
+        XCTAssertLessThanOrEqual(span(elements("live.overview.")).maxY, first.minY, "the minutes at a glance sit above")
+    }
+
+    // MARK: - The inner screen's sizes, in the debug canvas (#143)
+
+    /// ⚠ The inner screen turned, 951 × 669 pt, with the safe area measured on the owner's screenshot of #140: the
+    /// status bar sits in a column of about 83 pt on the right (with the time and the back button), so the navigation
+    /// bar starts at the top (its title about 38 pt down, the page about 89 pt), and the Wissel bar ends about 31 pt
+    /// above the bottom edge.
+    private static let turnedCanvas = "951x669@0,0,31,83"
+    /// ⚠ The inner screen upright, 669 × 951 pt; its safe area (a status bar and a home indicator) is a guess.
+    private static let uprightCanvas = "669x951@50,0,20,0"
+
+    /// Turned, 12 players: everything the coach needs during a match is in view at once, without scrolling, and nothing
+    /// sits under the Wissel bar, also with In the zone chosen (Op de bank, Extra minuten and the note) and with a
+    /// player uit (Terug and who came on). Every Uit and Terug is a target of its own of at least 44 × 44 pt.
+    @MainActor
+    func testTheTurnedInnerScreenShowsEveryStateWithoutScrollingFor12Players() throws {
+        try checkInnerScreen(Self.turnedCanvas, players: 12, name: "turned-12")
+    }
+
+    @MainActor
+    func testTheTurnedInnerScreenShowsEveryStateWithoutScrollingFor15Players() throws {
+        try checkInnerScreen(Self.turnedCanvas, players: 15, name: "turned-15")
+    }
+
+    @MainActor
+    func testTheUprightInnerScreenShowsEveryStateWithoutScrollingFor12Players() throws {
+        try checkInnerScreen(Self.uprightCanvas, players: 12, name: "upright-12")
+    }
+
+    @MainActor
+    func testTheUprightInnerScreenShowsEveryStateWithoutScrollingFor15Players() throws {
+        try checkInnerScreen(Self.uprightCanvas, players: 15, name: "upright-15")
+    }
+
+    /// Lays the live screen out at the inner screen's size in the debug canvas (`VERVANGING_CANVAS`, debug builds), and
+    /// checks the states one after the other.
+    @MainActor private func checkInnerScreen(_ canvasSpec: String, players: Int, name: String) throws {
+        try plantRoster(players)
+        app.launchEnvironment["VERVANGING_CANVAS"] = canvasSpec
+        if let shots = ProcessInfo.processInfo.environment["VERVANGING_CANVAS_SHOTS"] {
+            app.launchEnvironment["VERVANGING_CANVAS_SHOTS"] = "\(shots)/\(name)"
         }
-        XCTAssertLessThanOrEqual(span(left).maxX, span(middle).minX, "the coming wissel sits left of the court")
-        XCTAssertLessThanOrEqual(span(middle).maxX, span(right).minX, "the minutes table sits right of the court")
-        let tops = [left, middle, right].map { span($0).minY }
-        XCTAssertLessThan(tops.max()! - tops.min()!, 30, "the three columns start at the top, level: \(tops)")
-        for (name, column) in [("left", left), ("middle", middle), ("right", right)] {
-            XCTAssertLessThanOrEqual(span(column).height, Self.turnedInnerRoom,
-                                     "the \(name) column fits between the bars of the turned inner screen")
+        launchOnSetup()
+        for number in numbers.prefix(5) { tapReveal(app.buttons["setup.basis.\(number)"]) }
+        // The turned canvas on a turned phone, so the phone's status bar does not take room at its top (the Duo has its
+        // status bar on the side); the upright canvas on an upright phone. See `DebugCanvas`.
+        tapReveal(app.buttons["setup.start"])
+        let canvas = app.windows["debug.canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 10), "the debug canvas shows the live screen")
+        let width = Double(canvasSpec.prefix { $0 != "x" })!
+        if canvasSpec.hasPrefix(Self.turnedCanvas.prefix(7)) {
+            XCUIDevice.shared.orientation = .landscapeLeft
+            // Turned, the phone is 874 × 402 pt: the canvas is scaled to 402 / 669 of its size.
+            XCTAssertTrue(waitUntil { abs(canvas.frame.height - 402) < 2 }, "the canvas fills the turned phone's height")
         }
-        XCTAssertEqual(elements("live.uit.").count, players, "every row of the table has Uit")
+        let scale = canvas.frame.width / width
+        XCTAssertTrue(app.staticTexts["Blok 1 van 12"].waitForExistence(timeout: 5))
+        tapWissel(expecting: "Blok 2 van 12")
+        XCTAssertTrue(waitUntil { self.isWideLive() }, "the inner screen takes the wide layout")
+
+        // During a match: the time, the change with In the zone, the confirmation, the court, the minutes.
+        assertWholeMatchInView(canvas, scale: scale, also: [], "\(name), during a match")
+        save("inner-\(name)-match")
+
+        // In the zone chosen, with Extra minuten: Op de bank, the switch and the note come in.
+        let keep = try XCTUnwrap(elements("live.off.").first?.label)
+        pick(keep, in: "live.zone.keep")
+        let note = app.descendants(matching: .any)["live.zone.note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5), "In the zone chosen")
+        let extra = app.switches["live.zone.extra"]
+        XCTAssertTrue(extra.waitForExistence(timeout: 5))
+        extra.switches.firstMatch.tap()
+        XCTAssertTrue(waitUntil { note.label.contains("extra blok") }, "Extra minuten on: \(note.label)")
+        assertWholeMatchInView(canvas, scale: scale, also: ["live.zone.bench", "live.zone.extra", "live.zone.note"],
+                               "\(name), In the zone with Extra minuten")
+        save("inner-\(name)-zone")
+        pick("Niemand", in: "live.zone.keep")
+        XCTAssertTrue(waitUntil { !note.exists }, "In the zone cancelled")
+
+        // A player on court uit: Terug in the table and who came on for the player under the court.
+        let starter = try XCTUnwrap(elements("live.court.").first?.label)
+        let number = String(starter.dropFirst().prefix { $0 != " " })
+        let uit = app.buttons["live.uit.\(number)"]
+        XCTAssertTrue(uit.waitForExistence(timeout: 5))
+        uit.tap()
+        let terug = app.buttons["live.terug.\(number)"]
+        XCTAssertTrue(terug.waitForExistence(timeout: 5), "Terug for \(starter)")
+        XCTAssertTrue(app.staticTexts["live.replaced.\(number)"].waitForExistence(timeout: 5), "who came on for \(starter)")
+        assertWholeMatchInView(canvas, scale: scale, also: ["live.terug.\(number)", "live.replaced.\(number)"],
+                               "\(name), a player uit")
+        assertFullSizeTargets(scale: scale, name)
+        save("inner-\(name)-uit")
+
+        // The targets take their own taps: Terug answers.
+        terug.tap()
+        XCTAssertTrue(waitUntil { self.app.staticTexts["live.message"].label.contains("terug vanaf het volgende blok") },
+                      "Terug was tapped")
+    }
+
+    /// Every element the coach needs is on the screen, inside the canvas and wholly above the Wissel bar, so nothing
+    /// needs scrolling and nothing is covered.
+    @MainActor private func assertWholeMatchInView(_ canvas: XCUIElement, scale: CGFloat, also ids: [String],
+                                                   _ context: String) {
+        let bar = app.descendants(matching: .any)["live.actions"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        let bounds = canvas.frame.insetBy(dx: -0.5, dy: -0.5)
+        var all = matchElements()
+        for id in ids {
+            let element = app.descendants(matching: .any)[id]
+            XCTAssertTrue(element.exists, "\(context): \(id) is there")
+            all.append(element)
+        }
+        XCTAssertTrue(app.staticTexts["Blok 2 van 12"].isHittable, "\(context): the block is in view")
+        for element in all {
+            let frame = element.frame
+            XCTAssertTrue(bounds.contains(frame), "\(context): \(element.identifier) is inside the screen: \(frame)")
+            XCTAssertLessThanOrEqual(frame.maxY, bar.frame.minY + 0.5,
+                                     "\(context): \(element.identifier) sits above the Wissel bar (\(frame.maxY) > \(bar.frame.minY))")
+        }
+        for button in elements("live.uit.") + elements("live.terug.") {
+            XCTAssertTrue(button.isHittable, "\(context): \(button.identifier) can be tapped")
+        }
+    }
+
+    /// Every Uit and Terug is at least 44 × 44 pt on the inner screen, and no two overlap.
+    @MainActor private func assertFullSizeTargets(scale: CGFloat, _ context: String) {
+        let frames = (elements("live.uit.") + elements("live.terug.")).map { ($0.identifier, $0.frame) }
+        XCTAssertFalse(frames.isEmpty)
+        for (id, frame) in frames {
+            XCTAssertGreaterThanOrEqual(frame.width / scale, 43.5, "\(context): \(id) is \(frame.width / scale) pt wide")
+            XCTAssertGreaterThanOrEqual(frame.height / scale, 43.5, "\(context): \(id) is \(frame.height / scale) pt tall")
+        }
+        for (i, a) in frames.enumerated() {
+            for b in frames[(i + 1)...] {
+                let overlap = a.1.intersection(b.1)
+                XCTAssertTrue(overlap.isNull || overlap.width * overlap.height < 0.5, "\(context): \(a.0) and \(b.0) overlap")
+            }
+        }
+    }
+
+    /// Picks an option in one of the zone's menus.
+    @MainActor private func pick(_ option: String, in id: String) {
+        let menu = app.buttons[id]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        menu.tap()
+        let item = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", option, id)).firstMatch
+        XCTAssertTrue(item.waitForExistence(timeout: 5), "\(option) in the menu")
+        item.tap()
+    }
+
+    // MARK: - The keyboard for Tegenstander (#143)
+
+    /// On the phone layout, Klaar above the keyboard hides it and keeps what was typed, and dragging the setup down
+    /// hides it too.
+    @MainActor
+    func testKlaarAndScrollingHideTheOpponentKeyboardOnThePhone() throws {
+        try checkOpponentKeyboard(wide: false)
+    }
+
+    /// The same on the wide layout, where Tegenstander sits in the left list.
+    @MainActor
+    func testKlaarAndScrollingHideTheOpponentKeyboardInTheWideLayout() throws {
+        try checkOpponentKeyboard(wide: true)
+    }
+
+    @MainActor private func checkOpponentKeyboard(wide: Bool) throws {
+        try plantRoster(12)
+        if wide { app.launchEnvironment["VERVANGING_WIDE_LAYOUT_MIN"] = "500x0" }
+        launchOnSetup()
+        if wide {
+            try turnToLandscape()
+            XCTAssertTrue(waitUntil { self.app.collectionViews.count == 2 }, "the wide setup has its two lists")
+        }
+        // The list Tegenstander sits in: the only one on the phone, the left one on the wide layout.
+        let lists = app.collectionViews.allElementsBoundByIndex.sorted { $0.frame.minX < $1.frame.minX }
+        let list = try XCTUnwrap(lists.first)
+        let field = app.textFields["setup.opponent"]
+        let keyboard = app.keyboards.firstMatch
+        let done = app.buttons["setup.keyboardDone"]
+
+        reveal(field, in: list)
+        field.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "the keyboard is up")
+        field.typeText("Ajax")
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "Klaar sits above the keyboard")
+        done.tap()
+        XCTAssertTrue(waitUntil { !keyboard.exists }, "Klaar hides the keyboard")
+        XCTAssertEqual(field.value as? String, "Ajax", "what was typed stays")
+        save(wide ? "setup-wide-keyboard-klaar" : "setup-phone-keyboard-klaar")
+
+        reveal(field, in: list)
+        field.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "the keyboard is up again")
+        let from = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let to = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1.0))
+        from.press(forDuration: 0.05, thenDragTo: to)
+        XCTAssertTrue(waitUntil { !keyboard.exists }, "dragging the setup down hides the keyboard")
     }
 
     /// The layout is taken from the window, so it does not change while the page scrolls (on the inner screen the
@@ -263,7 +443,7 @@ final class WideLayoutUITests: XCTestCase {
         let bar = app.descendants(matching: .any)["live.actions"]
         XCTAssertTrue(bar.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Blok 2 van 12"].isHittable, "the block is in view")
-        for element in leftColumn() + middleColumn() + rightColumn() {
+        for element in matchElements() {
             XCTAssertTrue(element.isHittable, "\(element.identifier) is in view")
             XCTAssertLessThanOrEqual(element.frame.maxY, bar.frame.minY, "\(element.identifier) sits above the Wissel bar")
         }
@@ -310,24 +490,24 @@ final class WideLayoutUITests: XCTestCase {
         return (cell.frame, court.frame, table.frame)
     }
 
-    /// ⚠ The room between the bars on the turned inner screen (951 × 669 pt), about 473 pt as measured on the owner's
-    /// screenshot of #140 (the page starts about 89 pt from the top, the Wissel bar about 568 pt), less a margin.
-    private static let turnedInnerRoom: CGFloat = 460
-
-    /// The coming wissel: its time, the change, In the zone and the last action.
-    @MainActor private func leftColumn() -> [XCUIElement] {
+    /// The coming wissel and the court: the time, the change, In the zone, the last action, who is on court and who
+    /// came on for a player uit.
+    @MainActor private func wisselAndCourt() -> [XCUIElement] {
         ([app.staticTexts["live.subTime"]] + elements("live.off.") + elements("live.on.")
-            + [app.descendants(matching: .any)["live.zone.keep"], app.staticTexts["live.message"]]).filter(\.exists)
+            + [app.descendants(matching: .any)["live.zone.keep"], app.staticTexts["live.message"]]
+            + elements("live.court.") + elements("live.replaced.")).filter(\.exists)
     }
 
-    /// The minutes at a glance and who is on court.
-    @MainActor private func middleColumn() -> [XCUIElement] {
-        elements("live.overview.") + elements("live.court.")
+    /// The minutes: at a glance, and the table with Uit and Terug.
+    @MainActor private func minutesElements() -> [XCUIElement] {
+        elements("live.overview.") + elements("live.minutes.") + elements("live.uit.") + elements("live.terug.")
     }
 
-    /// The minutes table with Uit.
-    @MainActor private func rightColumn() -> [XCUIElement] {
-        [app.staticTexts["live.table.heading"]].filter(\.exists) + elements("live.minutes.") + elements("live.uit.")
+    /// Everything the coach needs during a match (#143).
+    @MainActor private func matchElements() -> [XCUIElement] { wisselAndCourt() + minutesElements() }
+
+    @MainActor private func tableRow(_ number: String) -> XCUIElement {
+        app.descendants(matching: .any)["live.minutes.\(number)"]
     }
 
     /// The frame around these elements.
@@ -408,6 +588,15 @@ final class WideLayoutUITests: XCTestCase {
         for _ in 0..<16 {
             if element.exists, element.isHittable { return }
             app.swipeDown(velocity: .slow)
+        }
+        XCTAssertTrue(element.exists && element.isHittable, "could not scroll to \(element)")
+    }
+
+    /// Scrolls one list (the wide setup has two) until the element is on screen and hittable.
+    @MainActor private func reveal(_ element: XCUIElement, in list: XCUIElement) {
+        for i in 0..<12 {
+            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, element.isHittable { return }
+            list.swipeUp(velocity: .slow)
         }
         XCTAssertTrue(element.exists && element.isHittable, "could not scroll to \(element)")
     }

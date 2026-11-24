@@ -48,6 +48,8 @@ private struct SetupContent: View {
     @State private var askingToReplace = false
     /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the window's size.
     @State private var layout = WideLayout.Kind.phone
+    /// Whether the keyboard is up for Tegenstander.
+    @FocusState private var opponentFocused: Bool
 
     var body: some View {
         if model.players.count < SetupModel.onCourt {
@@ -60,6 +62,16 @@ private struct SetupContent: View {
             // A large title stands over the left column only and would leave an empty band above the plan, so the wide
             // layout has a small title and both columns start right under it (#143).
             .navigationBarTitleDisplayMode(layout.isWide ? .inline : .automatic)
+            // The keyboard for Tegenstander gets a way down (#143, as on Spelers in #145): Klaar above the keyboard, and
+            // dragging the setup down hides it (on each list, `scrollDismissesKeyboard`).
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    // ⚠ "Klaar" is new copy (also on Spelers, #145), to confirm with the owner.
+                    Button("Klaar") { opponentFocused = false }
+                        .accessibilityIdentifier("setup.keyboardDone")
+                }
+            }
             // Asked before anything is saved, so Annuleren keeps the running match and its setup untouched.
             .alert("De lopende match stoppen en een nieuwe beginnen?", isPresented: $askingToReplace) {
                 // ⚠ New label: the web app's confirm has the browser's own OK button.
@@ -87,6 +99,7 @@ private struct SetupContent: View {
             setupSections
             planSection
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     /// The setup in a narrower list on the left, the plan beside it, so the whole plan grid and Start are in view
@@ -96,10 +109,12 @@ private struct SetupContent: View {
         GeometryReader { proxy in
             HStack(spacing: 0) {
                 List { setupSections }
+                    .scrollDismissesKeyboard(.interactively)
                     .contentMargins(.leading, 16, for: .scrollContent)
                     .contentMargins(.trailing, 12, for: .scrollContent)
                     .frame(width: min(332, max(296, proxy.size.width * 0.4)))
                 List { planSection }
+                    .scrollDismissesKeyboard(.interactively)
                     .contentMargins(.leading, 12, for: .scrollContent)
                     .contentMargins(.trailing, 16, for: .scrollContent)
             }
@@ -229,6 +244,7 @@ private struct SetupContent: View {
             TextField("Tegenstander (niet verplicht)", text: $model.opponent)
                 .autocorrectionDisabled(true)
                 .textInputAutocapitalization(.words)
+                .focused($opponentFocused)
                 .onChange(of: model.opponent) { _, new in
                     if new.count > 40 { model.opponent = String(new.prefix(40)) }
                 }
