@@ -721,6 +721,16 @@
         }
       }
     },
+    "Speler wijzigen": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speler wijzigen"
+          }
+        }
+      }
+    },
     "Spelers": {
       "localizations": {
         "nl": {

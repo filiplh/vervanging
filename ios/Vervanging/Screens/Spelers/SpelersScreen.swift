@@ -3,7 +3,9 @@ import VervangingCore
 
 /// The Spelers screen: add, edit and remove players (first name and jersey number, up to 15; plan decision #14).
 /// Each player's season total sits under the name (decision #26), and "Wis geschiedenis" below the list resets them.
-/// Copy and behaviour follow the web app's roster screen (`rosterScreen` in `public/js/setup.js`).
+/// Copy and behaviour follow the web app's roster screen (`rosterScreen` in `public/js/setup.js`), except that Wijzig
+/// opens a sheet over the list instead of loading the player into the form (#149): the form at the top only adds, and
+/// the list keeps its scroll position while a player is edited.
 struct SpelersScreen: View {
     @State private var model: SpelersModel
     @State private var name = ""
@@ -38,7 +40,7 @@ struct SpelersScreen: View {
                 // On the number field, the last one to fill, the player can be added from here too (the same action
                 // as the form's button), so entering a roster stays quick.
                 if focus == .number {
-                    Button(model.editing == nil ? "Toevoegen" : "Bewaren", action: submit)
+                    Button("Toevoegen", action: submit)
                         .accessibilityIdentifier("spelers.keyboardSubmit")
                 }
                 Spacer()
@@ -56,15 +58,16 @@ struct SpelersScreen: View {
             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
             presenting: removing
         ) { player in
-            Button("Verwijder", role: .destructive) {
-                model.remove(player)
-                if model.editingId == nil { clearFields() }
-            }
+            Button("Verwijder", role: .destructive) { model.remove(player) }
             Button("Annuleren", role: .cancel) {}
         }
         .alert(Text("De geschiedenis van alle vorige matchen wissen?"), isPresented: $clearing) {
             Button("Wis geschiedenis", role: .destructive) { model.clearHistory() }
             Button("Annuleren", role: .cancel) {}
+        }
+        // Wijzig opens the player in a sheet (#149). Swiping it down cancels, as Annuleren does.
+        .sheet(item: Binding(get: { model.editing }, set: { if $0 == nil { model.cancelEditing() } })) { player in
+            EditPlayerSheet(model: model, player: player)
         }
     }
 
@@ -98,19 +101,9 @@ struct SpelersScreen: View {
                         if new.count > SpelersModel.maxNumber { number = String(new.prefix(SpelersModel.maxNumber)) }
                     }
                     .accessibilityIdentifier("spelers.number")
-                HStack {
-                    Button(model.editing == nil ? "Toevoegen" : "Bewaren", action: submit)
-                        .buttonStyle(.glassProminent)
-                        .accessibilityIdentifier("spelers.submit")
-                    if model.editing != nil {
-                        Button("Annuleren") {
-                            model.cancelEditing()
-                            clearFields()
-                        }
-                        .buttonStyle(.glass)
-                        .accessibilityIdentifier("spelers.cancel")
-                    }
-                }
+                Button("Toevoegen", action: submit)
+                    .buttonStyle(.glassProminent)
+                    .accessibilityIdentifier("spelers.submit")
             }
             if !model.message.isEmpty {
                 Text(model.message)
@@ -180,10 +173,9 @@ struct SpelersScreen: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Button("Wijzig") {
+                // The add form keeps what was typed in it; the keyboard goes down so the sheet has the screen.
+                focus = nil
                 model.startEditing(player)
-                name = player.name
-                number = player.number
-                focus = .name
             }
             .buttonStyle(.glass)
             .accessibilityIdentifier("spelers.edit.\(player.number)")
