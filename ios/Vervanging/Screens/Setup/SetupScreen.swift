@@ -3,7 +3,7 @@ import VervangingCore
 
 /// The match setup on one screen (plan decisions #7, #10, #19, #20): who is present, the basisvijf, the schema, the
 /// history switch, the opponent, the plan grid with swaps, and Start. Copy and behaviour follow the web app's setup
-/// screen (`setupScreen` in `public/js/setup.js`). Phone layout; the wide layout for the Duo's inner screen is #105.
+/// screen (`setupScreen` in `public/js/setup.js`). On the Duo's inner screen the plan sits beside the rest (#105).
 struct SetupScreen: View {
     let rosterStore: RosterStore
     let setupStore: SetupStore
@@ -46,26 +46,54 @@ private struct SetupContent: View {
     let runningMatch: (() -> Void)?
 
     @State private var askingToReplace = false
+    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the room the screen has.
+    @State private var wide = false
 
     var body: some View {
         if model.players.count < SetupModel.onCourt {
             tooFewPlayers
         } else {
-            List {
-                if let runningMatch {
-                    Section { backToMatch(runningMatch) }
-                }
-                attendanceSection
-                scheduleSection
-                historySection
-                opponentSection
-                planSection
+            Group {
+                if wide { wideLayout } else { phoneLayout }
             }
+            .measuresWideLayout($wide)
             // Asked before anything is saved, so Annuleren keeps the running match and its setup untouched.
             .alert("De lopende match stoppen en een nieuwe beginnen?", isPresented: $askingToReplace) {
                 // ⚠ New label: the web app's confirm has the browser's own OK button.
                 Button("Nieuwe match", role: .destructive, action: startNow)
                 Button("Annuleren", role: .cancel) {}
+            }
+        }
+    }
+
+    /// Everything before the plan: back to a running match, who is present, the schema, the history and the opponent.
+    @ViewBuilder
+    private var setupSections: some View {
+        if let runningMatch {
+            Section { backToMatch(runningMatch) }
+        }
+        attendanceSection
+        scheduleSection
+        historySection
+        opponentSection
+    }
+
+    /// One list: the setup, then the plan.
+    private var phoneLayout: some View {
+        List {
+            setupSections
+            planSection
+        }
+    }
+
+    /// The setup in a narrower list on the left, the plan beside it, so the whole plan grid and Start are in view
+    /// without scrolling on the Duo's inner screen (decision #41). ⚠ Column widths chosen by the agent.
+    private var wideLayout: some View {
+        GeometryReader { proxy in
+            HStack(spacing: 0) {
+                List { setupSections }
+                .frame(width: min(320, max(260, proxy.size.width * 0.4)))
+                List { planSection }
             }
         }
     }
