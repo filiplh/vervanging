@@ -113,7 +113,7 @@ struct LiveScreen: View {
         HStack(alignment: .top, spacing: 24) {
             VStack(alignment: .leading, spacing: 8) {
                 subTime
-                MinutesOverview(rows: model.minutes)
+                MinutesOverview(rows: model.minutes, perRow: 6)
                 change
                 message
                 court
@@ -383,7 +383,8 @@ private struct MinutesOverview: View {
     let rows: [MinutesRow]
     /// How many cells to a row; by default six (as on the web) up to twelve players and eight for 13 to 15, so the grid
     /// never takes more than two rows and the change below it stays above the Wissel bar on the Duo's outer screen
-    /// (#77). The turned inner screen sets four, so the cells in its narrower middle column keep their full text size.
+    /// (#77). The wide layout sets six upright and four turned, so the cells in its narrower columns keep their full
+    /// text size.
     var perRow: Int?
 
     private var columns: [GridItem] {
@@ -429,9 +430,9 @@ private struct MinutesTable: View {
     let model: LiveModel
     var style = Style.below
 
-    /// Below the court on the phone; beside it on the wide layout, its heading level with the other columns; compact
-    /// on the turned inner screen: shorter rows, a narrower action column and no Speler and Minuten line under the
-    /// heading, so 15 players fit between the bars.
+    /// Below the court on the phone; beside it on the wide layout, its heading level with the other columns and with a
+    /// narrower action column, so names in its half of the screen stay on one line; compact on the turned inner screen:
+    /// also shorter rows and no Speler and Minuten line under the heading, so 15 players fit between the bars.
     enum Style { case below, beside, compact }
 
     /// ⚠ The compact heights are the agent's choice, sized so 12 players (32 pt rows) or 15 (28 pt, with smaller Uit
@@ -509,7 +510,7 @@ private struct MinutesTable: View {
         .buttonStyle(.glass)
         .controlSize(crowded ? .mini : .small)
         .font(crowded ? .caption.weight(.medium) : .subheadline.weight(.medium))
-        .frame(width: style == .compact ? 68 : 84)
+        .frame(width: style == .below ? 84 : 68)
     }
 }
 

@@ -98,7 +98,7 @@ private struct SetupContent: View {
                 List { setupSections }
                     .contentMargins(.leading, 16, for: .scrollContent)
                     .contentMargins(.trailing, 12, for: .scrollContent)
-                    .frame(width: min(332, max(272, proxy.size.width * 0.4)))
+                    .frame(width: min(332, max(296, proxy.size.width * 0.4)))
                 List { planSection }
                     .contentMargins(.leading, 12, for: .scrollContent)
                     .contentMargins(.trailing, 16, for: .scrollContent)
