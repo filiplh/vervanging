@@ -6,36 +6,86 @@ import VervangingCore
 /// minuten for it, who is on court, one big Wissel button with Ongedaan maken beside it, and the full minutes table
 /// below with Uit and Terug. After the last block it shows the minutes per player.
 /// Copy and behaviour follow the web app's live screen (`liveScreen` in `public/js/live.js`). On the Duo's inner screen
-/// the minutes sit beside the court (#105). No timer of any kind (ADR-001).
+/// everything sits side by side in columns, so a match needs no scrolling (#105, #143). No timer of any kind (ADR-001).
 struct LiveScreen: View {
     let model: LiveModel
     /// Back to setup for a new match, from the end of the match.
     var onNewMatch: () -> Void = {}
+    /// Set on the copy the debug canvas shows (`DebugCanvas`, debug builds only).
+    var inCanvas = false
 
-    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the room the screen has. The match lives
-    /// in the model, so switching layouts mid-match keeps it as it was.
-    @State private var wide = false
+    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the window's size. The match lives in the
+    /// model, so switching layouts mid-match keeps it as it was.
+    @State private var layout = WideLayout.Kind.phone
+    /// The width the two columns of the wide layout share, with their gap.
+    @State private var wideWidth: CGFloat = 0
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
-                // 15-player match (#77).
-                VStack(alignment: .leading, spacing: 8) {
-                    if !model.isRunning { ended } else if wide { playingWide } else { playing }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        #if DEBUG
+        if !inCanvas, DebugCanvas.spec != nil { canvasHost } else { screen }
+        #else
+        screen
+        #endif
+    }
+
+    #if DEBUG
+    /// Debug builds with `VERVANGING_CANVAS` set: the screen is shown in the debug canvas, at the size it names, instead
+    /// of here (#143).
+    private var canvasHost: some View {
+        Color.clear
+            .toolbar(.hidden, for: .navigationBar)
+            .toolbar(.hidden, for: .tabBar)
+            // Shown again when the simulator turns, so the canvas fits the screen; the match lives in the model. Keyed
+            // on the window's size (size plus safe area), which only a turn changes.
+            .onGeometryChange(for: CGSize.self) { proxy in
+                CGSize(width: proxy.size.width + proxy.safeAreaInsets.leading + proxy.safeAreaInsets.trailing,
+                       height: proxy.size.height + proxy.safeAreaInsets.top + proxy.safeAreaInsets.bottom)
+            } action: { _ in
+                DebugCanvas.hide()
+                DebugCanvas.show(NavigationStack { LiveScreen(model: model, onNewMatch: onNewMatch, inCanvas: true) })
             }
-            .measuresWideLayout($wide)
-            // After every action the line under it is brought into view, also when the coach had scrolled down the
-            // minutes table (or tapped Uit there): it is the only answer to the tap (PR #130 review). Choosing In the
-            // zone, or switching Extra minuten, brings the zone choice into view, as the web does for its toggle
-            // (#74). Both scroll only as far as needed, so a line already in view does not move the page.
-            .onChange(of: model.actions) { reveal(Self.messageID, proxy) }
-            .onChange(of: model.zone) { _, zone in if zone != nil { reveal(Self.zoneID, proxy) } }
+            .onDisappear { DebugCanvas.hide() }
+            .onChange(of: model.actions) { DebugCanvas.shot() }
+            .onChange(of: model.zone) { DebugCanvas.shot() }
+    }
+    #endif
+
+    private var screen: some View {
+        // The GeometryReader takes the room the screen has and never the size of what it holds, so the layout and the
+        // wide layout's column widths come from the screen, not from columns sized for an earlier screen.
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
+                    // 15-player match (#77).
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !model.isRunning {
+                            ended
+                        } else {
+                            switch layout {
+                            case .phone: playing
+                            case .portrait: playingWide
+                            case .landscape: playingWideTurned
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // On the inner screen a match fits without scrolling: the page then stays still instead of bouncing (#143).
+                .scrollBounceBehavior(layout.isWide ? .basedOnSize : .automatic)
+                // After every action the line under it is brought into view, also when the coach had scrolled down the
+                // minutes table (or tapped Uit there): it is the only answer to the tap (PR #130 review). Choosing In the
+                // zone, or switching Extra minuten, brings the zone choice into view, as the web does for its toggle
+                // (#74). Both scroll only as far as needed, so a line already in view does not move the page.
+                .onChange(of: model.actions) { reveal(Self.messageID, proxy) }
+                .onChange(of: model.zone) { _, zone in if zone != nil { reveal(Self.zoneID, proxy) } }
+            }
+            // The width the wide layout's columns share: the page's, less its side padding.
+            .onChange(of: geometry.size.width, initial: true) { _, width in wideWidth = max(0, width - 32) }
         }
+        .measuresWideLayout($layout)
         .safeAreaBar(edge: .bottom) { actions }
         .navigationTitle(model.isRunning ? model.blockTitle : String(localized: "Einde match"))
         .navigationSubtitle(subtitle)
@@ -94,43 +144,91 @@ struct LiveScreen: View {
             .accessibilityIdentifier("live.subTime")
     }
 
-    /// The wide layout (decision #41): the block's time on top, then the change, the last action and the court on the
-    /// left, and the minutes beside them on the right, at a glance and in the table. ⚠ Arrangement chosen by the agent.
-    @ViewBuilder
+    /// The wide layout with the inner screen upright (decision #41, #143): two columns from the top. On the left the
+    /// block's time, the minutes at a glance, who goes off and comes on beside who is on court, who came on for a player
+    /// uit, In the zone and the last action; on the right the minutes table with Uit and Terug, each a 44 pt target.
+    /// ⚠ Arrangement chosen by the agent.
     private var playingWide: some View {
-        subTime
+        HStack(alignment: .top, spacing: 24) {
+            VStack(alignment: .leading, spacing: 8) {
+                subTime
+                MinutesOverview(rows: model.minutes, perRow: 6)
+                changeAndCourt(width: wideColumn(0.5, gap: 24))
+                replacementNotes
+                if let change = model.nextChange, !model.zoneCandidates.isEmpty { zoneChoice(change) }
+                message
+            }
+            .frame(width: wideColumn(0.5, gap: 24), alignment: .leading)
+            MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model, style: .beside)
+                .frame(width: wideColumn(0.5, gap: 24), alignment: .leading)
+        }
+    }
+
+    /// The wide layout with the inner screen turned (#143): two columns from the top, so the whole match fits between
+    /// the bars without scrolling. On the left the coming wissel and the court: the time, who goes off and comes on
+    /// beside who is on court, who came on for a player uit, In the zone and the last action. On the right the minutes:
+    /// at a glance, eight to a row, and the table with Uit and Terug in two halves, its rows and buttons 44 pt tall, so
+    /// every button is a full-size target even with 15 players. ⚠ Arrangement and column shares chosen by the agent.
+    private var playingWideTurned: some View {
         HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
-                if let change = model.nextChange {
-                    nextChange(change)
-                    if !model.zoneCandidates.isEmpty { zoneChoice(change) }
-                }
+                subTime
+                changeAndCourt(width: wideColumn(0.40, gap: 20))
+                replacementNotes
+                if let change = model.nextChange, !model.zoneCandidates.isEmpty { zoneChoice(change) }
                 message
-                court
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: wideColumn(0.40, gap: 20), alignment: .leading)
             VStack(alignment: .leading, spacing: 8) {
-                MinutesOverview(rows: model.minutes)
-                MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model)
+                MinutesOverview(rows: model.minutes, perRow: 8)
+                MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model,
+                             style: .halves)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: wideColumn(0.60, gap: 20), alignment: .leading)
+        }
+    }
+
+    /// This share of the wide layout's width, less the gap between its two columns; nil until it is measured.
+    private func wideColumn(_ share: CGFloat, gap: CGFloat) -> CGFloat? {
+        wideWidth > 0 ? max(0, wideWidth - gap) * share : nil
+    }
+
+    /// Eruit, Erin and Op het veld in three equal columns, in a column this wide.
+    private func changeAndCourt(width: CGFloat?) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            if let change = model.nextChange {
+                nextChange(change).frame(width: width.map { ($0 - 24) / 3 * 2 + 12 })
+            }
+            courtList.frame(width: width.map { ($0 - 24) / 3 }, alignment: .leading)
         }
     }
 
     private var court: some View {
         VStack(alignment: .leading, spacing: 2) {
+            courtList
+            replacementNotes
+        }
+    }
+
+    /// "Op het veld" and who is on court.
+    private var courtList: some View {
+        VStack(alignment: .leading, spacing: 2) {
             Text("Op het veld")
                 .font(.headline)
                 .accessibilityAddTraits(.isHeader)
             NameList(players: model.onCourt, id: "live.court", emphasis: true)
-            ForEach(model.replacements, id: \.starter.id) { pair in
-                Text("\(LiveModel.label(pair.replacement)) kwam erin voor \(LiveModel.label(pair.starter)) (uit). Het blok telt voor \(LiveModel.label(pair.starter)).")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 4)
-                    .accessibilityIdentifier("live.replaced.\(pair.starter.number)")
-            }
+        }
+    }
+
+    /// Who came on for each player uit in this block.
+    private var replacementNotes: some View {
+        ForEach(model.replacements, id: \.starter.id) { pair in
+            Text("\(LiveModel.label(pair.replacement)) kwam erin voor \(LiveModel.label(pair.starter)) (uit). Het blok telt voor \(LiveModel.label(pair.starter)).")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 4)
+                .accessibilityIdentifier("live.replaced.\(pair.starter.number)")
         }
     }
 
@@ -152,6 +250,8 @@ struct LiveScreen: View {
                     Text("In the zone")
                 }
                 .pickerStyle(.menu)
+                // Never broken over two lines in the narrower column of the turned inner screen (#143).
+                .fixedSize()
                 .accessibilityIdentifier("live.zone.keep")
             } label: {
                 Text("In the zone").font(.subheadline.weight(.semibold))
@@ -332,11 +432,13 @@ private struct PlayerName: View {
 /// below.
 private struct MinutesOverview: View {
     let rows: [MinutesRow]
+    /// How many cells to a row; by default six (as on the web) up to twelve players and eight for 13 to 15, so the grid
+    /// never takes more than two rows and the change below it stays above the Wissel bar on the Duo's outer screen
+    /// (#77). The wide layout sets six upright and eight turned, so the cells keep their full text size.
+    var perRow: Int?
 
-    /// Six to a row (as on the web) up to twelve players; eight to a row for 13 to 15, so the grid never takes more
-    /// than two rows and the change below it stays above the Wissel bar on the Duo's outer screen (#77).
     private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 4), count: rows.count > 12 ? 8 : 6)
+        Array(repeating: GridItem(.flexible(), spacing: 4), count: perRow ?? (rows.count > 12 ? 8 : 6))
     }
 
     var body: some View {
@@ -376,23 +478,47 @@ private struct MinutesTable: View {
     let heading: String
     let rows: [MinutesRow]
     let model: LiveModel
+    var style = Style.below
+
+    /// Below the court on the phone. Beside it on the wide layout upright: its heading level with the other column.
+    /// In two halves side by side on the wide layout turned, without heading (the minutes at a glance sit above it), so
+    /// 15 players take eight rows. On the wide layout every Uit and Terug is a full 44 × 44 pt target (#143).
+    enum Style { case below, beside, halves }
+
+    private var isWide: Bool { style != .below }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(heading)
-                .font(.headline)
-                .padding(.bottom, 6)
-                .accessibilityAddTraits(.isHeader)
-            HStack {
-                Text("Speler")
-                Spacer()
-                Text("Minuten")
+        if style == .halves {
+            let half = (rows.count + 1) / 2
+            HStack(alignment: .top, spacing: 12) {
+                rowList(rows.prefix(half))
+                rowList(rows.dropFirst(half))
             }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-            .accessibilityHidden(true)
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(heading)
+                    .font(.headline)
+                    .padding(.bottom, 6)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("live.table.heading")
+                HStack {
+                    Text("Speler")
+                    Spacer()
+                    Text("Minuten")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+                .accessibilityHidden(true)
+                rowList(rows[...])
+            }
+            .padding(.top, style == .below ? 8 : 0)
+        }
+    }
+
+    private func rowList(_ rows: ArraySlice<MinutesRow>) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
                 HStack(spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
@@ -412,26 +538,40 @@ private struct MinutesTable: View {
                 }
                 .fontWeight(row.onCourt ? .semibold : .regular)
                 .padding(.horizontal, 8)
-                .frame(minHeight: 44)
+                // ⚠ 46 pt on the wide layout: a 44 pt button with a point free above and below. Chosen by the agent.
+                .frame(minHeight: isWide ? 46 : 44)
                 .overlay(alignment: .leading) {
                     if row.onCourt { Rectangle().fill(.tint).frame(width: 4) }
                 }
                 .overlay(alignment: .bottom) { Divider() }
             }
         }
-        .padding(.top, 8)
     }
 
     /// Uit, or Terug for a player uit; nothing for a player uit in the last block, where Terug cannot apply. The column
-    /// keeps one width, so the minutes stay in line.
+    /// keeps one width, so the minutes stay in line. On the wide layout the button fills a 68 × 44 pt frame, so each
+    /// one is a target of its own of at least 44 × 44 pt (the touch-target guideline).
+    @ViewBuilder
     private func action(_ row: MinutesRow) -> some View {
+        if isWide {
+            actionButton(row)
+                .controlSize(.regular)
+                .frame(width: 68, height: 44)
+        } else {
+            actionButton(row)
+                .controlSize(.small)
+                .frame(width: 84)
+        }
+    }
+
+    private func actionButton(_ row: MinutesRow) -> some View {
         Group {
             if !row.out {
-                Button { model.uit(row.player) } label: { Text("Uit").frame(maxWidth: .infinity) }
+                Button { model.uit(row.player) } label: { label("Uit") }
                     .accessibilityLabel(Text("Uit: \(LiveModel.label(row.player))"))
                     .accessibilityIdentifier("live.uit.\(row.player.number)")
             } else if model.canTerug {
-                Button { model.terug(row.player) } label: { Text("Terug").frame(maxWidth: .infinity) }
+                Button { model.terug(row.player) } label: { label("Terug") }
                     .accessibilityLabel(Text("Terug: \(LiveModel.label(row.player))"))
                     .accessibilityIdentifier("live.terug.\(row.player.number)")
             } else {
@@ -439,9 +579,17 @@ private struct MinutesTable: View {
             }
         }
         .buttonStyle(.glass)
-        .controlSize(.small)
         .font(.subheadline.weight(.medium))
-        .frame(width: 84)
+    }
+
+    /// The button's text; on the wide layout it fills the frame, so the button does.
+    @ViewBuilder
+    private func label(_ text: LocalizedStringKey) -> some View {
+        if isWide {
+            Text(text).frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Text(text).frame(maxWidth: .infinity)
+        }
     }
 }
 
