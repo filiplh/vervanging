@@ -2,7 +2,8 @@ import Foundation
 import Observation
 import VervangingCore
 
-/// The Spelers screen's state: the roster, the player being edited and the message under the form, plus the season
+/// The Spelers screen's state: the roster, the player being edited in the sheet (#149) with its own message, and the
+/// message under the add form, plus the season
 /// totals from the team history (decision #26) and "Wis geschiedenis" (decision #10, #104). Every change is written to
 /// the store at once (plan decision #38). The totals are the engine's `seasonSummary`; the screen only formats them.
 ///
@@ -16,8 +17,12 @@ final class SpelersModel {
     static let maxNumber = 2
 
     private(set) var roster: Roster
+    /// The player open in the edit sheet (#149); nil while the sheet is closed. The add form never edits.
     private(set) var editingId: Int?
+    /// The line under the add form: why an entry was refused, or that saving failed.
     var message = ""
+    /// The line inside the edit sheet: why the edited values were refused (the same messages as the add form).
+    private(set) var editMessage = ""
     /// The team history the totals come from, read again each time the screen opens.
     private(set) var history: History
     /// The line under Wis geschiedenis: "Geschiedenis gewist." or that saving failed. Empty until it is used.
@@ -86,7 +91,7 @@ final class SpelersModel {
         return "\(s / 3600):" + String(format: "%02d:%02d", s / 60 % 60, s % 60)
     }
 
-    var isFull: Bool { editingId == nil && roster.players.count >= Roster.maxPlayers }
+    var isFull: Bool { roster.players.count >= Roster.maxPlayers }
     var editing: Player? { roster.players.first { $0.id == editingId } }
     var sortedPlayers: [Player] { roster.players.sorted(by: Self.byNumber) }
 
@@ -104,22 +109,36 @@ final class SpelersModel {
         return nil
     }
 
-    /// Adds the entry, or saves it over the player being edited. True when it was accepted.
+    /// Adds the entry from the add form. True when it was accepted.
     @discardableResult
     func submit(name rawName: String, number rawNumber: String) -> Bool {
-        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let number = rawNumber.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let error = Self.check(roster, name: name, number: number, editingId: editingId) {
+        let (name, number) = Self.trimmed(rawName, rawNumber)
+        if let error = Self.check(roster, name: name, number: number, editingId: nil) {
             message = error
             return false
         }
         message = ""
-        var next = roster
-        if let id = editingId, let index = next.players.firstIndex(where: { $0.id == id }) {
-            next.players[index] = Player(id: id, name: name, number: number)
-        } else {
-            next = next.adding(name: name, number: number)
+        persist(roster.adding(name: name, number: number))
+        return true
+    }
+
+    /// Saves the sheet's values over the player being edited, with the same checks as adding (its own number is
+    /// allowed). True when it was accepted and the sheet can close; otherwise `editMessage` says why.
+    @discardableResult
+    func saveEditing(name rawName: String, number rawNumber: String) -> Bool {
+        guard let id = editingId, let index = roster.players.firstIndex(where: { $0.id == id }) else {
+            cancelEditing()
+            return true
         }
+        let (name, number) = Self.trimmed(rawName, rawNumber)
+        if let error = Self.check(roster, name: name, number: number, editingId: id) {
+            editMessage = error
+            return false
+        }
+        editMessage = ""
+        message = ""
+        var next = roster
+        next.players[index] = Player(id: id, name: name, number: number)
         editingId = nil
         persist(next)
         return true
@@ -127,16 +146,20 @@ final class SpelersModel {
 
     func startEditing(_ player: Player) {
         editingId = player.id
-        message = ""
+        editMessage = ""
     }
 
     func cancelEditing() {
         editingId = nil
-        message = ""
+        editMessage = ""
+    }
+
+    private nonisolated static func trimmed(_ name: String, _ number: String) -> (String, String) {
+        (name.trimmingCharacters(in: .whitespacesAndNewlines), number.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func remove(_ player: Player) {
-        if editingId == player.id { editingId = nil }
+        if editingId == player.id { cancelEditing() }
         message = ""
         var next = roster
         next.players.removeAll { $0.id == player.id }

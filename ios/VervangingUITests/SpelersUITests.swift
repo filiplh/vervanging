@@ -1,6 +1,6 @@
 import XCTest
 
-/// The Spelers screen (#100): add, edit and remove players, the web app's refusals and the 15-player limit, and the
+/// The Spelers screen (#100): add, edit (in a sheet, #149) and remove players, the web app's refusals and the 15-player limit, and the
 /// roster file that is written after every change and read again on launch.
 ///
 /// Every test gives the app its own empty storage folder through `VERVANGING_STORAGE_DIR` (read by debug builds only),
@@ -71,7 +71,7 @@ final class SpelersUITests: XCTestCase {
         XCTAssertEqual(order, order.sorted(), "rows sorted by number, 7 before 07 (as the web app)")
     }
 
-    // MARK: - Edit
+    // MARK: - Edit, in a sheet over the list (#149)
 
     @MainActor
     func testEditChangesNameAndNumberAndIsSaved() throws {
@@ -79,18 +79,21 @@ final class SpelersUITests: XCTestCase {
         addPlayer("Lotte", "7")
         tapInRow(app.buttons["spelers.edit.7"])
 
-        expectShown(app.buttons["Bewaren"])
-        expectShown(app.buttons["Annuleren"])
-        expectValue(field("spelers.name"), "Lotte")
-        expectValue(field("spelers.number"), "7")
+        expectShown(sheet)
+        expectShown(saveButton)
+        expectShown(cancelButton)
+        expectValue(field("spelers.sheet.name"), "Lotte")
+        expectValue(field("spelers.sheet.number"), "7")
+        expectValue(field("spelers.name"), "Voornaam", "the add form is not used for editing")
 
-        replace(field("spelers.name"), with: "Fien")
-        replace(field("spelers.number"), with: "8")
-        tap(submitButton)
+        replace(field("spelers.sheet.name"), with: "Fien")
+        replace(field("spelers.sheet.number"), with: "8")
+        tap(saveButton)
 
+        expectGone(sheet, "Bewaren closes the sheet")
         expectRow("8", containing: "Fien")
         expectGone(row("7"))
-        expectShown(app.buttons["Toevoegen"], "back to adding after saving")
+        expectShown(app.buttons["Toevoegen"])
         expectShown(app.staticTexts["1 van 15"])
 
         app.terminate()
@@ -99,24 +102,133 @@ final class SpelersUITests: XCTestCase {
     }
 
     @MainActor
-    func testEditKeepsOwnNumberAndCancelLeavesPlayerAsIs() throws {
+    func testEditKeepsOwnNumberAndCancelOrSwipeDownLeavesPlayerAsIs() throws {
         launch()
         addPlayer("Lotte", "7")
 
         // Saving with the player's own number is fine (the number is not "taken" by herself).
         tapInRow(app.buttons["spelers.edit.7"])
-        replace(field("spelers.name"), with: "Lotje")
-        tap(submitButton)
+        replace(field("spelers.sheet.name"), with: "Lotje")
+        tap(saveButton)
+        expectGone(sheet)
         expectRow("7", containing: "Lotje")
         expectGone(app.staticTexts["spelers.message"])
 
         // Annuleren drops the change.
         tapInRow(app.buttons["spelers.edit.7"])
-        replace(field("spelers.name"), with: "Iemand")
-        tap(app.buttons["Annuleren"])
-        expectShown(app.buttons["Toevoegen"])
+        replace(field("spelers.sheet.name"), with: "Iemand")
+        tap(cancelButton)
+        expectGone(sheet, "Annuleren closes the sheet")
         expectRow("7", containing: "Lotje")
-        expectValue(field("spelers.name"), "Voornaam")
+
+        // Swiping the sheet down drops the change too.
+        tapInRow(app.buttons["spelers.edit.7"])
+        replace(field("spelers.sheet.name"), with: "Iemand")
+        hideSheetKeyboard()
+        swipeSheetDown()
+        expectGone(sheet, "swiping down closes the sheet")
+        expectRow("7", containing: "Lotje")
+
+        // The next Wijzig starts from the stored values, not from the dropped ones.
+        tapInRow(app.buttons["spelers.edit.7"])
+        expectValue(field("spelers.sheet.name"), "Lotje")
+        tap(cancelButton)
+
+        let players = try XCTUnwrap(try storedRoster()["players"] as? [[String: Any]])
+        XCTAssertEqual(players.first?["name"] as? String, "Lotje", "nothing cancelled was saved")
+    }
+
+    @MainActor
+    func testTakenNumberIsRefusedInsideTheSheet() throws {
+        launch()
+        addPlayer("Lotte", "7")
+        addPlayer("Fien", "12")
+
+        tapInRow(app.buttons["spelers.edit.12"])
+        replace(field("spelers.sheet.number"), with: "7")
+        tap(saveButton)
+        expectMessage("Rugnummer 7 is al van Lotte.", in: "spelers.sheet.message")
+        expectShown(sheet, "a refused value keeps the sheet open")
+        expectValue(field("spelers.sheet.number"), "7", "a refused value stays in the sheet")
+        XCTAssertFalse(app.staticTexts["spelers.message"].exists, "the message is in the sheet, not under the add form")
+
+        // An empty name, with the same message as when adding.
+        replace(field("spelers.sheet.name"), with: "")
+        replace(field("spelers.sheet.number"), with: "13")
+        tap(saveButton)
+        expectMessage("Vul een voornaam in.", in: "spelers.sheet.message")
+
+        tap(cancelButton)
+        expectGone(sheet)
+        expectRow("12", containing: "Fien")
+        expectGone(row("13"))
+
+        // The message is gone the next time the sheet opens.
+        tapInRow(app.buttons["spelers.edit.12"])
+        expectShown(saveButton)
+        expectGone(app.staticTexts["spelers.sheet.message"])
+        tap(cancelButton)
+    }
+
+    @MainActor
+    func testEditingARowFarDownKeepsTheListWhereItWas() throws {
+        // A full list of 15, taller than the screen: the last row is only reached by scrolling.
+        try plant(players: (1...15).map { (id: $0, name: "Speler\($0)", number: String($0 + 10)) })
+        launch()
+        let last = row("25")
+        expectShown(row("11"))
+        // The list loads rows as they come into view, so the last one only exists after scrolling.
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<8 where !inView(app.buttons["spelers.edit.25"]) { list.swipeUp() }
+        XCTAssertTrue(inView(app.buttons["spelers.edit.25"]), "scrolled down to the last row")
+        XCTAssertFalse(inView(app.staticTexts["spelers.full"]), "the top of the list is scrolled away")
+        // Let the scroll settle: the row's place no longer changes between two reads.
+        var settled = CGFloat.nan
+        _ = waitUntil {
+            let now = last.frame.minY
+            defer { settled = now }
+            return now == settled
+        }
+        let before = last.frame.minY
+
+        // Refused, then cancelled: the list has not moved.
+        tap(app.buttons["spelers.edit.25"])
+        replace(field("spelers.sheet.number"), with: "11")
+        tap(saveButton)
+        expectMessage("Rugnummer 11 is al van Speler1.", in: "spelers.sheet.message")
+        tap(cancelButton)
+        expectGone(sheet)
+        XCTAssertEqual(row("25").frame.minY, before, accuracy: 1, "the list is where it was after Annuleren")
+
+        // Saved: the row keeps its place (still the highest number) and shows the new values.
+        tap(app.buttons["spelers.edit.25"])
+        replace(field("spelers.sheet.name"), with: "Lotte")
+        replace(field("spelers.sheet.number"), with: "99")
+        tap(saveButton)
+        expectGone(sheet)
+        expectRow("99", containing: "Lotte")
+        XCTAssertEqual(row("99").frame.minY, before, accuracy: 1, "the list is where it was after Bewaren")
+        XCTAssertTrue(app.buttons["spelers.edit.99"].isHittable, "the edited row is in view without scrolling")
+        XCTAssertFalse(inView(app.staticTexts["spelers.full"]), "the list did not jump back to the top")
+    }
+
+    @MainActor
+    func testKlaarHidesTheKeyboardInTheSheet() throws {
+        launch()
+        addPlayer("Lotte", "7")
+        tapInRow(app.buttons["spelers.edit.7"])
+        let done = app.buttons["spelers.sheet.keyboardDone"]
+
+        tap(field("spelers.sheet.name"))
+        expectShown(keyboard)
+        tap(done)
+        expectGone(keyboard, "Klaar hides the keyboard from the sheet's name field")
+
+        tap(field("spelers.sheet.number"))
+        expectShown(keyboard)
+        tap(done)
+        expectGone(keyboard, "Klaar hides the number pad in the sheet")
+        expectShown(sheet, "Klaar leaves the sheet open")
     }
 
     // MARK: - Remove
@@ -199,16 +311,15 @@ final class SpelersUITests: XCTestCase {
         XCTAssertTrue(waitUntil { self.hasFocus(self.field("spelers.name")) }, "the name field is ready for the next player")
         expectShown(keyboard, "the keyboard stays up for the next player")
 
-        // Editing: the keyboard's button saves, as Bewaren does.
-        tapInRow(app.buttons["spelers.edit.7"])
+        // The form only adds (#149): the keyboard's button adds the next player too.
+        replace(field("spelers.name"), with: "Fien")
         replace(field("spelers.number"), with: "8")
-        let save = app.buttons["spelers.keyboardSubmit"]
-        expectShown(save)
-        XCTAssertEqual(save.label, "Bewaren")
-        tap(save)
-        expectRow("8", containing: "Lotte")
-        expectGone(row("7"))
-        expectShown(app.buttons["Toevoegen"], "back to adding after saving")
+        let add = app.buttons["spelers.keyboardSubmit"]
+        expectShown(add)
+        XCTAssertEqual(add.label, "Toevoegen")
+        tap(add)
+        expectRow("8", containing: "Fien")
+        expectRow("7", containing: "Lotte")
     }
 
     @MainActor
@@ -293,14 +404,19 @@ final class SpelersUITests: XCTestCase {
         expectShown(app.staticTexts["spelers.full"])
         expectGone(field("spelers.name"))
 
-        // Editing a player is still possible on a full roster.
+        // Editing a player is still possible on a full roster, and the form stays away behind the sheet.
         tapInRow(app.buttons["spelers.edit.7"])
-        expectShown(app.buttons["Bewaren"])
-        tap(app.buttons["Annuleren"])
+        expectShown(saveButton)
+        replace(field("spelers.sheet.name"), with: "Lotje")
+        tap(saveButton)
+        expectGone(sheet)
+        expectRow("7", containing: "Lotje")
+        expectShown(app.staticTexts["spelers.full"])
+        expectGone(field("spelers.name"))
 
         // Removing one makes room again.
         tapInRow(app.buttons["spelers.remove.7"])
-        tap(app.alerts["#7 Lotte verwijderen?"].buttons["Verwijder"])
+        tap(app.alerts["#7 Lotje verwijderen?"].buttons["Verwijder"])
         expectShown(field("spelers.name"))
         expectShown(app.staticTexts["14 van 15"])
     }
@@ -465,6 +581,31 @@ final class SpelersUITests: XCTestCase {
     /// keyboard toolbar carries a button with the same label (#145).
     private var submitButton: XCUIElement { app.buttons["spelers.submit"] }
 
+    /// The edit sheet (#149), found by its title.
+    private var sheet: XCUIElement { app.navigationBars["Speler wijzigen"] }
+    private var saveButton: XCUIElement { app.buttons["spelers.sheet.save"] }
+    private var cancelButton: XCUIElement { app.buttons["spelers.sheet.cancel"] }
+
+    /// Whether the element is on screen and can be tapped; false when the list has unloaded it.
+    private func inView(_ element: XCUIElement) -> Bool { element.exists && element.isHittable }
+
+    /// Hides the keyboard in the sheet with its Klaar button, when the keyboard is up.
+    private func hideSheetKeyboard(file: StaticString = #filePath, line: UInt = #line) {
+        let done = app.buttons["spelers.sheet.keyboardDone"]
+        if done.exists {
+            done.tap()
+            expectGone(keyboard, "Klaar hides the keyboard in the sheet", file: file, line: line)
+        }
+    }
+
+    /// Drags the sheet down by its title bar, as a coach closes it with a swipe.
+    private func swipeSheetDown() {
+        XCTAssertTrue(sheet.waitForExistence(timeout: Self.timeout))
+        let from = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let to = from.withOffset(CGVector(dx: 0, dy: app.frame.height))
+        from.press(forDuration: 0.05, thenDragTo: to)
+    }
+
     /// The software keyboard, shown while a field is being edited.
     private var keyboard: XCUIElement { app.keyboards.firstMatch }
 
@@ -533,9 +674,11 @@ final class SpelersUITests: XCTestCase {
         XCTAssertEqual(element.value as? String, expected, message, file: file, line: line)
     }
 
-    /// Waits for the validation message to read `expected`, then asserts it.
-    private func expectMessage(_ expected: String, file: StaticString = #filePath, line: UInt = #line) {
-        let text = app.staticTexts["spelers.message"]
+    /// Waits for the validation message (under the add form, or `id`) to read `expected`, then asserts it.
+    private func expectMessage(
+        _ expected: String, in id: String = "spelers.message", file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let text = app.staticTexts[id]
         _ = waitUntil { text.exists && text.label == expected }
         XCTAssertTrue(text.exists, "no message shown", file: file, line: line)
         XCTAssertEqual(text.label, expected, file: file, line: line)
