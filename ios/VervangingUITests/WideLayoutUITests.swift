@@ -67,7 +67,7 @@ final class WideLayoutUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Blok 1 van 12"].waitForExistence(timeout: 5))
         tapWissel(expecting: "Blok 2 van 12")
         save("live-phone")
-        XCTAssertTrue(isPhoneLive(), "the minutes sit above the court")
+        XCTAssertTrue(isPhoneLive(), "the minutes table sits below the court")
     }
 
     // MARK: - Switching mid-match
@@ -116,7 +116,7 @@ final class WideLayoutUITests: XCTestCase {
 
         // Back to a phone-sized window: the phone layout, the same match.
         XCUIDevice.shared.orientation = .portrait
-        XCTAssertTrue(waitUntil { self.isPhoneLive() }, "the minutes sit above the court again")
+        XCTAssertTrue(waitUntil { self.isPhoneLive() }, "the minutes table sits below the court again")
         XCTAssertEqual(matchState(), afterWissel, "the same block, players and minutes after switching back")
     }
 
@@ -467,27 +467,28 @@ final class WideLayoutUITests: XCTestCase {
         XCTAssertTrue(title.waitForExistence(timeout: 5))
         return MatchState(title: title.label, subTime: subTime.label,
                           court: elements("live.court.").map { $0.label }.sorted(),
-                          minutes: numbers.map { "\($0) \((overviewCell($0).value as? String) ?? "?")" })
+                          // From the table, whose rows always exist; the minutes at a glance are a lazy grid,
+                          // whose cells are only there while in view.
+                          minutes: numbers.map { "\($0) \((tableRow($0).value as? String) ?? "?")" })
     }
 
-    /// The phone layout: the minutes at a glance above the court, the minutes table below it, all in one column.
+    /// The phone layout: the minutes table below the court, in the same column. (The minutes at a glance are left out
+    /// of these checks: they are a lazy grid, whose cells are only there while in view.)
     @MainActor private func isPhoneLive() -> Bool {
-        guard let (cell, court, table) = overviewCourtAndTable() else { return false }
-        return cell.maxY <= court.minY && abs(cell.minX - court.minX) < 40 && table.minY >= court.maxY
+        guard let (court, table) = courtAndTable() else { return false }
+        return table.minY >= court.maxY && abs(table.minX - court.minX) < 40
     }
 
     /// The wide layout (either way round): the minutes table in a column beside the court.
     @MainActor private func isWideLive() -> Bool {
-        guard let (_, court, table) = overviewCourtAndTable() else { return false }
+        guard let (court, table) = courtAndTable() else { return false }
         return table.minX >= court.maxX - 1
     }
 
-    @MainActor private func overviewCourtAndTable() -> (CGRect, CGRect, CGRect)? {
-        let cell = overviewCell(numbers[0])
+    @MainActor private func courtAndTable() -> (CGRect, CGRect)? {
         let table = app.descendants(matching: .any)["live.minutes.\(numbers[0])"]
-        guard cell.waitForExistence(timeout: 5), table.waitForExistence(timeout: 5),
-              let court = elements("live.court.").first else { return nil }
-        return (cell.frame, court.frame, table.frame)
+        guard table.waitForExistence(timeout: 5), let court = elements("live.court.").first else { return nil }
+        return (court.frame, table.frame)
     }
 
     /// The coming wissel and the court: the time, the change, In the zone, the last action, who is on court and who

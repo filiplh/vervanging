@@ -17,7 +17,7 @@ struct LiveScreen: View {
     /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the window's size. The match lives in the
     /// model, so switching layouts mid-match keeps it as it was.
     @State private var layout = WideLayout.Kind.phone
-    /// The width the two columns of the wide layout share.
+    /// The width the two columns of the wide layout share, with their gap.
     @State private var wideWidth: CGFloat = 0
 
     var body: some View {
@@ -51,35 +51,41 @@ struct LiveScreen: View {
     #endif
 
     private var screen: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
-                // 15-player match (#77).
-                VStack(alignment: .leading, spacing: 8) {
-                    if !model.isRunning {
-                        ended
-                    } else {
-                        switch layout {
-                        case .phone: playing
-                        case .portrait: playingWide
-                        case .landscape: playingWideTurned
+        // The GeometryReader takes the room the screen has and never the size of what it holds, so the layout and the
+        // wide layout's column widths come from the screen, not from columns sized for an earlier screen.
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
+                    // 15-player match (#77).
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !model.isRunning {
+                            ended
+                        } else {
+                            switch layout {
+                            case .phone: playing
+                            case .portrait: playingWide
+                            case .landscape: playingWideTurned
+                            }
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // On the inner screen a match fits without scrolling: the page then stays still instead of bouncing (#143).
+                .scrollBounceBehavior(layout.isWide ? .basedOnSize : .automatic)
+                // After every action the line under it is brought into view, also when the coach had scrolled down the
+                // minutes table (or tapped Uit there): it is the only answer to the tap (PR #130 review). Choosing In the
+                // zone, or switching Extra minuten, brings the zone choice into view, as the web does for its toggle
+                // (#74). Both scroll only as far as needed, so a line already in view does not move the page.
+                .onChange(of: model.actions) { reveal(Self.messageID, proxy) }
+                .onChange(of: model.zone) { _, zone in if zone != nil { reveal(Self.zoneID, proxy) } }
             }
-            .measuresWideLayout($layout)
-            // On the inner screen a match fits without scrolling: the page then stays still instead of bouncing (#143).
-            .scrollBounceBehavior(layout.isWide ? .basedOnSize : .automatic)
-            // After every action the line under it is brought into view, also when the coach had scrolled down the
-            // minutes table (or tapped Uit there): it is the only answer to the tap (PR #130 review). Choosing In the
-            // zone, or switching Extra minuten, brings the zone choice into view, as the web does for its toggle
-            // (#74). Both scroll only as far as needed, so a line already in view does not move the page.
-            .onChange(of: model.actions) { reveal(Self.messageID, proxy) }
-            .onChange(of: model.zone) { _, zone in if zone != nil { reveal(Self.zoneID, proxy) } }
+            // The width the wide layout's columns share: the page's, less its side padding.
+            .onChange(of: geometry.size.width, initial: true) { _, width in wideWidth = max(0, width - 32) }
         }
+        .measuresWideLayout($layout)
         .safeAreaBar(edge: .bottom) { actions }
         .navigationTitle(model.isRunning ? model.blockTitle : String(localized: "Einde match"))
         .navigationSubtitle(subtitle)
@@ -156,8 +162,6 @@ struct LiveScreen: View {
             MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model, style: .beside)
                 .frame(width: wideColumn(0.5, gap: 24), alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { wideWidth = $0 }
     }
 
     /// The wide layout with the inner screen turned (#143): two columns from the top, so the whole match fits between
@@ -182,8 +186,6 @@ struct LiveScreen: View {
             }
             .frame(width: wideColumn(0.60, gap: 20), alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { wideWidth = $0 }
     }
 
     /// This share of the wide layout's width, less the gap between its two columns; nil until it is measured.
