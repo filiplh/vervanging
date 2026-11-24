@@ -39,7 +39,18 @@ final class SpelersModel {
     var season: SeasonSummary { history.seasonSummary() }
 
     /// A player's season total in seconds; 0 for a player in no saved match.
-    func seasonSeconds(_ player: Player) -> Int { Int((season.totals[String(player.id)] ?? 0).rounded()) }
+    func seasonSeconds(_ player: Player) -> Int { Self.wholeSeconds(season.totals[String(player.id)] ?? 0) }
+
+    /// The engine's total as whole seconds for the screen, never trapping: a damaged history file can hold a finite
+    /// value too large for `Int` (such as 1e20), or values whose sum is infinite. Those show as the largest `Int`; a
+    /// value that is not a number or below 0 shows as 0. The engine's totals themselves are left as they are.
+    nonisolated static func wholeSeconds(_ value: Double) -> Int {
+        let rounded = value.rounded()
+        guard rounded > 0 else { return 0 } // also NaN
+        // Double(Int.max) is 2^63, one above Int.max, so a value at or above it does not fit.
+        guard rounded < Double(Int.max) else { return Int.max }
+        return Int(rounded)
+    }
 
     /// Reads the history again, after a match ended or the history was cleared elsewhere.
     func reloadHistory() {

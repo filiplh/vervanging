@@ -245,6 +245,39 @@ struct HistoryStoreTests {
         #expect(SpelersModel.formatDuration(5000) == "1:23:20")
     }
 
+    // Regression (PR #135 review, P2): a damaged file with a number too large for Int trapped the Spelers screen.
+    @Test func anOversizedStoredValueDoesNotTrapTheSpelersScreen() throws {
+        let store = roster()
+        try Data("{\"version\":1,\"matches\":[{\"id\":\"a\",\"seconds\":{\"1\":1e20,\"2\":600}}]}".utf8)
+            .write(to: historyStore.fileURL)
+        let spelers = SpelersModel(store: store)
+        #expect(spelers.season.totals["1"] == 1e20, "the engine's total is left as it is")
+        let players = spelers.roster.players
+        #expect(spelers.seasonSeconds(players.first { $0.id == 1 }!) == Int.max)
+        #expect(spelers.seasonSeconds(players.first { $0.id == 2 }!) == 600)
+        #expect(!SpelersModel.formatDuration(spelers.seasonSeconds(players.first { $0.id == 1 }!)).isEmpty)
+    }
+
+    @Test func anOverflowingAggregateDoesNotTrapTheSpelersScreen() throws {
+        let store = roster()
+        try Data(("{\"version\":1,\"matches\":[{\"id\":\"a\",\"seconds\":{\"1\":1.7e308}},"
+            + "{\"id\":\"b\",\"seconds\":{\"1\":1.7e308}}]}").utf8).write(to: historyStore.fileURL)
+        let spelers = SpelersModel(store: store)
+        #expect(spelers.season.totals["1"] == .infinity, "the engine's sum is left as it is")
+        #expect(spelers.seasonSeconds(spelers.roster.players.first { $0.id == 1 }!) == Int.max)
+    }
+
+    @Test func wholeSecondsKeepsEveryDoubleInRange() {
+        #expect(SpelersModel.wholeSeconds(0) == 0)
+        #expect(SpelersModel.wholeSeconds(999.6) == 1000)
+        #expect(SpelersModel.wholeSeconds(-5) == 0)
+        #expect(SpelersModel.wholeSeconds(.nan) == 0)
+        #expect(SpelersModel.wholeSeconds(-.infinity) == 0)
+        #expect(SpelersModel.wholeSeconds(.infinity) == Int.max)
+        #expect(SpelersModel.wholeSeconds(Double(Int.max)) == Int.max)
+        #expect(SpelersModel.wholeSeconds(9_223_372_036_854_774_784) == 9_223_372_036_854_774_784, "the largest Double below 2^63")
+    }
+
     // MARK: - The next setup
 
     @Test func theNextSetupWithTheSwitchOnPlansWithTheStoredHistory() throws {
