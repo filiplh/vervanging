@@ -50,8 +50,9 @@ final class SetupModel {
     @ObservationIgnored private var lastSetup: LastSetup
     @ObservationIgnored private let newSeed: () -> Int
 
-    /// `matches` is the team history (empty until #104 stores it); the switch comes from the setup file. `newSeed`
-    /// gives the seed for the first plan and for every "Ander plan".
+    /// `matches` is the team history: the ended matches stored in the history file, which `SetupScreen` reads through
+    /// `HistoryStore` and passes in (empty when there are none, or in a test); the switch comes from the setup file.
+    /// `newSeed` gives the seed for the first plan and for every "Ander plan".
     init(roster: Roster, store: SetupStore, matches: [HistoryMatch] = [], newSeed: @escaping () -> Int = SetupModel.randomSeed) {
         self.roster = roster
         self.store = store
