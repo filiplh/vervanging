@@ -1,9 +1,10 @@
 import SwiftUI
 import VervangingCore
 
-/// The live screen (plan decisions #12, #17, #18, #27): the block, when it ends on the official clock, every player's
-/// minutes at a glance, who goes off and comes on at the next wissel, who is on court, one big Wissel button with
-/// Ongedaan maken beside it, and the full minutes table below. After the last block it shows the minutes per player.
+/// The live screen (plan decisions #8, #9, #11, #12, #17, #18, #24, #25, #27): the block, when it ends on the official
+/// clock, every player's minutes at a glance, who goes off and comes on at the next wissel with In the zone and Extra
+/// minuten for it, who is on court, one big Wissel button with Ongedaan maken beside it, and the full minutes table
+/// below with Uit and Terug. After the last block it shows the minutes per player.
 /// Copy and behaviour follow the web app's live screen (`liveScreen` in `public/js/live.js`). Phone layout; the wide
 /// layout for the Duo's inner screen is #105. No timer of any kind (ADR-001).
 struct LiveScreen: View {
@@ -12,15 +13,23 @@ struct LiveScreen: View {
     var onNewMatch: () -> Void = {}
 
     var body: some View {
-        ScrollView {
-            // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
-            // 15-player match (#77).
-            VStack(alignment: .leading, spacing: 8) {
-                if model.isRunning { playing } else { ended }
+        ScrollViewReader { proxy in
+            ScrollView {
+                // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
+                // 15-player match (#77).
+                VStack(alignment: .leading, spacing: 8) {
+                    if model.isRunning { playing } else { ended }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // After every action the line under it is brought into view, also when the coach had scrolled down the
+            // minutes table (or tapped Uit there): it is the only answer to the tap (PR #130 review). Choosing In the
+            // zone, or switching Extra minuten, brings the zone choice into view, as the web does for its toggle
+            // (#74). Both scroll only as far as needed, so a line already in view does not move the page.
+            .onChange(of: model.actions) { reveal(Self.messageID, proxy) }
+            .onChange(of: model.zone) { _, zone in if zone != nil { reveal(Self.zoneID, proxy) } }
         }
         .safeAreaBar(edge: .bottom) { actions }
         .navigationTitle(model.isRunning ? model.blockTitle : String(localized: "Einde match"))
@@ -31,6 +40,16 @@ struct LiveScreen: View {
         .onAppear { ScreenAwake.shared.set(model.keepsScreenAwake) }
         .onChange(of: model.keepsScreenAwake) { _, on in ScreenAwake.shared.set(on) }
         .onDisappear { ScreenAwake.shared.set(false) }
+    }
+
+    private static let messageID = "live.message"
+    private static let zoneID = "live.zone"
+
+    /// Scrolls the least needed to show the view with this id, once the action's new layout is in place.
+    private func reveal(_ id: String, _ proxy: ScrollViewProxy) {
+        Task { @MainActor in
+            withAnimation(.snappy) { proxy.scrollTo(id, anchor: nil) }
+        }
     }
 
     /// "kwart 1 · Tegen Ajax" while playing; "Tegen Ajax" after the end.
@@ -54,12 +73,15 @@ struct LiveScreen: View {
         MinutesOverview(rows: model.minutes)
         // The change comes before Op het veld (the web app has it after), so on the Duo's short outer screen the Eruit
         // and Erin rows still sit above the Wissel bar with long names (#77). ⚠ Order chosen by the agent.
-        if let change = model.nextChange { nextChange(change) }
+        if let change = model.nextChange {
+            nextChange(change)
+            if !model.zoneCandidates.isEmpty { zoneChoice(change) }
+        }
         // The line under the last action sits in the page, under the change, as on the web: in the Wissel bar a
         // confirmation naming three long names would make the bar taller and cover the Eruit and Erin rows (#77).
         message
         court
-        MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes)
+        MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model)
     }
 
     private var court: some View {
@@ -68,7 +90,71 @@ struct LiveScreen: View {
                 .font(.headline)
                 .accessibilityAddTraits(.isHeader)
             NameList(players: model.onCourt, id: "live.court", emphasis: true)
+            ForEach(model.replacements, id: \.starter.id) { pair in
+                Text("\(LiveModel.label(pair.replacement)) kwam erin voor \(LiveModel.label(pair.starter)) (uit). Het blok telt voor \(LiveModel.label(pair.starter)).")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+                    .accessibilityIdentifier("live.replaced.\(pair.starter.number)")
+            }
         }
+    }
+
+    /// In the zone at the coming wissel (decisions #8, #9, #25; the zone note in live.js): which player due off stays
+    /// on, which player due on stays on the bench (the engine's proposal first), and Extra minuten. The web puts an In
+    /// the zone and an Op de bank button beside each name; here they are two menus under the change, so the Eruit and
+    /// Erin rows keep their full width and long names stay above the Wissel bar (#77). ⚠ Control choice by the agent.
+    private func zoneChoice(_ change: (off: [Player], on: [Player])) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent {
+                Picker(selection: Binding(get: { model.zone?.keep }, set: { id in
+                    model.chooseZone(model.players.first { $0.id == id })
+                })) {
+                    Text("Niemand").tag(Int?.none)
+                    ForEach(model.zoneCandidates) { player in
+                        Text(verbatim: LiveModel.label(player)).tag(Int?.some(player.id))
+                    }
+                } label: {
+                    Text("In the zone")
+                }
+                .pickerStyle(.menu)
+                .accessibilityIdentifier("live.zone.keep")
+            } label: {
+                Text("In the zone").font(.subheadline.weight(.semibold))
+            }
+            if let zone = model.zone {
+                LabeledContent {
+                    Picker(selection: Binding(get: { zone.bench }, set: { id in
+                        if let player = change.on.first(where: { $0.id == id }) { model.chooseBench(player) }
+                    })) {
+                        ForEach(change.on) { player in
+                            Text(verbatim: LiveModel.label(player)).tag(player.id)
+                        }
+                    } label: {
+                        Text("Op de bank")
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("live.zone.bench")
+                } label: {
+                    Text("Op de bank").font(.subheadline.weight(.semibold))
+                }
+                Toggle(isOn: Binding(get: { zone.extra }, set: { model.setExtra($0) })) {
+                    Text("Extra minuten (niet teruggeven)").font(.subheadline)
+                }
+                .accessibilityIdentifier("live.zone.extra")
+                if let note = model.zoneNote {
+                    Text(note)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("live.zone.note")
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.fill.quaternary, in: .rect(cornerRadius: 12))
+        .id(Self.zoneID)
     }
 
     private func nextChange(_ change: (off: [Player], on: [Player])) -> some View {
@@ -103,7 +189,7 @@ struct LiveScreen: View {
     @ViewBuilder
     private var ended: some View {
         message
-        MinutesTable(heading: String(localized: "Minuten per speler"), rows: model.minutes)
+        MinutesTable(heading: String(localized: "Minuten per speler"), rows: model.minutes, model: model)
     }
 
     // MARK: - The Wissel bar
@@ -119,6 +205,7 @@ struct LiveScreen: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("live.message")
                 .accessibilityAddTraits(.updatesFrequently)
+                .id(Self.messageID)
         }
     }
 
@@ -191,14 +278,16 @@ private struct NameList: View {
     }
 }
 
-/// "#11 Hanne", the number in the secondary colour; the name wraps, never cut.
+/// "#11 Hanne", the number in the secondary colour; the name wraps, never cut. A player uit is struck through.
 private struct PlayerName: View {
     let player: Player
+    var struck = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Text(verbatim: "#\(player.number)").foregroundStyle(.secondary).monospacedDigit()
             Text(verbatim: player.name)
+                .strikethrough(struck)
                 .lineLimit(nil)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -222,13 +311,17 @@ private struct MinutesOverview: View {
             ForEach(rows) { row in
                 VStack(spacing: 0) {
                     Text(verbatim: "#\(row.player.number)").font(.caption)
-                    Text(verbatim: formatSeconds(row.seconds)).font(.callout.weight(.semibold))
+                    // A player uit: muted and struck through, as on the web.
+                    Text(verbatim: formatSeconds(row.seconds))
+                        .font(row.out ? .callout : .callout.weight(.semibold))
+                        .strikethrough(row.out)
                 }
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .padding(.horizontal, 3)
-                .foregroundStyle(row.onCourt ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                .foregroundStyle(row.onCourt ? AnyShapeStyle(.white)
+                                 : row.out ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                 .frame(maxWidth: .infinity, minHeight: 38)
                 .background(row.onCourt ? AnyShapeStyle(.tint) : AnyShapeStyle(.fill.tertiary),
                             in: .rect(cornerRadius: 8))
@@ -243,10 +336,13 @@ private struct MinutesOverview: View {
     }
 }
 
-/// The minutes table: every player by jersey number with their minutes, players on court marked.
+/// The minutes table: every player by jersey number with their minutes, players on court marked, players uit muted and
+/// struck through with an "uit" tag. While the match runs each row has Uit, or Terug for a player uit while a next
+/// block exists (the Actie column in live.js).
 private struct MinutesTable: View {
     let heading: String
     let rows: [MinutesRow]
+    let model: LiveModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -265,10 +361,21 @@ private struct MinutesTable: View {
             .padding(.bottom, 4)
             .accessibilityHidden(true)
             ForEach(rows) { row in
-                HStack(alignment: .firstTextBaseline) {
-                    PlayerName(player: row.player)
-                    Spacer(minLength: 12)
-                    Text(verbatim: formatSeconds(row.seconds)).monospacedDigit()
+                HStack(spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        PlayerName(player: row.player, struck: row.out)
+                        if row.out {
+                            Text("uit").font(.subheadline.weight(.semibold)).foregroundStyle(.red)
+                        }
+                        Spacer(minLength: 12)
+                        Text(verbatim: formatSeconds(row.seconds)).monospacedDigit().strikethrough(row.out)
+                    }
+                    .foregroundStyle(row.out ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(verbatim: LiveModel.label(row.player)))
+                    .accessibilityValue(minutesValue(row))
+                    .accessibilityIdentifier("live.minutes.\(row.player.number)")
+                    if model.isRunning { action(row) }
                 }
                 .fontWeight(row.onCourt ? .semibold : .regular)
                 .padding(.horizontal, 8)
@@ -277,19 +384,39 @@ private struct MinutesTable: View {
                     if row.onCourt { Rectangle().fill(.tint).frame(width: 4) }
                 }
                 .overlay(alignment: .bottom) { Divider() }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Text(verbatim: LiveModel.label(row.player)))
-                .accessibilityValue(minutesValue(row))
-                .accessibilityIdentifier("live.minutes.\(row.player.number)")
             }
         }
         .padding(.top, 8)
     }
+
+    /// Uit, or Terug for a player uit; nothing for a player uit in the last block, where Terug cannot apply. The column
+    /// keeps one width, so the minutes stay in line.
+    private func action(_ row: MinutesRow) -> some View {
+        Group {
+            if !row.out {
+                Button { model.uit(row.player) } label: { Text("Uit").frame(maxWidth: .infinity) }
+                    .accessibilityLabel(Text("Uit: \(LiveModel.label(row.player))"))
+                    .accessibilityIdentifier("live.uit.\(row.player.number)")
+            } else if model.canTerug {
+                Button { model.terug(row.player) } label: { Text("Terug").frame(maxWidth: .infinity) }
+                    .accessibilityLabel(Text("Terug: \(LiveModel.label(row.player))"))
+                    .accessibilityIdentifier("live.terug.\(row.player.number)")
+            } else {
+                Color.clear.frame(height: 1).accessibilityHidden(true)
+            }
+        }
+        .buttonStyle(.glass)
+        .controlSize(.small)
+        .font(.subheadline.weight(.medium))
+        .frame(width: 84)
+    }
 }
 
-/// What VoiceOver reads after a player, and what the UI tests check: "3:20", or "3:20, op het veld".
+/// What VoiceOver reads after a player, and what the UI tests check: "3:20", "3:20, op het veld" or "3:20, uit".
 private func minutesValue(_ row: MinutesRow) -> Text {
-    row.onCourt ? Text("\(formatSeconds(row.seconds)), op het veld") : Text(verbatim: formatSeconds(row.seconds))
+    if row.onCourt { return Text("\(formatSeconds(row.seconds)), op het veld") }
+    if row.out { return Text("\(formatSeconds(row.seconds)), uit") }
+    return Text(verbatim: formatSeconds(row.seconds))
 }
 
 #Preview {

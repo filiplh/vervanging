@@ -11,6 +11,16 @@
         }
       }
     },
+    "%@ blijft in the zone op het veld, %@ blijft op de bank.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ blijft in the zone op het veld, %@ blijft op de bank."
+          }
+        }
+      }
+    },
     "%@ en %@ geruild.": {
       "localizations": {
         "nl": {
@@ -31,6 +41,56 @@
         }
       }
     },
+    "%@ kwam erin voor %@ (uit). Het blok telt voor %@.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ kwam erin voor %@ (uit). Het blok telt voor %@."
+          }
+        }
+      }
+    },
+    "%@ speelt een extra blok (extra minuten, niet teruggegeven), %@ blijft op de bank.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ speelt een extra blok (extra minuten, niet teruggegeven), %@ blijft op de bank."
+          }
+        }
+      }
+    },
+    "%@ terug vanaf het volgende blok.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ terug vanaf het volgende blok."
+          }
+        }
+      }
+    },
+    "%@ uit, %@ erin.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ uit, %@ erin."
+          }
+        }
+      }
+    },
+    "%@ uit.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ uit."
+          }
+        }
+      }
+    },
     "%@ · Tegen %@": {
       "localizations": {
         "nl": {
@@ -47,6 +107,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@, op het veld"
+          }
+        }
+      }
+    },
+    "%@, uit": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, uit"
           }
         }
       }
@@ -191,6 +261,26 @@
         }
       }
     },
+    "Dat kan nu niet: dit is het laatste blok.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dat kan nu niet: dit is het laatste blok."
+          }
+        }
+      }
+    },
+    "Dat kan nu niet: er moeten minstens %lld spelers overblijven.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dat kan nu niet: er moeten minstens %lld spelers overblijven."
+          }
+        }
+      }
+    },
     "De lopende match stoppen en een nieuwe beginnen?": {
       "localizations": {
         "nl": {
@@ -261,6 +351,16 @@
         }
       }
     },
+    "Extra minuten (niet teruggeven)": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Extra minuten (niet teruggeven)"
+          }
+        }
+      }
+    },
     "Gelijke minuten": {
       "localizations": {
         "nl": {
@@ -277,6 +377,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Houd rekening met vorige matchen"
+          }
+        }
+      }
+    },
+    "In the zone": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In the zone"
           }
         }
       }
@@ -307,16 +417,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Match"
-          }
-        }
-      }
-    },
-    "Match bewaard. Het live scherm komt in een volgende versie.": {
-      "localizations": {
-        "nl": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Match bewaard. Het live scherm komt in een volgende versie."
           }
         }
       }
@@ -461,6 +561,16 @@
         }
       }
     },
+    "Op de bank": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Op de bank"
+          }
+        }
+      }
+    },
     "Op het veld": {
       "localizations": {
         "nl": {
@@ -581,12 +691,32 @@
         }
       }
     },
+    "Terug": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terug"
+          }
+        }
+      }
+    },
     "Terug naar de match": {
       "localizations": {
         "nl": {
           "stringUnit": {
             "state": "translated",
             "value": "Terug naar de match"
+          }
+        }
+      }
+    },
+    "Terug: %@": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Terug: %@"
           }
         }
       }
@@ -607,6 +737,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Toevoegen"
+          }
+        }
+      }
+    },
+    "Uit": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uit"
+          }
+        }
+      }
+    },
+    "Uit: %@": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uit: %@"
           }
         }
       }
@@ -787,6 +937,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "kwart %lld"
+          }
+        }
+      }
+    },
+    "uit": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "uit"
           }
         }
       }
