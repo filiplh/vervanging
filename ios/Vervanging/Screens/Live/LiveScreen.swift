@@ -5,12 +5,16 @@ import VervangingCore
 /// clock, every player's minutes at a glance, who goes off and comes on at the next wissel with In the zone and Extra
 /// minuten for it, who is on court, one big Wissel button with Ongedaan maken beside it, and the full minutes table
 /// below with Uit and Terug. After the last block it shows the minutes per player.
-/// Copy and behaviour follow the web app's live screen (`liveScreen` in `public/js/live.js`). Phone layout; the wide
-/// layout for the Duo's inner screen is #105. No timer of any kind (ADR-001).
+/// Copy and behaviour follow the web app's live screen (`liveScreen` in `public/js/live.js`). On the Duo's inner screen
+/// the minutes sit beside the court (#105). No timer of any kind (ADR-001).
 struct LiveScreen: View {
     let model: LiveModel
     /// Back to setup for a new match, from the end of the match.
     var onNewMatch: () -> Void = {}
+
+    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the room the screen has. The match lives
+    /// in the model, so switching layouts mid-match keeps it as it was.
+    @State private var wide = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -18,12 +22,13 @@ struct LiveScreen: View {
                 // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
                 // 15-player match (#77).
                 VStack(alignment: .leading, spacing: 8) {
-                    if model.isRunning { playing } else { ended }
+                    if !model.isRunning { ended } else if wide { playingWide } else { playing }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .measuresWideLayout($wide)
             // After every action the line under it is brought into view, also when the coach had scrolled down the
             // minutes table (or tapped Uit there): it is the only answer to the tap (PR #130 review). Choosing In the
             // zone, or switching Extra minuten, brings the zone choice into view, as the web does for its toggle
@@ -65,11 +70,7 @@ struct LiveScreen: View {
 
     @ViewBuilder
     private var playing: some View {
-        Text(model.subTimeText)
-            .font(.title2.bold())
-            .monospacedDigit()
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityIdentifier("live.subTime")
+        subTime
         MinutesOverview(rows: model.minutes)
         // The change comes before Op het veld (the web app has it after), so on the Duo's short outer screen the Eruit
         // and Erin rows still sit above the Wissel bar with long names (#77). ⚠ Order chosen by the agent.
@@ -82,6 +83,38 @@ struct LiveScreen: View {
         message
         court
         MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model)
+    }
+
+    /// When the coming wissel falls on the official clock, "Wissel op 6:40".
+    private var subTime: some View {
+        Text(model.subTimeText)
+            .font(.title2.bold())
+            .monospacedDigit()
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("live.subTime")
+    }
+
+    /// The wide layout (decision #41): the block's time on top, then the change, the last action and the court on the
+    /// left, and the minutes beside them on the right, at a glance and in the table. ⚠ Arrangement chosen by the agent.
+    @ViewBuilder
+    private var playingWide: some View {
+        subTime
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let change = model.nextChange {
+                    nextChange(change)
+                    if !model.zoneCandidates.isEmpty { zoneChoice(change) }
+                }
+                message
+                court
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                MinutesOverview(rows: model.minutes)
+                MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var court: some View {
