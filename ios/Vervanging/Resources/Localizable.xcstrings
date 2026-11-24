@@ -51,6 +51,16 @@
         }
       }
     },
+    "%@ min": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ min"
+          }
+        }
+      }
+    },
     "%@ speelt een extra blok (extra minuten, niet teruggegeven), %@ blijft op de bank.": {
       "localizations": {
         "nl": {
@@ -281,6 +291,16 @@
         }
       }
     },
+    "De geschiedenis van alle vorige matchen wissen?": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "De geschiedenis van alle vorige matchen wissen?"
+          }
+        }
+      }
+    },
     "De lopende match stoppen en een nieuwe beginnen?": {
       "localizations": {
         "nl": {
@@ -367,6 +387,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Gelijke minuten"
+          }
+        }
+      }
+    },
+    "Geschiedenis gewist.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geschiedenis gewist."
           }
         }
       }
@@ -641,6 +671,36 @@
         }
       }
     },
+    "Speeltijd dit seizoen, over %lld bewaarde matchen.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speeltijd dit seizoen, over %lld bewaarde matchen."
+          }
+        }
+      }
+    },
+    "Speeltijd dit seizoen, over 1 bewaarde match.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speeltijd dit seizoen, over 1 bewaarde match."
+          }
+        }
+      }
+    },
+    "Speeltijd dit seizoen: nog geen matchen bewaard.": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speeltijd dit seizoen: nog geen matchen bewaard."
+          }
+        }
+      }
+    },
     "Speler": {
       "localizations": {
         "nl": {
@@ -841,6 +901,16 @@
         }
       }
     },
+    "Wis geschiedenis": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wis geschiedenis"
+          }
+        }
+      }
+    },
     "Wissel": {
       "localizations": {
         "nl": {
@@ -937,6 +1007,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "kwart %lld"
+          }
+        }
+      }
+    },
+    "speeltijd %@ min": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "speeltijd %@ min"
           }
         }
       }

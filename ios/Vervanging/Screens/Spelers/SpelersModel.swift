@@ -1,8 +1,10 @@
 import Foundation
 import Observation
+import VervangingCore
 
-/// The Spelers screen's state: the roster, the player being edited and the message under the form. Every change is
-/// written to the store at once (plan decision #38).
+/// The Spelers screen's state: the roster, the player being edited and the message under the form, plus the season
+/// totals from the team history (decision #26) and "Wis geschiedenis" (decision #10, #104). Every change is written to
+/// the store at once (plan decision #38). The totals are the engine's `seasonSummary`; the screen only formats them.
 ///
 /// The roster checks are ported from `public/js/setup.js` (`checkPlayer`, `byNumber`) with the same Dutch messages.
 /// They live with the screen, not in VervangingCore, because they are entry checks for this screen rather than match
@@ -16,12 +18,61 @@ final class SpelersModel {
     private(set) var roster: Roster
     private(set) var editingId: Int?
     var message = ""
+    /// The team history the totals come from, read again each time the screen opens.
+    private(set) var history: History
+    /// The line under Wis geschiedenis: "Geschiedenis gewist." or that saving failed. Empty until it is used.
+    private(set) var historyMessage = ""
+    private(set) var historyFailed = false
 
     @ObservationIgnored private let store: RosterStore
+    @ObservationIgnored private let historyStore: HistoryStore
 
-    init(store: RosterStore) {
+    /// `history` defaults to the history file beside the roster.
+    init(store: RosterStore, history: HistoryStore? = nil) {
         self.store = store
+        historyStore = history ?? HistoryStore(directory: store.fileURL.deletingLastPathComponent())
         roster = store.load()
+        self.history = historyStore.load()
+    }
+
+    /// The season totals (`seasonSummary`): the number of saved matches and each player's total seconds.
+    var season: SeasonSummary { history.seasonSummary() }
+
+    /// A player's season total in seconds; 0 for a player in no saved match.
+    func seasonSeconds(_ player: Player) -> Int { Int((season.totals[String(player.id)] ?? 0).rounded()) }
+
+    /// Reads the history again, after a match ended or the history was cleared elsewhere.
+    func reloadHistory() {
+        history = historyStore.load()
+    }
+
+    /// "Wis geschiedenis" (`clearHistory`), after the screen has asked: no saved matches left, every total back to 0.
+    func clearHistory(now: Date = .now) {
+        let next = history.cleared(at: MatchStore.isoString(now))
+        if historyStore.save(next) {
+            history = next
+            historyMessage = String(localized: "Geschiedenis gewist.")
+            historyFailed = false
+        } else {
+            historyMessage = SetupModel.saveFailed
+            historyFailed = true
+        }
+    }
+
+    /// The line above the roster that says what the totals behind each name are (`seasonNote` in setup.js).
+    static func seasonNote(_ matches: Int) -> String {
+        switch matches {
+        case 0: String(localized: "Speeltijd dit seizoen: nog geen matchen bewaard.")
+        case 1: String(localized: "Speeltijd dit seizoen, over 1 bewaarde match.")
+        default: String(localized: "Speeltijd dit seizoen, over \(matches) bewaarde matchen.")
+        }
+    }
+
+    /// A season total as the web app writes it (`formatDuration`): m:ss, or h:mm:ss from an hour on.
+    nonisolated static func formatDuration(_ seconds: Int) -> String {
+        let s = max(0, seconds)
+        if s < 3600 { return formatSeconds(s) }
+        return "\(s / 3600):" + String(format: "%02d:%02d", s / 60 % 60, s % 60)
     }
 
     var isFull: Bool { editingId == nil && roster.players.count >= Roster.maxPlayers }

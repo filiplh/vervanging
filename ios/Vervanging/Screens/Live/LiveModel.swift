@@ -28,7 +28,9 @@ struct Zone: Equatable, Sendable {
 /// The model never computes a rule itself: every step is the engine's (`MatchState.wissel`, `undo`, `uit`, `terug`),
 /// and what the screen shows comes from the engine's `onCourt`, `nextChange`, `proposedBench`, `replaced`, `subTime`,
 /// `quarter` and `playedOverview`. The match is
-/// saved after every tap that changes it (ADR-002). No timer of any kind (ADR-001): the only time read is the moment
+/// saved after every tap that changes it (ADR-002), and the team history follows it (#104): the end of the match records
+/// its minutes, an undo of the end takes them out again (`syncHistory` in live.js), and opening the screen catches up a
+/// history write that failed before (`repairHistory`). No timer of any kind (ADR-001): the only time read is the moment
 /// of a Wissel tap, to ignore a second tap that follows it too soon (#49).
 @MainActor
 @Observable
@@ -53,28 +55,35 @@ final class LiveModel {
     private(set) var zone: Zone?
 
     @ObservationIgnored private let store: MatchStore
+    @ObservationIgnored private let history: HistoryStore
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var lastWisselAt: Date?
 
-    init(match: LiveMatch, store: MatchStore, message: String = "", now: @escaping () -> Date = Date.init) {
+    /// `history` defaults to the history file beside the match file, so the app and the tests need not name it.
+    init(match: LiveMatch, store: MatchStore, history: HistoryStore? = nil, message: String = "",
+         now: @escaping () -> Date = Date.init) {
         setup = match.setup
         players = match.setup.players.sorted(by: SpelersModel.byNumber)
         state = match.state
         self.store = store
+        self.history = history ?? HistoryStore(directory: store.fileURL.deletingLastPathComponent())
         self.message = message
         self.now = now
+        if !repairHistory() { self.message = SetupModel.saveFailed }
     }
 
     /// A new match from setup at block 1, saved at once; when the write fails the match still opens, with the message
     /// that saving failed.
-    static func start(_ started: StartedMatch, store: MatchStore, now: @escaping () -> Date = Date.init) -> LiveModel {
+    static func start(_ started: StartedMatch, store: MatchStore, history: HistoryStore? = nil,
+                      now: @escaping () -> Date = Date.init) -> LiveModel {
         var setup = started
         // The start time is stored to the millisecond, as the web app's `savedAt`; keep the same value in memory.
         setup.savedAt = MatchStore.date(MatchStore.isoString(started.savedAt)) ?? started.savedAt
         let match = LiveMatch(setup: setup, state: MatchState.start(setup.plan,
                                                                      setupSavedAt: MatchStore.isoString(setup.savedAt)))
         let saved = store.save(match)
-        return LiveModel(match: match, store: store, message: saved ? "" : SetupModel.saveFailed, now: now)
+        return LiveModel(match: match, store: store, history: history, message: saved ? "" : SetupModel.saveFailed,
+                         now: now)
     }
 
     // MARK: - What the screen shows
@@ -218,7 +227,8 @@ final class LiveModel {
             message = Self.refusalText(error)
             return
         }
-        if store.save(LiveMatch(setup: setup, state: state)) {
+        let saved = store.save(LiveMatch(setup: setup, state: state))
+        if saved && syncHistory() {
             message = confirm(before, state)
             confirmed = !message.isEmpty
         } else {
@@ -247,6 +257,34 @@ final class LiveModel {
         default:
             refused
         }
+    }
+
+    // MARK: - Team history
+
+    /// The setup's start time as stored, the id of this match in the history.
+    private var savedAt: String { MatchStore.isoString(setup.savedAt) }
+
+    /// Keeps the history in line with the match after an action (`syncHistory` in live.js): an ended match is recorded
+    /// (replacing an earlier entry, so ending, undoing and ending again never counts it twice), and a match that is no
+    /// longer ended is taken out again. Any other action writes nothing. True when no write was needed or it worked.
+    private func syncHistory() -> Bool {
+        let stored = history.load()
+        if state.ended { return history.save(stored.recording(state, savedAt: savedAt)) }
+        guard stored.has(JSString(savedAt)) else { return true }
+        return history.save(stored.forgetting(JSString(savedAt)))
+    }
+
+    /// When the screen opens (`repairHistory` in live.js): an ended match missing from the history is recorded, unless
+    /// "Wis geschiedenis" ran after its Start; a match no longer ended but still in the history is taken out. True when
+    /// nothing was needed or the write worked.
+    private func repairHistory() -> Bool {
+        let stored = history.load()
+        let recorded = stored.has(JSString(savedAt))
+        if state.ended && !recorded && stored.startedAfterClear(savedAt) {
+            return history.save(stored.recording(state, savedAt: savedAt))
+        }
+        if !state.ended && recorded { return history.save(stored.forgetting(JSString(savedAt))) }
+        return true
     }
 
     // MARK: - Helpers
