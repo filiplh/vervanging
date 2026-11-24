@@ -36,26 +36,35 @@ struct MatchStore: Sendable {
     }
 
     /// The stored match, or nil when there is none or its setup cannot be read.
+    ///
+    /// The state belongs to the setup when its `setupSavedAt` is the setup's stored `savedAt` text, compared as text
+    /// (#134). The text is never derived again from a `Date`: a `Date` cannot hold every millisecond of every year, and
+    /// the system formatter writes all times before the year -4712 as one text it cannot read back.
     func load() -> LiveMatch? {
         guard let data = try? Data(contentsOf: fileURL),
               let file = try? JSONDecoder().decode(StoredMatch.self, from: data),
               file.version == Self.version,
-              let setup = Self.startedMatch(file.setup)
+              let setup = Self.startedMatch(file.setup),
+              let savedAt = file.setup.savedAt
         else { return nil }
-        let savedAt = Self.isoString(setup.savedAt)
         let state = file.state.flatMap { MatchState.restored($0, plan: setup.plan, setupSavedAt: savedAt) }
             ?? MatchState.start(setup.plan, setupSavedAt: savedAt)
         return LiveMatch(setup: setup, state: state)
     }
 
     /// Writes the match. False when the file could not be written.
+    ///
+    /// The setup's `savedAt` is written as the text the state carries in `setupSavedAt`: the state was started from
+    /// this setup with that text (`LiveModel.start`) or restored against it (`load`), so the text written at the start
+    /// is the text written after every tap, and the match key never depends on a `Date` read back (#134). Only a state
+    /// without that text writes the setup's own time.
     @discardableResult
     func save(_ match: LiveMatch) -> Bool {
         let setup = match.setup
         let file = StoredMatch(
             version: Self.version,
             setup: StoredMatchSetup(
-                savedAt: Self.isoString(setup.savedAt), opponent: setup.opponent, schedule: setup.schedule,
+                savedAt: match.state.setupSavedAt ?? Self.isoString(setup.savedAt), opponent: setup.opponent, schedule: setup.schedule,
                 seed: setup.seed,
                 players: setup.players.map { StoredPlayer(id: $0.id, name: $0.name, number: $0.number) },
                 startingFive: setup.startingFive,
@@ -78,25 +87,55 @@ struct MatchStore: Sendable {
     /// A start time as the web app writes `savedAt` (`new Date().toISOString()`): `2026-11-23T10:15:00.123Z`. The
     /// match state keeps it as `setupSavedAt`, which ties a state to its setup.
     ///
-    /// The text must read back as the same text (#134): `load` compares the state's `setupSavedAt` with the setup's
-    /// time written again, and every save writes the time it read. The system formatter cuts the fraction off, and a
-    /// time it has just parsed is often a hair below its millisecond, so about half of all times came back 1 ms early
-    /// and the running match was thrown away. So the time is taken to its nearest whole millisecond and the
-    /// milliseconds are written by hand after the whole seconds, which the formatter writes exactly. A time written by
-    /// the earlier formatter reads back as its own text here, so match files from before #134 keep their match.
+    /// The match key itself is carried as text (`load`, `save`). The text should still read back as itself through
+    /// `date`, because the live screen names the match in the team history by this text written from the setup's
+    /// `Date`. The system formatter cuts the fraction off, and a time it has just parsed is often a hair below its
+    /// millisecond, so before #134 about half of all times came back 1 ms early. So the time is taken to its nearest
+    /// whole millisecond and the milliseconds are written by hand after the whole seconds, which the formatter writes
+    /// exactly. A time written by the earlier formatter reads back as its own text here.
+    /// From 2^53 milliseconds on (past the year 287,000) a `Double` no longer counts single milliseconds, so the
+    /// time is written in whole seconds there, which also keeps the arithmetic finite for every `Date`. Outside the
+    /// years the formatter can write (before -4712, after 506,713) it writes one fixed date; the milliseconds of the
+    /// real time would make that text differ while naming no time, so they are written as `.000` there.
     static func isoString(_ date: Date) -> String {
         let milliseconds = (date.timeIntervalSince1970 * 1000).rounded()
-        let seconds = (milliseconds / 1000).rounded(.down)
-        let fraction = Int(milliseconds - seconds * 1000)
-        let whole = Date.ISO8601FormatStyle().format(Date(timeIntervalSince1970: seconds))
+        var seconds = date.timeIntervalSince1970.rounded(.down)
+        var fraction = 0
+        if abs(milliseconds) < 9_007_199_254_740_992 {
+            seconds = (milliseconds / 1000).rounded(.down)
+            fraction = Int(milliseconds - seconds * 1000)
+        }
+        let style = Date.ISO8601FormatStyle()
+        let whole = style.format(Date(timeIntervalSince1970: seconds))
+        if fraction != 0, (try? style.parse(whole))?.timeIntervalSince1970 != seconds { fraction = 0 }
         return "\(whole.dropLast()).\(String(format: "%03d", fraction))Z"
     }
 
-    /// The time a stored text names, at its nearest whole millisecond (see `isoString`), or nil when it is no time.
+    /// The time a stored text names, or nil when it is no time the formatter reads. When a `Date` close to the parsed
+    /// one is written back as the same text by `isoString`, that `Date` is returned. That holds for every text through
+    /// the year 9999. Far beyond it, a `Date` steps by more than a millisecond: each step up and down is tried in
+    /// turn, a few dozen at most, and the nearest whole millisecond is returned when none fits.
     static func date(_ text: String) -> Date? {
         guard let parsed = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) else { return nil }
-        return Date(timeIntervalSince1970: (parsed.timeIntervalSince1970 * 1000).rounded() / 1000)
+        let nearest = Date(timeIntervalSince1970: (parsed.timeIntervalSince1970 * 1000).rounded() / 1000)
+        if isoString(nearest) == text { return nearest }
+        var down = parsed.timeIntervalSinceReferenceDate
+        var up = down
+        for _ in 0..<64 {
+            for candidate in [Date(timeIntervalSinceReferenceDate: up), Date(timeIntervalSinceReferenceDate: down)]
+            where isoString(candidate) == text {
+                return candidate
+            }
+            up = up.nextUp
+            down = down.nextDown
+        }
+        return nearest
     }
+
+    /// Stands in for a stored start time that the formatter cannot read back, so the match is still kept (#134): the
+    /// system formatter writes every time before the year -4712 as `-4712-01-01T12:00:00Z`, which it then refuses.
+    /// The web app keeps any `savedAt` text too (`normaliseMatchSetup`). The match key stays the stored text.
+    static let unreadableStartTime = Date(timeIntervalSince1970: -100_000_000_000_000)
 
     /// The stored setup as a started match, checked as `normaliseMatchSetup` in `public/js/setup.js`: a known schema,
     /// at least five valid players with different ids (none dropped), a basisvijf and a plan start of five different
@@ -105,8 +144,9 @@ struct MatchStore: Sendable {
         guard let schedule = stored.schedule, let shape = Planner.schedules[schedule],
               let rawPlayers = stored.players, let startingFive = stored.startingFive, let plan = stored.plan,
               let grid = plan.grid, let start = plan.start,
-              let savedAtText = stored.savedAt, let savedAt = date(savedAtText)
+              let savedAtText = stored.savedAt
         else { return nil }
+        let savedAt = date(savedAtText) ?? unreadableStartTime
         let roster = RosterStore.normalise(nextId: nil, players: rawPlayers)
         guard roster.players.count == rawPlayers.count, roster.players.count >= Planner.onCourt else { return nil }
         let ids = Set(roster.players.map(\.id))
