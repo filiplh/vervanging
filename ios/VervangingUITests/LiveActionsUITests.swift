@@ -387,6 +387,11 @@ final class LiveActionsUITests: XCTestCase {
     private func reveal(_ element: XCUIElement) {
         func shown() -> Bool {
             guard element.exists, element.isHittable else { return false }
+            // The Start bar on setup floats over rows too (#150): a tap there would land on Start. Only its own buttons
+            // lie inside it.
+            let startBar = app.descendants(matching: .any)["setup.actions"]
+            if startBar.exists, !["setup.start", "setup.anotherPlan"].contains(element.identifier),
+               element.frame.intersects(startBar.frame) { return false }
             return !app.descendants(matching: .any)["live.actions"].exists || isVisible(element)
         }
         _ = element.waitForExistence(timeout: 2)
