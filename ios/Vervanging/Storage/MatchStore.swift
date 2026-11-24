@@ -87,12 +87,14 @@ struct MatchStore: Sendable {
     /// A start time as the web app writes `savedAt` (`new Date().toISOString()`): `2026-11-23T10:15:00.123Z`. The
     /// match state keeps it as `setupSavedAt`, which ties a state to its setup.
     ///
-    /// The match key itself is carried as text (`load`, `save`). The text should still read back as itself through
-    /// `date`, because the live screen names the match in the team history by this text written from the setup's
-    /// `Date`. The system formatter cuts the fraction off, and a time it has just parsed is often a hair below its
-    /// millisecond, so before #134 about half of all times came back 1 ms early. So the time is taken to its nearest
-    /// whole millisecond and the milliseconds are written by hand after the whole seconds, which the formatter writes
-    /// exactly. A time written by the earlier formatter reads back as its own text here.
+    /// The match key, and the id of the match in the team history, is the stored text itself (`load`, `save`,
+    /// `state.setupSavedAt`, #139), never a text written again from a `Date`. This function writes that text once, when
+    /// `LiveModel.start` begins a match, and it is the fallback for a state without the text. The text should still
+    /// read back as itself through `date`, because `LiveModel.start` keeps the setup's `Date` in memory as
+    /// `date(isoString(...))`. The system formatter cuts the fraction off, and a time it has just parsed is often a
+    /// hair below its millisecond, so before #134 about half of all times came back 1 ms early. So the time is taken
+    /// to its nearest whole millisecond and the milliseconds are written by hand after the whole seconds, which the
+    /// formatter writes exactly. A time written by the earlier formatter reads back as its own text here.
     /// From 2^53 milliseconds on (past the year 287,000) a `Double` no longer counts single milliseconds, so the
     /// time is written in whole seconds there, which also keeps the arithmetic finite for every `Date`. Outside the
     /// years the formatter can write (before -4712, after 506,713) it writes one fixed date; the milliseconds of the
