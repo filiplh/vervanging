@@ -269,16 +269,18 @@ final class LiveUITests: XCTestCase {
 
     private func awakeProbe() -> XCUIElement { app.descendants(matching: .any)["debug.screenAwake"] }
 
+    /// The Wissel bar's own controls, which lie inside the bar by design.
+    private let barControls: Set<String> = ["live.undo", "live.wissel", "live.newMatch"]
+
     /// Whether the element can be tapped where it is: on screen and, on the live screen, wholly above the Wissel bar (a
-    /// tap on a row under the bar would land on Wissel; `isHittable` alone counts such a row as reachable). The bar's own
-    /// buttons (Wissel, Ongedaan maken, Nieuwe match) lie inside it and only need to be hittable.
+    /// tap on a row under the bar would land on Wissel; `isHittable` alone counts such a row as reachable). Only the
+    /// bar's own controls, found by identifier, are accepted inside the bar; they only need to be hittable.
     private func isReachable(_ element: XCUIElement) -> Bool {
         guard element.exists, element.isHittable else { return false }
         let bar = app.descendants(matching: .any)["live.actions"]
         guard bar.exists else { return true }
-        let frame = element.frame
-        if bar.frame.insetBy(dx: -1, dy: -1).contains(frame) { return true }
-        return frame.maxY <= bar.frame.minY + 1
+        if barControls.contains(element.identifier) { return true }
+        return element.frame.maxY <= bar.frame.minY + 1
     }
 
     /// Scrolls until the element is reachable: down first, then back up.
