@@ -269,17 +269,31 @@ final class LiveUITests: XCTestCase {
 
     private func awakeProbe() -> XCUIElement { app.descendants(matching: .any)["debug.screenAwake"] }
 
-    /// Scrolls until the element is on screen: down first, then back up.
+    /// The Wissel bar's own controls, which lie inside the bar by design.
+    private let barControls: Set<String> = ["live.undo", "live.wissel", "live.newMatch"]
+
+    /// Whether the element can be tapped where it is: on screen and, on the live screen, wholly above the Wissel bar (a
+    /// tap on a row under the bar would land on Wissel; `isHittable` alone counts such a row as reachable). Only the
+    /// bar's own controls, found by identifier, are accepted inside the bar; they only need to be hittable.
+    private func isReachable(_ element: XCUIElement) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        let bar = app.descendants(matching: .any)["live.actions"]
+        guard bar.exists else { return true }
+        if barControls.contains(element.identifier) { return true }
+        return element.frame.maxY <= bar.frame.minY + 1
+    }
+
+    /// Scrolls until the element is reachable: down first, then back up.
     private func reveal(_ element: XCUIElement) {
         for i in 0..<12 {
-            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, element.isHittable { return }
+            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, isReachable(element) { return }
             app.swipeUp(velocity: .slow)
         }
         for _ in 0..<16 {
-            if element.exists, element.isHittable { return }
+            if isReachable(element) { return }
             app.swipeDown(velocity: .slow)
         }
-        XCTAssertTrue(element.exists && element.isHittable, "could not scroll to \(element)")
+        XCTAssertTrue(isReachable(element), "could not scroll to \(element)")
     }
 
     private func tapReveal(_ element: XCUIElement) {
