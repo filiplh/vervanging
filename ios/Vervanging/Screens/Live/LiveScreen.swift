@@ -6,15 +6,17 @@ import VervangingCore
 /// minuten for it, who is on court, one big Wissel button with Ongedaan maken beside it, and the full minutes table
 /// below with Uit and Terug. After the last block it shows the minutes per player.
 /// Copy and behaviour follow the web app's live screen (`liveScreen` in `public/js/live.js`). On the Duo's inner screen
-/// the minutes sit beside the court (#105). No timer of any kind (ADR-001).
+/// everything sits side by side in columns, so a match needs no scrolling (#105, #143). No timer of any kind (ADR-001).
 struct LiveScreen: View {
     let model: LiveModel
     /// Back to setup for a new match, from the end of the match.
     var onNewMatch: () -> Void = {}
 
-    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the room the screen has. The match lives
-    /// in the model, so switching layouts mid-match keeps it as it was.
-    @State private var wide = false
+    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the window's size. The match lives in the
+    /// model, so switching layouts mid-match keeps it as it was.
+    @State private var layout = WideLayout.Kind.phone
+    /// The width the three columns of the turned inner screen share.
+    @State private var turnedWidth: CGFloat = 0
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -22,13 +24,23 @@ struct LiveScreen: View {
                 // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
                 // 15-player match (#77).
                 VStack(alignment: .leading, spacing: 8) {
-                    if !model.isRunning { ended } else if wide { playingWide } else { playing }
+                    if !model.isRunning {
+                        ended
+                    } else {
+                        switch layout {
+                        case .phone: playing
+                        case .portrait: playingWide
+                        case .landscape: playingWideTurned
+                        }
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .measuresWideLayout($wide)
+            .measuresWideLayout($layout)
+            // On the inner screen a match fits without scrolling: the page then stays still instead of bouncing (#143).
+            .scrollBounceBehavior(layout.isWide ? .basedOnSize : .automatic)
             // After every action the line under it is brought into view, also when the coach had scrolled down the
             // minutes table (or tapped Uit there): it is the only answer to the tap (PR #130 review). Choosing In the
             // zone, or switching Extra minuten, brings the zone choice into view, as the web does for its toggle
@@ -94,26 +106,61 @@ struct LiveScreen: View {
             .accessibilityIdentifier("live.subTime")
     }
 
-    /// The wide layout (decision #41): the block's time on top, then the change, the last action and the court on the
-    /// left, and the minutes beside them on the right, at a glance and in the table. ⚠ Arrangement chosen by the agent.
-    @ViewBuilder
+    /// The wide layout with the inner screen upright (decision #41, #143): the block's time, the minutes at a glance,
+    /// the change, the last action and the court in the left column, the minutes table with Uit and Terug beside them,
+    /// both from the top. ⚠ Arrangement chosen by the agent.
     private var playingWide: some View {
-        subTime
-        HStack(alignment: .top, spacing: 20) {
+        HStack(alignment: .top, spacing: 24) {
             VStack(alignment: .leading, spacing: 8) {
-                if let change = model.nextChange {
-                    nextChange(change)
-                    if !model.zoneCandidates.isEmpty { zoneChoice(change) }
-                }
+                subTime
+                MinutesOverview(rows: model.minutes)
+                change
                 message
                 court
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model, style: .beside)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The wide layout with the inner screen turned (#143): three columns from the top, so the whole match fits between
+    /// the bars without scrolling. The coming wissel (its time, the change, In the zone and the last action) on the
+    /// left; the minutes at a glance and the court in the middle; the minutes table with Uit and Terug on the right, in
+    /// shorter rows. The middle column is the narrowest, so names in the table stay on one line. ⚠ Arrangement, column
+    /// widths and row height chosen by the agent.
+    private var playingWideTurned: some View {
+        HStack(alignment: .top, spacing: 24) {
             VStack(alignment: .leading, spacing: 8) {
-                MinutesOverview(rows: model.minutes)
-                MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model)
+                subTime
+                change
+                message
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: turnedColumn(0.36), alignment: .leading)
+            VStack(alignment: .leading, spacing: 12) {
+                MinutesOverview(rows: model.minutes, perRow: 4)
+                court
+            }
+            .frame(width: turnedColumn(0.28), alignment: .leading)
+            MinutesTable(heading: String(localized: "Minuten tot nu"), rows: model.minutes, model: model,
+                         style: .compact)
+                .frame(width: turnedColumn(0.36), alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { turnedWidth = $0 }
+    }
+
+    /// This share of the width the turned columns have between their two gaps; nil until it is measured.
+    private func turnedColumn(_ share: CGFloat) -> CGFloat? {
+        turnedWidth > 0 ? max(0, turnedWidth - 48) * share : nil
+    }
+
+    /// Who goes off and comes on at the coming wissel, with In the zone for it.
+    @ViewBuilder
+    private var change: some View {
+        if let change = model.nextChange {
+            nextChange(change)
+            if !model.zoneCandidates.isEmpty { zoneChoice(change) }
         }
     }
 
@@ -152,6 +199,8 @@ struct LiveScreen: View {
                     Text("In the zone")
                 }
                 .pickerStyle(.menu)
+                // Never broken over two lines in the narrower column of the turned inner screen (#143).
+                .fixedSize()
                 .accessibilityIdentifier("live.zone.keep")
             } label: {
                 Text("In the zone").font(.subheadline.weight(.semibold))
@@ -332,11 +381,13 @@ private struct PlayerName: View {
 /// below.
 private struct MinutesOverview: View {
     let rows: [MinutesRow]
+    /// How many cells to a row; by default six (as on the web) up to twelve players and eight for 13 to 15, so the grid
+    /// never takes more than two rows and the change below it stays above the Wissel bar on the Duo's outer screen
+    /// (#77). The turned inner screen sets four, so the cells in its narrower middle column keep their full text size.
+    var perRow: Int?
 
-    /// Six to a row (as on the web) up to twelve players; eight to a row for 13 to 15, so the grid never takes more
-    /// than two rows and the change below it stays above the Wissel bar on the Duo's outer screen (#77).
     private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 4), count: rows.count > 12 ? 8 : 6)
+        Array(repeating: GridItem(.flexible(), spacing: 4), count: perRow ?? (rows.count > 12 ? 8 : 6))
     }
 
     var body: some View {
@@ -376,23 +427,40 @@ private struct MinutesTable: View {
     let heading: String
     let rows: [MinutesRow]
     let model: LiveModel
+    var style = Style.below
+
+    /// Below the court on the phone; beside it on the wide layout, its heading level with the other columns; compact
+    /// on the turned inner screen: shorter rows, a narrower action column and no Speler and Minuten line under the
+    /// heading, so 15 players fit between the bars.
+    enum Style { case below, beside, compact }
+
+    /// ⚠ The compact heights are the agent's choice, sized so 12 players (32 pt rows) or 15 (28 pt, with smaller Uit
+    /// buttons) fit the room the turned inner screen leaves between the bars.
+    private var rowHeight: CGFloat {
+        style == .compact ? (crowded ? 28 : 32) : 44
+    }
+
+    private var crowded: Bool { style == .compact && rows.count > 12 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(heading)
                 .font(.headline)
-                .padding(.bottom, 6)
+                .padding(.bottom, style == .compact ? 4 : 6)
                 .accessibilityAddTraits(.isHeader)
-            HStack {
-                Text("Speler")
-                Spacer()
-                Text("Minuten")
+                .accessibilityIdentifier("live.table.heading")
+            if style != .compact {
+                HStack {
+                    Text("Speler")
+                    Spacer()
+                    Text("Minuten")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+                .accessibilityHidden(true)
             }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-            .accessibilityHidden(true)
             ForEach(rows) { row in
                 HStack(spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
@@ -412,14 +480,14 @@ private struct MinutesTable: View {
                 }
                 .fontWeight(row.onCourt ? .semibold : .regular)
                 .padding(.horizontal, 8)
-                .frame(minHeight: 44)
+                .frame(minHeight: rowHeight)
                 .overlay(alignment: .leading) {
                     if row.onCourt { Rectangle().fill(.tint).frame(width: 4) }
                 }
                 .overlay(alignment: .bottom) { Divider() }
             }
         }
-        .padding(.top, 8)
+        .padding(.top, style == .below ? 8 : 0)
     }
 
     /// Uit, or Terug for a player uit; nothing for a player uit in the last block, where Terug cannot apply. The column
@@ -439,9 +507,9 @@ private struct MinutesTable: View {
             }
         }
         .buttonStyle(.glass)
-        .controlSize(.small)
-        .font(.subheadline.weight(.medium))
-        .frame(width: 84)
+        .controlSize(crowded ? .mini : .small)
+        .font(crowded ? .caption.weight(.medium) : .subheadline.weight(.medium))
+        .frame(width: style == .compact ? 68 : 84)
     }
 }
 

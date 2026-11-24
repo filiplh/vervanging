@@ -1,8 +1,9 @@
 import XCTest
 
-/// The wide layout for the iPhone Duo's inner screen (#105, plan decision #41): the setup shows the plan grid beside the
-/// rest of the setup, and the live screen shows the minutes beside the court. A screen takes it from the room it has
-/// (at least 600 × 500 pt), never from the device model, so the iPhone 17 Pro and the Duo's outer screen keep the phone
+/// The wide layout for the iPhone Duo's inner screen (#105, #143, plan decision #41): the setup shows the plan grid in
+/// its own column beside the rest of the setup, and the live screen puts the match side by side in columns (two with the
+/// inner screen upright, three with it turned), so it needs no scrolling. A screen takes it from its window's size (at
+/// least 600 × 500 pt), never from the device model, so the iPhone 17 Pro and the Duo's outer screen keep the phone
 /// layout.
 ///
 /// ⚠ The Duo simulator boots folded, and its inner screen stays black (plan assumption A6): no simctl, Xcode or XCTest
@@ -21,6 +22,9 @@ final class WideLayoutUITests: XCTestCase {
 
     private let names = ["Lotte", "Fien", "Mila", "Noor", "Lien", "Anna", "Elise", "Hanne", "Jade", "Lore", "Marie", "Zoë"]
     private let numbers = ["4", "7", "8", "10", "11", "12", "13", "14", "15", "21", "23", "5"]
+    /// Three more, for a full 15-player match.
+    private let extraNames = ["Fleur", "Roos", "Saar"]
+    private let extraNumbers = ["16", "17", "18"]
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -130,6 +134,103 @@ final class WideLayoutUITests: XCTestCase {
         XCTAssertTrue(waitUntil { self.isPhoneLive() }, "a landscape phone keeps the minutes above the court")
     }
 
+    // MARK: - The wide arrangement (#143)
+
+    /// The turned wide live screen puts the match in three columns that all start at the top: the coming wissel (its
+    /// time, the change, In the zone and the last action) on the left, the minutes at a glance and the court in the
+    /// middle, the minutes table with Uit on the right. Each column is short enough for the room the turned inner screen
+    /// leaves between the bars, so on it the whole match is in view without scrolling.
+    @MainActor
+    func testTheTurnedWideLiveScreenPutsTheMatchInThreeColumns() throws {
+        try checkThreeColumns(players: 12)
+    }
+
+    /// The same with the most players a match takes, 15: the table's rows are shorter still.
+    @MainActor
+    func testTheTurnedWideLiveScreenFitsFifteenPlayers() throws {
+        try checkThreeColumns(players: 15)
+    }
+
+    @MainActor private func checkThreeColumns(players: Int) throws {
+        try plantRoster(players)
+        app.launchEnvironment["VERVANGING_WIDE_LAYOUT_MIN"] = "500x0"
+        launchOnSetup()
+        for number in numbers.prefix(5) { tapReveal(app.buttons["setup.basis.\(number)"]) }
+        tapReveal(app.buttons["setup.start"])
+        XCTAssertTrue(app.staticTexts["Blok 1 van 12"].waitForExistence(timeout: 5))
+        tapWissel(expecting: "Blok 2 van 12")
+        try turnToLandscape()
+        XCTAssertTrue(waitUntil { self.isWideLive() }, "the minutes table sits beside the court")
+        save("live-wide-turned-\(players)")
+        XCTAssertTrue(app.descendants(matching: .any)["live.zone.keep"].exists, "In the zone is on the screen")
+        XCTAssertTrue(app.staticTexts["live.message"].exists, "the confirmation line is on the screen")
+
+        let left = leftColumn(), middle = middleColumn(), right = rightColumn()
+        for (name, column) in [("left", left), ("middle", middle), ("right", right)] {
+            XCTAssertFalse(column.isEmpty, "the \(name) column has its elements")
+        }
+        XCTAssertLessThanOrEqual(span(left).maxX, span(middle).minX, "the coming wissel sits left of the court")
+        XCTAssertLessThanOrEqual(span(middle).maxX, span(right).minX, "the minutes table sits right of the court")
+        let tops = [left, middle, right].map { span($0).minY }
+        XCTAssertLessThan(tops.max()! - tops.min()!, 30, "the three columns start at the top, level: \(tops)")
+        for (name, column) in [("left", left), ("middle", middle), ("right", right)] {
+            XCTAssertLessThanOrEqual(span(column).height, Self.turnedInnerRoom,
+                                     "the \(name) column fits between the bars of the turned inner screen")
+        }
+        XCTAssertEqual(elements("live.uit.").count, players, "every row of the table has Uit")
+    }
+
+    /// The layout is taken from the window, so it does not change while the page scrolls (on the inner screen the
+    /// navigation bar shrank mid-scroll and the live screen swapped layouts, #143). The threshold sits between the
+    /// room between the bars (about 270 pt on a turned phone) and the window (402 pt): measured on the window, the wide
+    /// layout holds at the top and all through the scroll.
+    @MainActor
+    func testScrollingKeepsTheLayout() throws {
+        try plantRoster(12)
+        app.launchEnvironment["VERVANGING_WIDE_LAYOUT_MIN"] = "500x380"
+        launchOnSetup()
+        for number in numbers.prefix(5) { tapReveal(app.buttons["setup.basis.\(number)"]) }
+        tapReveal(app.buttons["setup.start"])
+        XCTAssertTrue(app.staticTexts["Blok 1 van 12"].waitForExistence(timeout: 5))
+        try turnToLandscape()
+        XCTAssertTrue(waitUntil { self.isWideLive() }, "a window taller than the threshold takes the wide layout")
+        for _ in 0..<3 {
+            app.swipeUp(velocity: .slow)
+            XCTAssertTrue(isWideLive(), "the wide layout holds while scrolling down")
+        }
+        for _ in 0..<3 {
+            app.swipeDown(velocity: .slow)
+            XCTAssertTrue(isWideLive(), "the wide layout holds while scrolling back up")
+        }
+    }
+
+    /// The wide setup sets its two columns apart and starts both at the top: a clear gap between the attendance card
+    /// and the plan card, and the plan's heading level with the attendance heading, right under a small title.
+    @MainActor
+    func testTheWideSetupSetsItsColumnsApartAndStartsThePlanAtTheTop() throws {
+        try plantRoster(12)
+        app.launchEnvironment["VERVANGING_WIDE_LAYOUT_MIN"] = "500x0"
+        launchOnSetup()
+        for number in numbers.prefix(5) { tapReveal(app.buttons["setup.basis.\(number)"]) }
+        try turnToLandscape()
+        let grid = app.descendants(matching: .any)["setup.grid"]
+        let basis = app.buttons["setup.basis.4"]
+        XCTAssertTrue(waitUntil { grid.exists && basis.exists && grid.frame.minX >= basis.frame.maxX },
+                      "the plan grid sits beside the attendance list")
+        save("setup-wide-turned")
+        // The plan card's edge sits 10 pt left of the grid, the attendance card's about 20 pt right of Basis; the cards
+        // touched before #143, with the grid about 29 pt from Basis.
+        XCTAssertGreaterThanOrEqual(grid.frame.minX - basis.frame.maxX, 44, "a clear gap between the two cards")
+        let plan = app.staticTexts["Plan"].firstMatch
+        let attendance = app.staticTexts["Aanwezig en basisvijf"].firstMatch
+        XCTAssertTrue(plan.waitForExistence(timeout: 5))
+        XCTAssertTrue(attendance.waitForExistence(timeout: 5))
+        XCTAssertLessThan(abs(plan.frame.minY - attendance.frame.minY), 12, "the plan starts level with the left column")
+        let bar = app.navigationBars["Match"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        XCTAssertLessThan(plan.frame.minY - bar.frame.maxY, 60, "no empty band between the title and the plan")
+    }
+
     // MARK: - The Duo's inner screen
 
     /// ⚠ On the Duo's inner screen itself (669 × 951 pt), the whole 12 × 12 plan grid and Start are in view at once,
@@ -155,8 +256,17 @@ final class WideLayoutUITests: XCTestCase {
         save("setup-wide-inner")
         app.buttons["setup.start"].tap()
         XCTAssertTrue(app.staticTexts["Blok 1 van 12"].waitForExistence(timeout: 5))
-        XCTAssertTrue(waitUntil { self.isWideLive() }, "the minutes sit beside the court")
+        tapWissel(expecting: "Blok 2 van 12")
+        XCTAssertTrue(waitUntil { self.isWideLive() }, "the minutes table sits beside the court")
         save("live-wide-inner")
+        // ⚠ #143: the whole match in view at once, without scrolling, and nothing under the Wissel bar.
+        let bar = app.descendants(matching: .any)["live.actions"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Blok 2 van 12"].isHittable, "the block is in view")
+        for element in leftColumn() + middleColumn() + rightColumn() {
+            XCTAssertTrue(element.isHittable, "\(element.identifier) is in view")
+            XCTAssertLessThanOrEqual(element.frame.maxY, bar.frame.minY, "\(element.identifier) sits above the Wissel bar")
+        }
     }
 
     // MARK: - Helpers
@@ -180,22 +290,49 @@ final class WideLayoutUITests: XCTestCase {
                           minutes: numbers.map { "\($0) \((overviewCell($0).value as? String) ?? "?")" })
     }
 
-    /// The phone layout: the minutes at a glance above the court, in the same column.
+    /// The phone layout: the minutes at a glance above the court, the minutes table below it, all in one column.
     @MainActor private func isPhoneLive() -> Bool {
-        guard let (cell, court) = overviewAndCourt() else { return false }
-        return cell.maxY <= court.minY && abs(cell.minX - court.minX) < 40
+        guard let (cell, court, table) = overviewCourtAndTable() else { return false }
+        return cell.maxY <= court.minY && abs(cell.minX - court.minX) < 40 && table.minY >= court.maxY
     }
 
-    /// The wide layout: the minutes at a glance in a column beside the court.
+    /// The wide layout (either way round): the minutes table in a column beside the court.
     @MainActor private func isWideLive() -> Bool {
-        guard let (cell, court) = overviewAndCourt() else { return false }
-        return cell.minX >= court.maxX - 1
+        guard let (_, court, table) = overviewCourtAndTable() else { return false }
+        return table.minX >= court.maxX - 1
     }
 
-    @MainActor private func overviewAndCourt() -> (CGRect, CGRect)? {
+    @MainActor private func overviewCourtAndTable() -> (CGRect, CGRect, CGRect)? {
         let cell = overviewCell(numbers[0])
-        guard cell.waitForExistence(timeout: 5), let court = elements("live.court.").first else { return nil }
-        return (cell.frame, court.frame)
+        let table = app.descendants(matching: .any)["live.minutes.\(numbers[0])"]
+        guard cell.waitForExistence(timeout: 5), table.waitForExistence(timeout: 5),
+              let court = elements("live.court.").first else { return nil }
+        return (cell.frame, court.frame, table.frame)
+    }
+
+    /// ⚠ The room between the bars on the turned inner screen (951 × 669 pt), about 473 pt as measured on the owner's
+    /// screenshot of #140 (the page starts about 89 pt from the top, the Wissel bar about 568 pt), less a margin.
+    private static let turnedInnerRoom: CGFloat = 460
+
+    /// The coming wissel: its time, the change, In the zone and the last action.
+    @MainActor private func leftColumn() -> [XCUIElement] {
+        ([app.staticTexts["live.subTime"]] + elements("live.off.") + elements("live.on.")
+            + [app.descendants(matching: .any)["live.zone.keep"], app.staticTexts["live.message"]]).filter(\.exists)
+    }
+
+    /// The minutes at a glance and who is on court.
+    @MainActor private func middleColumn() -> [XCUIElement] {
+        elements("live.overview.") + elements("live.court.")
+    }
+
+    /// The minutes table with Uit.
+    @MainActor private func rightColumn() -> [XCUIElement] {
+        [app.staticTexts["live.table.heading"]].filter(\.exists) + elements("live.minutes.") + elements("live.uit.")
+    }
+
+    /// The frame around these elements.
+    @MainActor private func span(_ column: [XCUIElement]) -> CGRect {
+        column.map(\.frame).reduce(CGRect.null) { $0.union($1) }
     }
 
     /// Whether the app runs on a screen big enough for the wide layout without the lowered threshold: the Duo's inner
@@ -217,7 +354,8 @@ final class WideLayoutUITests: XCTestCase {
     }
 
     @MainActor private func plantRoster(_ count: Int) throws {
-        let players = (0..<count).map { ["id": $0 + 1, "name": names[$0], "number": numbers[$0]] as [String: Any] }
+        let allNames = names + extraNames, allNumbers = numbers + extraNumbers
+        let players = (0..<count).map { ["id": $0 + 1, "name": allNames[$0], "number": allNumbers[$0]] as [String: Any] }
         let object: [String: Any] = ["version": 1, "nextId": count + 1, "players": players]
         try JSONSerialization.data(withJSONObject: object).write(to: storageDir.appendingPathComponent("roster.json"))
     }

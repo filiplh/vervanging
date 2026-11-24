@@ -46,17 +46,20 @@ private struct SetupContent: View {
     let runningMatch: (() -> Void)?
 
     @State private var askingToReplace = false
-    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the room the screen has.
-    @State private var wide = false
+    /// The wide layout, for the iPhone Duo's inner screen (#105): chosen from the window's size.
+    @State private var layout = WideLayout.Kind.phone
 
     var body: some View {
         if model.players.count < SetupModel.onCourt {
             tooFewPlayers
         } else {
             Group {
-                if wide { wideLayout } else { phoneLayout }
+                if layout.isWide { wideLayout } else { phoneLayout }
             }
-            .measuresWideLayout($wide)
+            .measuresWideLayout($layout)
+            // A large title stands over the left column only and would leave an empty band above the plan, so the wide
+            // layout has a small title and both columns start right under it (#143).
+            .navigationBarTitleDisplayMode(layout.isWide ? .inline : .automatic)
             // Asked before anything is saved, so Annuleren keeps the running match and its setup untouched.
             .alert("De lopende match stoppen en een nieuwe beginnen?", isPresented: $askingToReplace) {
                 // ⚠ New label: the web app's confirm has the browser's own OK button.
@@ -87,13 +90,18 @@ private struct SetupContent: View {
     }
 
     /// The setup in a narrower list on the left, the plan beside it, so the whole plan grid and Start are in view
-    /// without scrolling on the Duo's inner screen (decision #41). ⚠ Column widths chosen by the agent.
+    /// without scrolling on the Duo's inner screen (decision #41). Each list keeps its cards inside its own margins, so
+    /// a clear gap sets the two columns apart (#143). ⚠ Column widths and gap chosen by the agent.
     private var wideLayout: some View {
         GeometryReader { proxy in
             HStack(spacing: 0) {
                 List { setupSections }
-                .frame(width: min(320, max(260, proxy.size.width * 0.4)))
+                    .contentMargins(.leading, 16, for: .scrollContent)
+                    .contentMargins(.trailing, 12, for: .scrollContent)
+                    .frame(width: min(332, max(272, proxy.size.width * 0.4)))
                 List { planSection }
+                    .contentMargins(.leading, 12, for: .scrollContent)
+                    .contentMargins(.trailing, 16, for: .scrollContent)
             }
         }
     }
