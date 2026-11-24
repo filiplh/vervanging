@@ -281,17 +281,29 @@ final class SetupUITests: XCTestCase {
         label.split(separator: " ", maxSplits: 1).last.map(String.init) ?? label
     }
 
+    /// Whether the element can be tapped where it is: hittable and, unless it is one of the Start bar's own buttons,
+    /// clear of that bar (#150). `isHittable` alone counts a row under the bar as reachable, and a tap there lands on
+    /// Start.
+    private func isReachable(_ element: XCUIElement) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        // Only controls get tapped; a tall element such as the plan grid only needs to be on screen.
+        guard [.button, .switch, .textField].contains(element.elementType) else { return true }
+        if ["setup.start", "setup.anotherPlan"].contains(element.identifier) { return true }
+        let bar = app.descendants(matching: .any)["setup.actions"]
+        return !bar.exists || !element.frame.intersects(bar.frame)
+    }
+
     /// Scrolls the list until the element is on screen: down first, then back up.
     private func reveal(_ element: XCUIElement) {
         for i in 0..<12 {
-            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, element.isHittable { return }
+            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, isReachable(element) { return }
             app.swipeUp(velocity: .slow)
         }
         for _ in 0..<16 {
-            if element.exists, element.isHittable { return }
+            if isReachable(element) { return }
             app.swipeDown(velocity: .slow)
         }
-        XCTAssertTrue(element.exists && element.isHittable, "could not scroll to \(element)")
+        XCTAssertTrue(isReachable(element), "could not scroll to \(element)")
     }
 
     private func tapReveal(_ element: XCUIElement) {
