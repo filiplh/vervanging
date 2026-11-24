@@ -39,7 +39,8 @@ struct RootView: View {
                     SpelersScreen(store: .standard())
                 }
             }
-            Tab("Match", systemImage: "sportscourt", value: Screen.match) {
+            // "court": the custom basketball-court symbol in Symbols.xcassets (#138), tinted like the system symbols.
+            Tab("Match", image: "court", value: Screen.match) {
                 NavigationStack(path: $matchPath) {
                     SetupScreen(rosterStore: .standard(), setupStore: .standard(),
                                 onShowSpelers: { screen = .spelers },
