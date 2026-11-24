@@ -77,12 +77,25 @@ struct MatchStore: Sendable {
 
     /// A start time as the web app writes `savedAt` (`new Date().toISOString()`): `2026-11-23T10:15:00.123Z`. The
     /// match state keeps it as `setupSavedAt`, which ties a state to its setup.
+    ///
+    /// The text must read back as the same text (#134): `load` compares the state's `setupSavedAt` with the setup's
+    /// time written again, and every save writes the time it read. The system formatter cuts the fraction off, and a
+    /// time it has just parsed is often a hair below its millisecond, so about half of all times came back 1 ms early
+    /// and the running match was thrown away. So the time is taken to its nearest whole millisecond and the
+    /// milliseconds are written by hand after the whole seconds, which the formatter writes exactly. A time written by
+    /// the earlier formatter reads back as its own text here, so match files from before #134 keep their match.
     static func isoString(_ date: Date) -> String {
-        Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(date)
+        let milliseconds = (date.timeIntervalSince1970 * 1000).rounded()
+        let seconds = (milliseconds / 1000).rounded(.down)
+        let fraction = Int(milliseconds - seconds * 1000)
+        let whole = Date.ISO8601FormatStyle().format(Date(timeIntervalSince1970: seconds))
+        return "\(whole.dropLast()).\(String(format: "%03d", fraction))Z"
     }
 
+    /// The time a stored text names, at its nearest whole millisecond (see `isoString`), or nil when it is no time.
     static func date(_ text: String) -> Date? {
-        try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text)
+        guard let parsed = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) else { return nil }
+        return Date(timeIntervalSince1970: (parsed.timeIntervalSince1970 * 1000).rounded() / 1000)
     }
 
     /// The stored setup as a started match, checked as `normaliseMatchSetup` in `public/js/setup.js`: a known schema,
