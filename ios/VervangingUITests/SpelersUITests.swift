@@ -77,7 +77,7 @@ final class SpelersUITests: XCTestCase {
     func testEditChangesNameAndNumberAndIsSaved() throws {
         launch()
         addPlayer("Lotte", "7")
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
 
         expectShown(app.buttons["Bewaren"])
         expectShown(app.buttons["Annuleren"])
@@ -86,7 +86,7 @@ final class SpelersUITests: XCTestCase {
 
         replace(field("spelers.name"), with: "Fien")
         replace(field("spelers.number"), with: "8")
-        tap(app.buttons["Bewaren"])
+        tap(submitButton)
 
         expectRow("8", containing: "Fien")
         expectGone(row("7"))
@@ -104,14 +104,14 @@ final class SpelersUITests: XCTestCase {
         addPlayer("Lotte", "7")
 
         // Saving with the player's own number is fine (the number is not "taken" by herself).
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
         replace(field("spelers.name"), with: "Lotje")
-        tap(app.buttons["Bewaren"])
+        tap(submitButton)
         expectRow("7", containing: "Lotje")
         expectGone(app.staticTexts["spelers.message"])
 
         // Annuleren drops the change.
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
         replace(field("spelers.name"), with: "Iemand")
         tap(app.buttons["Annuleren"])
         expectShown(app.buttons["Toevoegen"])
@@ -128,7 +128,7 @@ final class SpelersUITests: XCTestCase {
         addPlayer("Fien", "12")
 
         // "Annuleren" keeps her.
-        tap(app.buttons["spelers.remove.7"])
+        tapInRow(app.buttons["spelers.remove.7"])
         let alert = app.alerts["#7 Lotte verwijderen?"]
         expectShown(alert)
         tap(alert.buttons["Annuleren"])
@@ -137,7 +137,7 @@ final class SpelersUITests: XCTestCase {
         expectShown(app.staticTexts["2 van 15"])
 
         // "Verwijder" removes her.
-        tap(app.buttons["spelers.remove.7"])
+        tapInRow(app.buttons["spelers.remove.7"])
         expectShown(alert)
         tap(alert.buttons["Verwijder"])
         expectGone(row("7"))
@@ -148,6 +148,76 @@ final class SpelersUITests: XCTestCase {
         launch()
         expectShown(row("12"))
         expectGone(row("7"))
+    }
+
+    // MARK: - Hiding the keyboard (#145)
+
+    @MainActor
+    func testKlaarAboveTheKeyboardHidesItFromTheNameAndTheNumberField() throws {
+        launch()
+        let done = app.buttons["spelers.keyboardDone"]
+
+        tap(field("spelers.name"))
+        expectShown(keyboard)
+        expectShown(done)
+        expectGone(app.buttons["spelers.keyboardSubmit"], "adding from the keyboard is offered on the number field")
+        tap(done)
+        expectGone(keyboard, "Klaar hides the keyboard from the name field")
+
+        tap(field("spelers.number"))
+        expectShown(keyboard)
+        expectShown(app.buttons["spelers.keyboardSubmit"])
+        tap(done)
+        expectGone(keyboard, "Klaar hides the number pad, which has no return key")
+        expectShown(app.staticTexts["spelers.empty"], "nothing was added")
+    }
+
+    @MainActor
+    func testScrollingTheListDownHidesTheKeyboard() throws {
+        try plant(players: (1...8).map { (id: $0, name: "Speler\($0)", number: String($0 + 10)) })
+        launch()
+        tap(field("spelers.name"))
+        expectShown(keyboard)
+
+        // A drag down through the list towards the keyboard (interactive dismissal).
+        let list = app.collectionViews.firstMatch
+        let from = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let to = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1.0))
+        from.press(forDuration: 0.05, thenDragTo: to)
+        expectGone(keyboard, "dragging the list down hides the keyboard")
+    }
+
+    @MainActor
+    func testAddingFromTheKeyboardKeepsQuickEntry() throws {
+        launch()
+        replace(field("spelers.name"), with: "Lotte")
+        replace(field("spelers.number"), with: "7")
+        tap(app.buttons["spelers.keyboardSubmit"])
+
+        expectRow("7", containing: "Lotte")
+        expectValue(field("spelers.name"), "Voornaam", "the form is cleared after adding")
+        XCTAssertTrue(waitUntil { self.hasFocus(self.field("spelers.name")) }, "the name field is ready for the next player")
+        expectShown(keyboard, "the keyboard stays up for the next player")
+
+        // Editing: the keyboard's button saves, as Bewaren does.
+        tapInRow(app.buttons["spelers.edit.7"])
+        replace(field("spelers.number"), with: "8")
+        let save = app.buttons["spelers.keyboardSubmit"]
+        expectShown(save)
+        XCTAssertEqual(save.label, "Bewaren")
+        tap(save)
+        expectRow("8", containing: "Lotte")
+        expectGone(row("7"))
+        expectShown(app.buttons["Toevoegen"], "back to adding after saving")
+    }
+
+    @MainActor
+    func testToevoegenStillFocusesTheNameForTheNextPlayer() throws {
+        launch()
+        add("Lotte", "7")
+        expectRow("7", containing: "Lotte")
+        XCTAssertTrue(waitUntil { self.hasFocus(self.field("spelers.name")) }, "quick entry: the name field is focused again")
+        expectShown(keyboard)
     }
 
     // MARK: - Refusals, as the web app refuses them
@@ -165,13 +235,13 @@ final class SpelersUITests: XCTestCase {
         // A number already taken.
         replace(field("spelers.name"), with: "Fien")
         replace(field("spelers.number"), with: "7")
-        tap(app.buttons["Toevoegen"])
+        tap(submitButton)
         expectMessage("Rugnummer 7 is al van Lotte.")
         expectValue(field("spelers.name"), "Fien", "a refused entry stays in the form")
 
         // No number.
         replace(field("spelers.number"), with: "")
-        tap(app.buttons["Toevoegen"])
+        tap(submitButton)
         expectMessage("Vul een rugnummer van 0 tot 99 in.")
 
         expectShown(app.staticTexts["1 van 15"])
@@ -180,7 +250,7 @@ final class SpelersUITests: XCTestCase {
 
         // A good entry clears the message.
         replace(field("spelers.number"), with: "8")
-        tap(app.buttons["Toevoegen"])
+        tap(submitButton)
         expectShown(row("8"))
         expectGone(app.staticTexts["spelers.message"])
     }
@@ -224,12 +294,12 @@ final class SpelersUITests: XCTestCase {
         expectGone(field("spelers.name"))
 
         // Editing a player is still possible on a full roster.
-        tap(app.buttons["spelers.edit.7"])
+        tapInRow(app.buttons["spelers.edit.7"])
         expectShown(app.buttons["Bewaren"])
         tap(app.buttons["Annuleren"])
 
         // Removing one makes room again.
-        tap(app.buttons["spelers.remove.7"])
+        tapInRow(app.buttons["spelers.remove.7"])
         tap(app.alerts["#7 Lotte verwijderen?"].buttons["Verwijder"])
         expectShown(field("spelers.name"))
         expectShown(app.staticTexts["14 van 15"])
@@ -388,7 +458,31 @@ final class SpelersUITests: XCTestCase {
     private func add(_ name: String, _ number: String) {
         replace(field("spelers.name"), with: name)
         replace(field("spelers.number"), with: number)
-        tap(app.buttons["Toevoegen"])
+        tap(submitButton)
+    }
+
+    /// The form's Toevoegen / Bewaren button. Tapped by its identifier: while the number field is focused, the
+    /// keyboard toolbar carries a button with the same label (#145).
+    private var submitButton: XCUIElement { app.buttons["spelers.submit"] }
+
+    /// The software keyboard, shown while a field is being edited.
+    private var keyboard: XCUIElement { app.keyboards.firstMatch }
+
+    /// Whether the text field has the keyboard focus.
+    private func hasFocus(_ element: XCUIElement) -> Bool {
+        (element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false
+    }
+
+    /// Taps a button in a player's row. After Toevoegen the keyboard stays up (quick entry), and on a shorter screen
+    /// such as the iPhone 17 Pro the keyboard toolbar covers the first rows, so a tap would land on the toolbar. Hide
+    /// the keyboard with Klaar first, as a coach would (#145).
+    private func tapInRow(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let done = app.buttons["spelers.keyboardDone"]
+        if done.exists {
+            done.tap()
+            expectGone(keyboard, "Klaar hides the keyboard before a row is tapped", file: file, line: line)
+        }
+        tap(element, file: file, line: line)
     }
 
     /// Taps an element once it is there, instead of failing at once when the screen is still catching up.

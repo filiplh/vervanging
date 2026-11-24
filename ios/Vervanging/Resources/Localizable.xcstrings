@@ -431,6 +431,16 @@
         }
       }
     },
+    "Klaar": {
+      "localizations": {
+        "nl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Klaar"
+          }
+        }
+      }
+    },
     "Laatste blok": {
       "localizations": {
         "nl": {
