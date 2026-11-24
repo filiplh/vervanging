@@ -261,8 +261,10 @@ final class LiveModel {
 
     // MARK: - Team history
 
-    /// The setup's start time as stored, the id of this match in the history.
-    private var savedAt: String { MatchStore.isoString(setup.savedAt) }
+    /// The setup's start time as stored, the id of this match in the history: the text the running state carries
+    /// (`setupSavedAt`, the match key), never a date formatted again, which for a start time before the year 1 can
+    /// differ from the key after a relaunch (#139). `isoString` is only the fallback for a state without the text.
+    private var savedAt: String { state.setupSavedAt ?? MatchStore.isoString(setup.savedAt) }
 
     /// Keeps the history in line with the match after an action (`syncHistory` in live.js): an ended match is recorded
     /// (replacing an earlier entry, so ending, undoing and ending again never counts it twice), and a match that is no

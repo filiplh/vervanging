@@ -18,10 +18,11 @@ struct LiveModelTests {
     }
 
     /// Twelve players numbered 1 to 12 (ids 1 to 12), the basisvijf 1 to 5, gelijke minuten.
-    static func started(_ count: Int = 12, schedule: String = "equal", opponent: String = "") throws -> StartedMatch {
+    static func started(_ count: Int = 12, schedule: String = "equal", opponent: String = "",
+                        at savedAt: Date = Date(timeIntervalSince1970: 1_795_000_000.123_456)) throws -> StartedMatch {
         let players = (1...count).map { Player(id: $0, name: "Speler\($0)", number: String($0)) }
         let plan = try Planner.makePlan(players: players.map(\.id), start: [1, 2, 3, 4, 5], schedule: schedule, seed: 7)
-        return StartedMatch(savedAt: Date(timeIntervalSince1970: 1_795_000_000.123_456), opponent: opponent,
+        return StartedMatch(savedAt: savedAt, opponent: opponent,
                             schedule: schedule, seed: 7, players: players, startingFive: [1, 2, 3, 4, 5], plan: plan)
     }
 
@@ -265,6 +266,37 @@ struct LiveModelTests {
         try write(object)
         #expect(try #require(store.load()).state == MatchState.start(model.setup.plan,
                                                                       setupSavedAt: MatchStore.isoString(model.setup.savedAt)))
+    }
+
+    /// #139: a start time in the year -100 has a key the formatter cannot read back, so after a relaunch the setup's
+    /// date is a stand-in whose text is another one. The team history's id must stay the key the match is stored
+    /// under, or the undo of the end after a relaunch would not find the entry it recorded.
+    @Test func theHistoryIdIsTheMatchKeyAfterARelaunchAtAStartTimeInTheYearMinus100() throws {
+        let time = Date(timeIntervalSince1970: -65_300_000_000.5)
+        let key = MatchStore.isoString(time)
+        #expect(key.hasPrefix("-"), "the year -100 is written with a sign: \(key)")
+        #expect(MatchStore.date(key) == nil, "this start time does not read back, which is the case of #139")
+
+        let clock = Clock()
+        let model = model(try Self.started(at: time), clock: clock)
+        wissel(model, clock, times: 12)
+        #expect(model.state.ended)
+        let history = HistoryStore(directory: directory)
+        #expect(history.load().matches.map(\.id) == [JSString(key)], "recorded under the key")
+
+        let loaded = try #require(store.load())
+        #expect(loaded.state.setupSavedAt == key)
+        #expect(MatchStore.isoString(loaded.setup.savedAt) != key, "the reloaded date alone no longer names the key")
+        let again = LiveModel(match: loaded, store: store, now: { clock.now })
+        #expect(again.message.isEmpty, "opening the end screen again writes nothing")
+        #expect(history.load().matches.map(\.id) == [JSString(key)], "still once, under the key")
+
+        again.undo()
+        #expect(again.isRunning)
+        #expect(history.load().matches.isEmpty, "the undo finds the entry by the key")
+        clock.advance(1)
+        again.tapWissel()
+        #expect(history.load().matches.map(\.id) == [JSString(key)], "ending again counts it once")
     }
 
     @Test func aFailedWriteSaysSoAndKeepsPlaying() throws {
