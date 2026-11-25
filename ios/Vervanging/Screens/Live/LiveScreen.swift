@@ -56,8 +56,8 @@ struct LiveScreen: View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView {
-                    // Tight spacing, so three Eruit rows of two-line names still sit above the Wissel bar at scroll 0 on a
-                    // 15-player match (#77).
+                    // Tight spacing, so three Eruit rows still sit above the Wissel bar at scroll 0 on a 15-player match
+                    // (#77).
                     VStack(alignment: .leading, spacing: 8) {
                         if !model.isRunning {
                             ended
@@ -239,38 +239,42 @@ struct LiveScreen: View {
     private func zoneChoice(_ change: (off: [Player], on: [Player])) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             LabeledContent {
-                Picker(selection: Binding(get: { model.zone?.keep }, set: { id in
-                    model.chooseZone(model.players.first { $0.id == id })
-                })) {
-                    Text("Niemand").tag(Int?.none)
-                    ForEach(model.zoneCandidates) { player in
-                        Text(verbatim: LiveModel.label(player)).tag(Int?.some(player.id))
+                let keep = model.zone.flatMap { zone in model.players.first { $0.id == zone.keep } }
+                ZoneMenu(title: Text("In the zone"),
+                         chosen: keep.map { Text(verbatim: LiveModel.label($0)) } ?? Text("Niemand")) {
+                    Picker(selection: Binding(get: { model.zone?.keep }, set: { id in
+                        model.chooseZone(model.players.first { $0.id == id })
+                    })) {
+                        Text("Niemand").tag(Int?.none)
+                        ForEach(model.zoneCandidates) { player in
+                            Text(verbatim: LiveModel.label(player)).tag(Int?.some(player.id))
+                        }
+                    } label: {
+                        Text("In the zone")
                     }
-                } label: {
-                    Text("In the zone")
                 }
-                .pickerStyle(.menu)
-                // Never broken over two lines in the narrower column of the turned inner screen (#143).
-                .fixedSize()
                 .accessibilityIdentifier("live.zone.keep")
             } label: {
-                Text("In the zone").font(.subheadline.weight(.semibold))
+                Text("In the zone").font(.subheadline.weight(.semibold)).fixedSize()
             }
             if let zone = model.zone {
                 LabeledContent {
-                    Picker(selection: Binding(get: { zone.bench }, set: { id in
-                        if let player = change.on.first(where: { $0.id == id }) { model.chooseBench(player) }
-                    })) {
-                        ForEach(change.on) { player in
-                            Text(verbatim: LiveModel.label(player)).tag(player.id)
+                    let bench = model.players.first { $0.id == zone.bench }
+                    ZoneMenu(title: Text("Op de bank"),
+                             chosen: Text(verbatim: bench.map(LiveModel.label) ?? "")) {
+                        Picker(selection: Binding(get: { zone.bench }, set: { id in
+                            if let player = change.on.first(where: { $0.id == id }) { model.chooseBench(player) }
+                        })) {
+                            ForEach(change.on) { player in
+                                Text(verbatim: LiveModel.label(player)).tag(player.id)
+                            }
+                        } label: {
+                            Text("Op de bank")
                         }
-                    } label: {
-                        Text("Op de bank")
                     }
-                    .pickerStyle(.menu)
                     .accessibilityIdentifier("live.zone.bench")
                 } label: {
-                    Text("Op de bank").font(.subheadline.weight(.semibold))
+                    Text("Op de bank").font(.subheadline.weight(.semibold)).fixedSize()
                 }
                 Toggle(isOn: Binding(get: { zone.extra }, set: { model.setExtra($0) })) {
                     Text("Extra minuten (niet teruggeven)").font(.subheadline)
@@ -389,7 +393,31 @@ struct LiveScreen: View {
     }
 }
 
-/// A list of players, one per row, by jersey number. Names are never cut: a long name wraps onto more lines (#77).
+/// One of the zone's two menus: the choice on one line, a long name cut at its end with … (#152), with the menu's
+/// chevrons; tapping it lists every option in full, with a check mark at the choice. A menu picker draws its own label
+/// and wraps a long name over two lines whatever line limit it gets, so this menu wraps the picker instead.
+/// VoiceOver reads the title and the whole choice.
+private struct ZoneMenu<Options: View>: View {
+    let title: Text
+    let chosen: Text
+    @ViewBuilder let options: () -> Options
+
+    var body: some View {
+        Menu {
+            options()
+        } label: {
+            HStack(spacing: 4) {
+                chosen.lineLimit(1).truncationMode(.tail)
+                Image(systemName: "chevron.up.chevron.down").imageScale(.small).fontWeight(.semibold)
+            }
+        }
+        .accessibilityLabel(title)
+        .accessibilityValue(chosen)
+    }
+}
+
+/// A list of players, one per row, by jersey number. Each name stays on one line, cut with … where the column runs out
+/// (#152); VoiceOver reads the whole name.
 private struct NameList: View {
     let players: [Player]
     let id: String
@@ -411,18 +439,20 @@ private struct NameList: View {
     }
 }
 
-/// "#11 Hanne", the number in the secondary colour; the name wraps, never cut. A player uit is struck through.
+/// "#11 Hanne", the number in the secondary colour. On one line (#152): the rugnummer always in full, the name cut at
+/// its end with … where the room runs out, never hyphenated or broken mid-word. A player uit is struck through.
+/// The views around it carry the full name for VoiceOver.
 private struct PlayerName: View {
     let player: Player
     var struck = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
-            Text(verbatim: "#\(player.number)").foregroundStyle(.secondary).monospacedDigit()
+            Text(verbatim: "#\(player.number)").foregroundStyle(.secondary).monospacedDigit().fixedSize()
             Text(verbatim: player.name)
                 .strikethrough(struck)
-                .lineLimit(nil)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
     }
 }
@@ -523,11 +553,12 @@ private struct MinutesTable: View {
                 HStack(spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
                         PlayerName(player: row.player, struck: row.out)
+                        // Only the name gives way to a narrow column (#152): the tag and the minutes stay whole.
                         if row.out {
-                            Text("uit").font(.subheadline.weight(.semibold)).foregroundStyle(.red)
+                            Text("uit").font(.subheadline.weight(.semibold)).foregroundStyle(.red).fixedSize()
                         }
                         Spacer(minLength: 12)
-                        Text(verbatim: formatSeconds(row.seconds)).monospacedDigit().strikethrough(row.out)
+                        Text(verbatim: formatSeconds(row.seconds)).monospacedDigit().strikethrough(row.out).fixedSize()
                     }
                     .foregroundStyle(row.out ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                     .accessibilityElement(children: .ignore)

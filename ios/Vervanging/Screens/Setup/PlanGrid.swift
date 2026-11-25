@@ -54,9 +54,10 @@ struct PlanGrid: View {
             onTap(row.id)
         } label: {
             HStack(spacing: 0) {
+                // One line: the rugnummer in full, the name cut with … where the column runs out (#152).
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text(verbatim: "#\(row.player.number)").monospacedDigit().foregroundStyle(.secondary)
-                    Text(verbatim: row.player.name).lineLimit(2)
+                    Text(verbatim: "#\(row.player.number)").monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                    Text(verbatim: row.player.name).lineLimit(1).truncationMode(.tail)
                 }
                 .font(.footnote)
                 .frame(width: nameWidth, alignment: .leading)

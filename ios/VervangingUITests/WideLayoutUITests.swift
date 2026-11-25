@@ -195,10 +195,22 @@ final class WideLayoutUITests: XCTestCase {
         try checkInnerScreen(Self.uprightCanvas, players: 15, name: "upright-15")
     }
 
+    /// ⚠ The same with 15 players with names of about 20 letters (#152): every name stays on one line, cut with …, and
+    /// still nothing needs scrolling or sits under the Wissel bar.
+    @MainActor
+    func testTheTurnedInnerScreenShowsEveryStateWithoutScrollingFor15LongNames() throws {
+        try checkInnerScreen(Self.turnedCanvas, players: 15, name: "turned-15-long", long: true)
+    }
+
+    @MainActor
+    func testTheUprightInnerScreenShowsEveryStateWithoutScrollingFor15LongNames() throws {
+        try checkInnerScreen(Self.uprightCanvas, players: 15, name: "upright-15-long", long: true)
+    }
+
     /// Lays the live screen out at the inner screen's size in the debug canvas (`VERVANGING_CANVAS`, debug builds), and
     /// checks the states one after the other.
-    @MainActor private func checkInnerScreen(_ canvasSpec: String, players: Int, name: String) throws {
-        try plantRoster(players)
+    @MainActor private func checkInnerScreen(_ canvasSpec: String, players: Int, name: String, long: Bool = false) throws {
+        if long { try plantLongNameRoster() } else { try plantRoster(players) }
         app.launchEnvironment["VERVANGING_CANVAS"] = canvasSpec
         if let shots = ProcessInfo.processInfo.environment["VERVANGING_CANVAS_SHOTS"] {
             app.launchEnvironment["VERVANGING_CANVAS_SHOTS"] = "\(shots)/\(name)"
@@ -283,7 +295,36 @@ final class WideLayoutUITests: XCTestCase {
         for button in elements("live.uit.") + elements("live.terug.") {
             XCTAssertTrue(button.isHittable, "\(context): \(button.identifier) can be tapped")
         }
+        // Every name on one line (#152), and nothing in the left column runs into the minutes beside it.
+        let heading = app.staticTexts["Op het veld"].firstMatch
+        XCTAssertTrue(heading.exists, "\(context): Op het veld is there")
+        assertOneLine(elements("live.off.") + elements("live.on.") + elements("live.court.") + elements("live.minutes."),
+                      line: heading.frame.height, rowPadding: 4 * scale, context)
+        let rightColumn = elements("live.minutes.").map(\.frame.minX).min() ?? .infinity
+        for element in wisselAndCourt() + ids.map({ app.descendants(matching: .any)[$0] }) where element.exists {
+            guard !element.identifier.hasPrefix("live.terug.") else { continue }
+            XCTAssertLessThanOrEqual(element.frame.maxX, rightColumn + 0.5,
+                                     "\(context): \(element.identifier) stays in its column (\(element.frame))")
+        }
     }
+
+    /// No name row is taller than one line (plus its own padding): two lines would be about twice the line height. Each
+    /// row still carries the whole name, "#4 Anne-Sophie Vermeulen", for VoiceOver.
+    @MainActor private func assertOneLine(_ rows: [XCUIElement], line: CGFloat, rowPadding: CGFloat, _ context: String) {
+        XCTAssertFalse(rows.isEmpty, context)
+        let whole = Set(longNames.indices.map { "#\(longNumbers[$0]) \(longNames[$0])" }
+                        + (names + extraNames).indices.map { "#\((numbers + extraNumbers)[$0]) \((names + extraNames)[$0])" })
+        for row in rows {
+            let height = row.frame.height
+            XCTAssertLessThanOrEqual(height, 1.5 * line + rowPadding,
+                                     "\(context): \(row.identifier) is on one line (\(height) pt; a line is \(line) pt)")
+            XCTAssertTrue(whole.contains(row.label), "\(context): \(row.label) is the whole name")
+        }
+    }
+
+    /// The tallest a setup row may be with its name on one line, at the default text size: one line of body text with
+    /// the check mark beside it is about 28 pt, two lines about 48 pt (#152).
+    private static let setupOneLine: CGFloat = 38
 
     /// Every Uit and Terug is at least 44 × 44 pt on the inner screen, and no two overlap.
     @MainActor private func assertFullSizeTargets(scale: CGFloat, _ context: String) {
@@ -344,6 +385,7 @@ final class WideLayoutUITests: XCTestCase {
         XCTAssertEqual(planRows().count, 15)
         let lastRow = try XCTUnwrap(planRows().max { $0.frame.maxY < $1.frame.maxY })
         XCTAssertLessThanOrEqual(lastRow.frame.maxY, bar.frame.minY, "\(lastRow.label) sits above the bar")
+        assertOneLine(planRows(), line: Self.setupOneLine / 1.5, rowPadding: 0, "the plan on the phone")
         save("setup-phone-start-bar-end")
 
         // Back to the top: Start is still in view, now on.
@@ -352,6 +394,7 @@ final class WideLayoutUITests: XCTestCase {
         XCTAssertTrue(waitUntil { firstRow.isHittable }, "back at the top of the setup")
         XCTAssertTrue(start.isHittable, "Start is in view at the top")
         XCTAssertTrue(start.isEnabled, "Start is on with a basisvijf")
+        assertOneLine(attendanceRows(), line: Self.setupOneLine / 1.5, rowPadding: 0, "Aanwezig on the phone")
         save("setup-phone-start-bar-top")
         start.tap()
         XCTAssertTrue(app.buttons["live.wissel"].waitForExistence(timeout: 5), "Start opens the live screen")
@@ -382,6 +425,8 @@ final class WideLayoutUITests: XCTestCase {
         }
         XCTAssertTrue(waitUntil { start.isEnabled }, "Start is on with a basisvijf")
         XCTAssertTrue(start.isHittable, "Start is still in view")
+        assertOneLine(attendanceRows(), line: Self.setupOneLine / 1.5, rowPadding: 0, "Aanwezig on the wide layout")
+        assertOneLine(planRows(), line: Self.setupOneLine / 1.5, rowPadding: 0, "the plan on the wide layout")
         save("setup-wide-start-bar-top")
 
         for _ in 0..<12 { planList.swipeUp(velocity: .fast) }
@@ -424,6 +469,11 @@ final class WideLayoutUITests: XCTestCase {
 
     @MainActor private func planRows() -> [XCUIElement] {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'setup.row.'")).allElementsBoundByIndex
+    }
+
+    /// The Aanwezig rows the list has laid out (it lays out only those near the screen).
+    @MainActor private func attendanceRows() -> [XCUIElement] {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'setup.present.'")).allElementsBoundByIndex
     }
 
     // MARK: - The keyboard for Tegenstander (#143)
