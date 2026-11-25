@@ -2,7 +2,9 @@ import XCTest
 
 /// The tab bar after turning the phone (#151): the owner saw the selected tab's glass highlight sit too high in the
 /// side tab bar after a few turns on the iPhone Duo simulator. These tests turn the phone ten times (left, right and
-/// back upright), wait after every turn until the window has really turned, and check that the selected tab is still
+/// back upright), wait after every turn between upright and landscape until the window has really turned (a turn
+/// from one landscape side to the other keeps the window's shape, so geometry cannot confirm it; those turns only
+/// wait for the screen to settle), and check that the selected tab is still
 /// selected and hittable, that the other tab is not selected, and that each tab button is back where it was in the
 /// same orientation. With `VERVANGING_SHOTS` set (as `TEST_RUNNER_VERVANGING_SHOTS` on the xcodebuild command line)
 /// they save a screenshot after every turn.
@@ -173,7 +175,14 @@ final class TabBarUITests: XCTestCase {
     /// rows are made only when they scroll into view.
     @MainActor private func tapReveal(_ element: XCUIElement) {
         _ = element.waitForExistence(timeout: 2)
-        func shown() -> Bool { element.exists && element.isHittable }
+        func shown() -> Bool {
+            guard element.exists, element.isHittable else { return false }
+            // The Start bar on setup floats over rows (#150): a tap there would land on Start. Only its own buttons
+            // lie inside it.
+            let startBar = app.descendants(matching: .any)["setup.actions"]
+            return !startBar.exists || ["setup.start", "setup.anotherPlan"].contains(element.identifier)
+                || !element.frame.intersects(startBar.frame)
+        }
         for _ in 0..<12 where !shown() { app.swipeUp(velocity: .slow) }
         for _ in 0..<16 where !shown() { app.swipeDown(velocity: .slow) }
         XCTAssertTrue(shown(), "could not scroll to \(element)")
@@ -233,7 +242,8 @@ final class TabBarUITests: XCTestCase {
         return orientation.isLandscape ? frame.width > frame.height : frame.height > frame.width
     }
 
-    /// Turns the phone, fails unless the window follows within 5 s, then waits for the turn to settle.
+    /// Turns the phone, fails unless the window has the new orientation's shape within 5 s, then waits for the turn to
+    /// settle. From one landscape side to the other the shape does not change, so that check passes at once there.
     @MainActor private func turn(to orientation: UIDeviceOrientation) throws {
         XCUIDevice.shared.orientation = orientation
         XCTAssertTrue(waitUntil { self.windowIs(orientation) }, "the window turned to \(key(orientation))")
