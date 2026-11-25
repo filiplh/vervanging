@@ -51,6 +51,9 @@ private struct SetupContent: View {
     @State private var layout = WideLayout.Kind.phone
     /// Whether the keyboard is up for Tegenstander.
     @FocusState private var opponentFocused: Bool
+    /// The text's height in Basis, Terug naar de match and Naar Spelers: with the bordered style's own padding each
+    /// button is a 44 pt tap target (#167).
+    static let buttonLabelHeight: CGFloat = 30
 
     var body: some View {
         if model.players.count < SetupModel.onCourt {
@@ -127,8 +130,9 @@ private struct SetupContent: View {
 
     /// "Terug naar de match", while a match is running (P1-2 in docs/spikes/2026-ui-review.md).
     private func backToMatch(_ action: @escaping () -> Void) -> some View {
-        Button("Terug naar de match", action: action)
-            .buttonStyle(.glassProminent)
+        // Not glass: glass is for the bars, not for screen content (#167).
+        Button(action: action) { Text("Terug naar de match").frame(minHeight: Self.buttonLabelHeight) }
+            .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
             .accessibilityIdentifier("setup.backToMatch")
     }
@@ -140,8 +144,8 @@ private struct SetupContent: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("setup.tooFew")
-            Button("Naar Spelers", action: onShowSpelers)
-                .buttonStyle(.glassProminent)
+            Button(action: onShowSpelers) { Text("Naar Spelers").frame(minHeight: Self.buttonLabelHeight) }
+                .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("setup.toSpelers")
         }
         .padding()
@@ -202,9 +206,19 @@ private struct SetupContent: View {
 
     @ViewBuilder
     private func basisButton(_ player: Player, inStart: Bool) -> some View {
-        let button = Button("Basis") { model.toggleStart(player.id) }
+        // Not glass: glass is for the bars, not for rows (#167). In the basisvijf the button is filled and carries a
+        // checkmark, so the state shows by more than colour.
+        let button = Button { model.toggleStart(player.id) } label: {
+            Label {
+                Text("Basis")
+            } icon: {
+                if inStart { Image(systemName: "checkmark") }
+            }
+            .labelStyle(.titleAndIcon)
+            .frame(minHeight: Self.buttonLabelHeight)
+        }
         Group {
-            if inStart { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.glass) }
+            if inStart { button.buttonStyle(.borderedProminent) } else { button.buttonStyle(.bordered) }
         }
         // Never squeezed by a long name beside it (#152).
         .fixedSize()
