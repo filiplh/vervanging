@@ -1,8 +1,8 @@
 import XCTest
 
 /// The live screen (#102): Wissel through a whole match, the minutes at a glance and in the table, undo, a double tap
-/// that counts once, the match restored after a force-quit, long names above the Wissel bar, the screen kept awake
-/// only while the match runs, and the question before a new Start replaces a running match.
+/// that counts once, the match restored after a force-quit, long names on one line above the Wissel bar (#152), the
+/// screen kept awake only while the match runs, and the question before a new Start replaces a running match.
 ///
 /// Every test gives the app its own storage folder through `VERVANGING_STORAGE_DIR` and a fixed first seed through
 /// `VERVANGING_SEED` (both read by debug builds only). The checks wait for elements instead of reading them at once.
@@ -121,13 +121,13 @@ final class LiveUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Blok 1 van 12"].exists)
     }
 
-    // MARK: - Long names (#77)
+    // MARK: - Long names (#77, #152)
 
     @MainActor
-    func testThreeLineNamesOnAThreePlayerChangeStayAboveTheWisselBarAfterAWissel() throws {
-        // Three-word names of 20 characters (the longest the roster takes). At the default text size they take at most
-        // two lines in the half-width Eruit and Erin columns, so the app runs one text size up (XL): there they wrap
-        // to three ("Wassim / Mohammed / AmAa") and stay on one line in the full-width Op het veld list.
+    func testLongNamesStayOnOneLineAboveTheWisselBarAndToTheEndOfTheMatch() throws {
+        // Three-word names of 20 characters (the longest the roster takes), one text size up (XL): before #152 they
+        // wrapped to three lines in the half-width Eruit and Erin columns. Now every name stays on one line, cut with …
+        // where the column runs out, and VoiceOver still reads the whole name.
         let long = (0..<15).map { "Wassim Mohammed Am\(String(UnicodeScalar(UInt8(65 + $0))))\(String(UnicodeScalar(UInt8(97 + $0))))" }
         try plantRoster(15, names: long)
         app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXL"]
@@ -140,23 +140,54 @@ final class LiveUITests: XCTestCase {
             tapWissel(expecting: "Blok \(block) van 12")
         } while labels("live.off.").count < 3
         XCTAssertTrue(message()?.hasPrefix("Wissel gedaan: blok \(block).") == true, message() ?? "no message")
+        save("phone-live-long-names")
 
         let bar = app.descendants(matching: .any)["live.actions"]
         XCTAssertTrue(bar.waitForExistence(timeout: 5))
         let barTop = bar.frame.minY
-        // A one-line row: the same names fit on one line in the full-width Op het veld list.
-        let oneLine = try XCTUnwrap(elements("live.court.").map { $0.frame.height }.max())
+        let line = try lineHeight()
         let whole = Set((0..<15).map { "#\(numbers[$0]) \(long[$0])" })
         let rows = elements("live.off.") + elements("live.on.")
         XCTAssertEqual(elements("live.off.").count, 3)
         XCTAssertGreaterThanOrEqual(rows.count, 4)
         for row in rows {
-            let frame = row.frame
             XCTAssertTrue(row.isHittable, row.label)
-            XCTAssertGreaterThanOrEqual(frame.height, 2.4 * oneLine,
-                                        "\(row.label) wraps to three lines (\(frame.height) pt; one line is \(oneLine) pt)")
-            XCTAssertLessThanOrEqual(frame.maxY, barTop, "\(row.label): the whole row sits above the Wissel bar")
-            XCTAssertTrue(whole.contains(row.label), "\(row.label) is the whole name")
+            XCTAssertLessThanOrEqual(row.frame.maxY, barTop, "\(row.label): the whole row sits above the Wissel bar")
+        }
+        // Every name on the screen: the change, the court and the minutes table.
+        let named = rows + elements("live.court.") + elements("live.minutes.")
+        XCTAssertEqual(elements("live.minutes.").count, 15)
+        assertOneLine(named, line: line, rowPadding: 4, whole: whole, "during the match")
+
+        // The end of the match: the minutes per player, every name still on one line.
+        while block < 12 {
+            block += 1
+            tapWissel(expecting: "Blok \(block) van 12")
+        }
+        tapWissel(expecting: "Einde match")
+        XCTAssertTrue(app.staticTexts["Minuten per speler"].waitForExistence(timeout: 5))
+        XCTAssertEqual(elements("live.minutes.").count, 15)
+        assertOneLine(elements("live.minutes."), line: line, rowPadding: 4, whole: whole, "after the end")
+        save("phone-end-long-names")
+    }
+
+    /// The height of one line of body text: the "Op het veld" heading, a single line in a font of the same size.
+    private func lineHeight() throws -> CGFloat {
+        let heading = app.staticTexts["Op het veld"].firstMatch
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        return heading.frame.height
+    }
+
+    /// No name row is taller than one line (with its own padding): two lines would be about twice the line height.
+    /// Each row still carries the whole name for VoiceOver.
+    private func assertOneLine(_ rows: [XCUIElement], line: CGFloat, rowPadding: CGFloat, whole: Set<String>,
+                               _ context: String) {
+        XCTAssertFalse(rows.isEmpty, context)
+        for row in rows {
+            let height = row.frame.height
+            XCTAssertLessThanOrEqual(height, 1.5 * line + rowPadding,
+                                     "\(context): \(row.identifier) \(row.label) is on one line (\(height) pt; a line is \(line) pt)")
+            XCTAssertTrue(whole.contains(row.label), "\(context): \(row.label) is the whole name")
         }
     }
 
@@ -309,6 +340,19 @@ final class LiveUITests: XCTestCase {
     private func waitFor(_ element: XCUIElement, value: String) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: element)
         return XCTWaiter().wait(for: [expectation], timeout: 5) == .completed
+    }
+
+    /// Keeps a screenshot with the test result, and writes it to `TEST_RUNNER_VERVANGING_SHOTS` when that is set.
+    private func save(_ name: String) {
+        let shot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: shot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        guard let folder = ProcessInfo.processInfo.environment["VERVANGING_SHOTS"], !folder.isEmpty else { return }
+        let url = URL(fileURLWithPath: folder, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try? shot.pngRepresentation.write(to: url.appendingPathComponent("\(name).png"))
     }
 
     private func waitFor(_ element: XCUIElement, enabled: Bool) -> Bool {

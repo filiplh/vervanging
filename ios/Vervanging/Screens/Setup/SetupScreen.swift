@@ -177,9 +177,13 @@ private struct SetupContent: View {
                     Image(systemName: isPresent ? "checkmark.circle.fill" : "circle")
                         .font(.title3)
                         .foregroundStyle(isPresent ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    // One line: the rugnummer in full, the name cut with … where the row runs out (#152).
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(verbatim: "#\(player.number)").monospacedDigit().foregroundStyle(.secondary)
-                        Text(verbatim: player.name).lineLimit(2).foregroundStyle(isPresent ? .primary : .secondary)
+                        Text(verbatim: "#\(player.number)").monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                        Text(verbatim: player.name)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .foregroundStyle(isPresent ? .primary : .secondary)
                     }
                     Spacer(minLength: 0)
                 }
@@ -202,6 +206,8 @@ private struct SetupContent: View {
         Group {
             if inStart { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.glass) }
         }
+        // Never squeezed by a long name beside it (#152).
+        .fixedSize()
         .disabled(!model.canToggleStart(player.id))
         .accessibilityLabel(Text(verbatim: "Basis #\(player.number) \(player.name)"))
         .accessibilityAddTraits(inStart ? .isSelected : [])
