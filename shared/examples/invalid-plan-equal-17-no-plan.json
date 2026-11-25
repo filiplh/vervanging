@@ -1,18 +1,15 @@
 {
-  "name": "invalid-plan-equal-16-no-plan",
+  "name": "invalid-plan-equal-17-no-plan",
   "kind": "plan",
   "actions": [],
   "args": [
     "plan",
     "--players",
-    "16",
+    "17",
     "--start",
     "1,2,3,4,5",
     "--schedule",
-    "equal",
-    "--history",
-    "scripts/fixtures/history-sit-relaxed.json",
-    "--use-history"
+    "equal"
   ],
   "exitStatus": 2,
   "stdout": "",
