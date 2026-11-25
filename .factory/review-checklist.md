@@ -21,7 +21,8 @@ Checked on top of the core review protocol. An item that does not apply to the d
       team-history id, a file name) is compared as the exact text that was stored, never re-derived from a `Date` or a
       number that was formatted or parsed again: an ISO 8601 round trip can shift a time by a millisecond, so the key
       misses its own data. A new key of this kind comes with a test that saves and reloads thousands of random values
-      and loses none, like `MatchStoreTests.everyStartTimeReadsBackAsTheSameText`. (#134, #139)
+      and loses none, like `MatchStoreTests.aRunningMatchComesBackAfterAForceQuitForEveryStartTime`.
+      (#134, #139)
 
 ## User-facing text
 
