@@ -311,6 +311,121 @@ final class WideLayoutUITests: XCTestCase {
         item.tap()
     }
 
+    // MARK: - Start always in view (#150)
+
+    /// ⚠ On the phone layout with 15 players with long names, Start sits in a bar pinned above the tab bar: in view
+    /// without scrolling at the top of the setup, and the list scrolls its last plan row fully above the bar. Start
+    /// keeps its rules: off without a basisvijf, on with one, and it opens the live screen.
+    @MainActor
+    func testStartStaysInViewOnThePhoneWithFifteenLongNames() throws {
+        try plantLongNameRoster()
+        launchOnSetup()
+        try XCTSkipIf(isWideScreen(), "the Duo's inner screen takes the wide layout")
+        let start = app.buttons["setup.start"]
+        let bar = app.descendants(matching: .any)["setup.actions"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        XCTAssertTrue(start.isHittable, "Start is in view without scrolling")
+        XCTAssertFalse(start.isEnabled, "no basisvijf yet")
+        let tabBar = app.tabBars.firstMatch
+        if tabBar.exists { XCTAssertLessThanOrEqual(bar.frame.maxY, tabBar.frame.minY + 1, "the bar sits above the tabs") }
+        let list = app.collectionViews.firstMatch
+        for number in ["4", "5", "6", "7", "8"] {
+            let basis = app.buttons["setup.basis.\(number)"]
+            bringIntoClearView(basis, in: list, above: bar.frame.minY)
+            basis.tap()
+        }
+
+        // Down to the end of the list: the whole plan sits above the bar.
+        for _ in 0..<12 { app.swipeUp(velocity: .fast) }
+        let grid = app.descendants(matching: .any)["setup.grid"]
+        XCTAssertTrue(grid.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil { grid.frame.maxY <= bar.frame.minY }, "the last plan row scrolls fully above the bar")
+        XCTAssertEqual(planRows().count, 15)
+        let lastRow = try XCTUnwrap(planRows().max { $0.frame.maxY < $1.frame.maxY })
+        XCTAssertLessThanOrEqual(lastRow.frame.maxY, bar.frame.minY, "\(lastRow.label) sits above the bar")
+        save("setup-phone-start-bar-end")
+
+        // Back to the top: Start is still in view, now on.
+        for _ in 0..<12 { app.swipeDown(velocity: .fast) }
+        let firstRow = app.buttons["setup.present.\(longNumbers.sorted { Int($0)! < Int($1)! }[0])"]
+        XCTAssertTrue(waitUntil { firstRow.isHittable }, "back at the top of the setup")
+        XCTAssertTrue(start.isHittable, "Start is in view at the top")
+        XCTAssertTrue(start.isEnabled, "Start is on with a basisvijf")
+        save("setup-phone-start-bar-top")
+        start.tap()
+        XCTAssertTrue(app.buttons["live.wissel"].waitForExistence(timeout: 5), "Start opens the live screen")
+    }
+
+    /// ⚠ The same on the wide layout (a turned iPhone 17 Pro with the threshold lowered, as the Duo's inner screen):
+    /// Start sits in a bar under the plan column, in view without scrolling, and the plan scrolls fully above it.
+    @MainActor
+    func testStartStaysInViewInTheWideLayoutWithFifteenLongNames() throws {
+        try plantLongNameRoster()
+        app.launchEnvironment["VERVANGING_WIDE_LAYOUT_MIN"] = "500x0"
+        launchOnSetup()
+        try turnToLandscape()
+        XCTAssertTrue(waitUntil { self.app.collectionViews.count == 2 }, "the wide setup has its two lists")
+        let lists = app.collectionViews.allElementsBoundByIndex.sorted { $0.frame.minX < $1.frame.minX }
+        let setupList = try XCTUnwrap(lists.first), planList = try XCTUnwrap(lists.last)
+        let start = app.buttons["setup.start"]
+        let bar = app.descendants(matching: .any)["setup.actions"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        XCTAssertTrue(start.isHittable, "Start is in view without scrolling")
+        XCTAssertFalse(start.isEnabled, "no basisvijf yet")
+        XCTAssertGreaterThanOrEqual(bar.frame.minX, setupList.frame.maxX - 1, "the bar sits under the plan column")
+        for number in ["4", "5", "6", "7", "8"] {
+            let basis = app.buttons["setup.basis.\(number)"]
+            bringIntoClearView(basis, in: setupList, above: clearBottom(for: basis))
+            basis.tap()
+        }
+        XCTAssertTrue(waitUntil { start.isEnabled }, "Start is on with a basisvijf")
+        XCTAssertTrue(start.isHittable, "Start is still in view")
+        save("setup-wide-start-bar-top")
+
+        for _ in 0..<12 { planList.swipeUp(velocity: .fast) }
+        let grid = app.descendants(matching: .any)["setup.grid"]
+        XCTAssertTrue(grid.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil { grid.frame.maxY <= bar.frame.minY }, "the last plan row scrolls fully above the bar")
+        let lastRow = try XCTUnwrap(planRows().max { $0.frame.maxY < $1.frame.maxY })
+        XCTAssertLessThanOrEqual(lastRow.frame.maxY, bar.frame.minY, "\(lastRow.label) sits above the bar")
+        XCTAssertTrue(start.isHittable, "Start is in view at the end of the plan")
+        save("setup-wide-start-bar-end")
+        start.tap()
+        XCTAssertTrue(app.buttons["live.wissel"].waitForExistence(timeout: 5), "Start opens the live screen")
+    }
+
+    /// Drags the list in small steps until the element sits wholly between the navigation bar and `limit`. `isHittable`
+    /// does not see the Start bar or the tab bar floating over a row, so a tap there would land on the bar instead.
+    @MainActor private func bringIntoClearView(_ element: XCUIElement, in list: XCUIElement, above limit: CGFloat) {
+        XCTAssertTrue(element.waitForExistence(timeout: 5), "\(element) exists")
+        let top = app.navigationBars["Match"].frame.maxY
+        for _ in 0..<30 {
+            let frame = element.frame
+            if element.exists, frame.minY >= top, frame.maxY <= limit { return }
+            let middle = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let up = !element.exists || frame.maxY > limit
+            middle.press(forDuration: 0.05, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: up ? -100 : 100)),
+                         withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        save("clear-view-failed")
+        XCTFail("could not bring \(element) into clear view: \(element.frame), top \(top), limit \(limit)")
+    }
+
+    /// The top of the tab bar where it floats over the element's column, or the window's bottom.
+    @MainActor private func clearBottom(for element: XCUIElement) -> CGFloat {
+        let tabBar = app.tabBars.firstMatch
+        guard tabBar.exists, tabBar.frame.minX < element.frame.maxX, tabBar.frame.maxX > element.frame.minX else {
+            return window().frame.maxY
+        }
+        return tabBar.frame.minY
+    }
+
+    @MainActor private func planRows() -> [XCUIElement] {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'setup.row.'")).allElementsBoundByIndex
+    }
+
     // MARK: - The keyboard for Tegenstander (#143)
 
     /// On the phone layout, Klaar above the keyboard hides it and keeps what was typed, and dragging the setup down
@@ -346,8 +461,14 @@ final class WideLayoutUITests: XCTestCase {
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "the keyboard is up")
         field.typeText("Ajax")
         XCTAssertTrue(done.waitForExistence(timeout: 5), "Klaar sits above the keyboard")
+        // The Start bar steps aside while typing, so it never sits on Klaar's toolbar (#150).
+        let start = app.buttons["setup.start"]
+        XCTAssertTrue(waitUntil { !start.exists }, "the Start bar leaves while typing")
+        save(wide ? "setup-wide-keyboard-typing" : "setup-phone-keyboard-typing")
+        XCTAssertTrue(done.isHittable, "Klaar is free to tap")
         done.tap()
         XCTAssertTrue(waitUntil { !keyboard.exists }, "Klaar hides the keyboard")
+        XCTAssertTrue(waitUntil { start.exists && start.isHittable }, "the Start bar is back")
         XCTAssertEqual(field.value as? String, "Ajax", "what was typed stays")
         save(wide ? "setup-wide-keyboard-klaar" : "setup-phone-keyboard-klaar")
 
@@ -534,6 +655,19 @@ final class WideLayoutUITests: XCTestCase {
         try XCTSkipUnless(turned, "this screen does not turn to landscape in the simulator (the Duo's outer screen)")
     }
 
+    /// Fifteen players with names of about 20 letters (#150, #152).
+    private let longNames = ["Anne-Sophie Vermeulen", "Charlotte Vandenberghe", "Marie-Louise Peeters", "Elisabeth Van Damme",
+                             "Josephine Verstraeten", "Alexandra De Clercq", "Margaretha Willems", "Christina Janssens",
+                             "Gabriella Van Acker", "Wilhelmina Claessens", "Evangeline De Smedt", "Valentina Goossens",
+                             "Francesca Van Hoecke", "Annabelle Wouters", "Florentina Maes"]
+    private let longNumbers = ["4", "7", "8", "10", "11", "12", "13", "14", "15", "21", "23", "5", "6", "9", "17"]
+
+    @MainActor private func plantLongNameRoster() throws {
+        let players = longNames.indices.map { ["id": $0 + 1, "name": longNames[$0], "number": longNumbers[$0]] as [String: Any] }
+        let object: [String: Any] = ["version": 1, "nextId": longNames.count + 1, "players": players]
+        try JSONSerialization.data(withJSONObject: object).write(to: storageDir.appendingPathComponent("roster.json"))
+    }
+
     @MainActor private func plantRoster(_ count: Int) throws {
         let allNames = names + extraNames, allNumbers = numbers + extraNumbers
         let players = (0..<count).map { ["id": $0 + 1, "name": allNames[$0], "number": allNumbers[$0]] as [String: Any] }
@@ -580,26 +714,38 @@ final class WideLayoutUITests: XCTestCase {
         return condition()
     }
 
+    /// Whether the element can be tapped where it is: hittable and, unless it is one of the Start bar's own buttons,
+    /// clear of that bar (#150). `isHittable` alone counts a row under the bar as reachable, and a tap there lands on
+    /// Start.
+    @MainActor private func isReachable(_ element: XCUIElement) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        // Only controls get tapped; a tall element such as the plan grid only needs to be on screen.
+        guard [.button, .switch, .textField].contains(element.elementType) else { return true }
+        if ["setup.start", "setup.anotherPlan"].contains(element.identifier) { return true }
+        let bar = app.descendants(matching: .any)["setup.actions"]
+        return !bar.exists || !element.frame.intersects(bar.frame)
+    }
+
     /// Scrolls until the element is on screen and hittable: down first, then back up.
     @MainActor private func reveal(_ element: XCUIElement) {
         for i in 0..<12 {
-            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, element.isHittable { return }
+            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, isReachable(element) { return }
             app.swipeUp(velocity: .slow)
         }
         for _ in 0..<16 {
-            if element.exists, element.isHittable { return }
+            if isReachable(element) { return }
             app.swipeDown(velocity: .slow)
         }
-        XCTAssertTrue(element.exists && element.isHittable, "could not scroll to \(element)")
+        XCTAssertTrue(isReachable(element), "could not scroll to \(element)")
     }
 
     /// Scrolls one list (the wide setup has two) until the element is on screen and hittable.
     @MainActor private func reveal(_ element: XCUIElement, in list: XCUIElement) {
         for i in 0..<12 {
-            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, element.isHittable { return }
+            if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, isReachable(element) { return }
             list.swipeUp(velocity: .slow)
         }
-        XCTAssertTrue(element.exists && element.isHittable, "could not scroll to \(element)")
+        XCTAssertTrue(isReachable(element), "could not scroll to \(element)")
     }
 
     @MainActor private func tapReveal(_ element: XCUIElement) {
