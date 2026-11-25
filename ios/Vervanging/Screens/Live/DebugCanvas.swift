@@ -53,7 +53,7 @@ enum DebugCanvas {
         canvas.rootViewController = host
         canvas.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.normal.rawValue + 1)
         canvas.accessibilityIdentifier = "debug.canvas"
-        let screen = scene.coordinateSpace.bounds
+        let screen = scene.effectiveGeometry.coordinateSpace.bounds
         let scale = min(screen.width / spec.size.width, screen.height / spec.size.height)
         canvas.bounds = CGRect(origin: .zero, size: spec.size)
         canvas.transform = CGAffineTransform(scaleX: scale, y: scale)
