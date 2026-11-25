@@ -277,6 +277,11 @@ final class LiveUITests: XCTestCase {
     /// bar's own controls, found by identifier, are accepted inside the bar; they only need to be hittable.
     private func isReachable(_ element: XCUIElement) -> Bool {
         guard element.exists, element.isHittable else { return false }
+        // The Start bar on setup floats over rows too (#150): a tap there would land on Start. Only its own buttons lie
+        // inside it.
+        let startBar = app.descendants(matching: .any)["setup.actions"]
+        if startBar.exists, !["setup.start", "setup.anotherPlan"].contains(element.identifier),
+           element.frame.intersects(startBar.frame) { return false }
         let bar = app.descendants(matching: .any)["live.actions"]
         guard bar.exists else { return true }
         if barControls.contains(element.identifier) { return true }

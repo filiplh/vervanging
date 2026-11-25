@@ -4,6 +4,7 @@ import VervangingCore
 /// The match setup on one screen (plan decisions #7, #10, #19, #20): who is present, the basisvijf, the schema, the
 /// history switch, the opponent, the plan grid with swaps, and Start. Copy and behaviour follow the web app's setup
 /// screen (`setupScreen` in `public/js/setup.js`). On the Duo's inner screen the plan sits beside the rest (#105).
+/// Start sits in a bar pinned to the bottom, always in view (#150).
 struct SetupScreen: View {
     let rosterStore: RosterStore
     let setupStore: SetupStore
@@ -100,6 +101,7 @@ private struct SetupContent: View {
             planSection
         }
         .scrollDismissesKeyboard(.interactively)
+        .safeAreaBar(edge: .bottom) { startBar }
     }
 
     /// The setup in a narrower list on the left, the plan beside it, so the whole plan grid and Start are in view
@@ -117,6 +119,8 @@ private struct SetupContent: View {
                     .scrollDismissesKeyboard(.interactively)
                     .contentMargins(.leading, 12, for: .scrollContent)
                     .contentMargins(.trailing, 16, for: .scrollContent)
+                    // Under the plan column only, so the plan stays right above Start (#150).
+                    .safeAreaBar(edge: .bottom) { startBar }
             }
         }
     }
@@ -277,6 +281,18 @@ private struct SetupContent: View {
                          starters: plan.start.count, selected: model.selected, onTap: model.tapRow)
                     .listRowInsets(EdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10))
             }
+        } header: {
+            Text("Plan")
+        }
+    }
+
+    /// Ander plan and Start in a bar pinned to the bottom, like the Wissel bar on the live screen, so Start is in view
+    /// without scrolling past a long plan (#150). The list scrolls its last rows up above the bar. While the keyboard
+    /// is up for Tegenstander the bar steps aside, so it never sits on Klaar's toolbar or hides the field. ⚠ Ander plan
+    /// moving into the bar beside Start, and the bar leaving while typing, are the agent's choices.
+    @ViewBuilder
+    private var startBar: some View {
+        if !opponentFocused {
             HStack {
                 Button("Ander plan", action: model.anotherPlan)
                     .buttonStyle(.glass)
@@ -288,8 +304,11 @@ private struct SetupContent: View {
                     .disabled(!model.canStart)
                     .accessibilityIdentifier("setup.start")
             }
-        } header: {
-            Text("Plan")
+            .controlSize(.large)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("setup.actions")
         }
     }
 
