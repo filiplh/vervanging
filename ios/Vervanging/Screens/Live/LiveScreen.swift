@@ -485,10 +485,13 @@ private struct MinutesOverview: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .padding(.horizontal, 3)
-                .foregroundStyle(row.onCourt ? AnyShapeStyle(.white)
+                // On court: bold, in white on a darker blue than the tint, so the text reaches 4.5:1 in light and
+                // dark, with and without Increase Contrast (#167).
+                .fontWeight(row.onCourt ? .bold : nil)
+                .foregroundStyle(row.onCourt ? AnyShapeStyle(OnCourtCell.text)
                                  : row.out ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                 .frame(maxWidth: .infinity, minHeight: 38)
-                .background(row.onCourt ? AnyShapeStyle(.tint) : AnyShapeStyle(.fill.tertiary),
+                .background(row.onCourt ? AnyShapeStyle(OnCourtCell.fill) : AnyShapeStyle(.fill.tertiary),
                             in: .rect(cornerRadius: 8))
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Text(verbatim: "#\(row.player.number)"))
@@ -499,6 +502,15 @@ private struct MinutesOverview: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Minuten tot nu per speler"))
     }
+}
+
+/// The colours of an on-court cell in the minutes at a glance (#167). The fill is the colour set `OnCourtFill`, a
+/// darker blue than the system tint (which gave white text 3.5:1 in light mode), with its own Increase Contrast
+/// variants; `LiveColourTests` checks every variant reaches 4.5:1.
+enum OnCourtCell {
+    static let fillName = "OnCourtFill"
+    static let text = Color.white
+    static let fill = Color(fillName)
 }
 
 /// The minutes table: every player by jersey number with their minutes, players on court marked, players uit muted and
@@ -569,8 +581,9 @@ private struct MinutesTable: View {
                 }
                 .fontWeight(row.onCourt ? .semibold : .regular)
                 .padding(.horizontal, 8)
-                // ⚠ 46 pt on the wide layout: a 44 pt button with a point free above and below. Chosen by the agent.
-                .frame(minHeight: isWide ? 46 : 44)
+                // ⚠ 46 pt: a 44 pt button with a point free above and below. Chosen by the agent (wide layout), and
+                // on the phone too since the buttons became 44 pt targets there (#167).
+                .frame(minHeight: 46)
                 .overlay(alignment: .leading) {
                     if row.onCourt { Rectangle().fill(.tint).frame(width: 4) }
                 }
@@ -580,8 +593,9 @@ private struct MinutesTable: View {
     }
 
     /// Uit, or Terug for a player uit; nothing for a player uit in the last block, where Terug cannot apply. The column
-    /// keeps one width, so the minutes stay in line. On the wide layout the button fills a 68 × 44 pt frame, so each
-    /// one is a target of its own of at least 44 × 44 pt (the touch-target guideline).
+    /// keeps one width, so the minutes stay in line. The button fills a 68 × 44 pt frame on the wide layout and an
+    /// 84 × 44 pt one on the phone, so each one is a target of its own of at least 44 × 44 pt (the touch-target
+    /// guideline, #167).
     @ViewBuilder
     private func action(_ row: MinutesRow) -> some View {
         if isWide {
@@ -591,7 +605,7 @@ private struct MinutesTable: View {
         } else {
             actionButton(row)
                 .controlSize(.small)
-                .frame(width: 84)
+                .frame(width: 84, height: 44)
         }
     }
 
@@ -609,18 +623,14 @@ private struct MinutesTable: View {
                 Color.clear.frame(height: 1).accessibilityHidden(true)
             }
         }
-        .buttonStyle(.glass)
+        // Not glass: glass is for the bars, not for the table's rows (#167).
+        .buttonStyle(.bordered)
         .font(.subheadline.weight(.medium))
     }
 
-    /// The button's text; on the wide layout it fills the frame, so the button does.
-    @ViewBuilder
+    /// The button's text; it fills the frame, so the button does.
     private func label(_ text: LocalizedStringKey) -> some View {
-        if isWide {
-            Text(text).frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            Text(text).frame(maxWidth: .infinity)
-        }
+        Text(text).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

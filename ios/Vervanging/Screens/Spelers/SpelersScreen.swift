@@ -21,6 +21,9 @@ struct SpelersScreen: View {
     /// content type tells the system the field holds none of the AutoFill kinds, so the suggestion bar offers none.
     /// ⚠ Seen in the simulator only; to confirm on the owner's iPhone.
     static let noAutoFill = UITextContentType(rawValue: "")
+    /// The text's height in Wijzig and Verwijder: with the bordered style's own padding the button is a 44 pt tap target
+    /// (#167).
+    static let rowButtonLabelHeight: CGFloat = 30
 
     init(store: RosterStore, history: HistoryStore? = nil) {
         _model = State(initialValue: SpelersModel(store: store, history: history))
@@ -101,8 +104,9 @@ struct SpelersScreen: View {
                         if new.count > SpelersModel.maxNumber { number = String(new.prefix(SpelersModel.maxNumber)) }
                     }
                     .accessibilityIdentifier("spelers.number")
-                Button("Toevoegen", action: submit)
-                    .buttonStyle(.glassProminent)
+                // Not glass: glass is for the bars, not for content (#167).
+                Button(action: submit) { Text("Toevoegen").frame(minHeight: Self.rowButtonLabelHeight) }
+                    .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("spelers.submit")
             }
             if !model.message.isEmpty {
@@ -172,17 +176,22 @@ struct SpelersScreen: View {
                     .accessibilityIdentifier("spelers.total.\(player.number)")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Wijzig") {
+            Button {
                 // The add form keeps what was typed in it; the keyboard goes down so the sheet has the screen.
                 focus = nil
                 model.startEditing(player)
+            } label: {
+                Text("Wijzig").frame(minHeight: Self.rowButtonLabelHeight)
             }
-            .buttonStyle(.glass)
+            // Not glass: glass is for the bars, not for rows (#167).
+            .buttonStyle(.bordered)
             .accessibilityIdentifier("spelers.edit.\(player.number)")
-            Button("Verwijder", role: .destructive) {
+            Button(role: .destructive) {
                 removing = player
+            } label: {
+                Text("Verwijder").frame(minHeight: Self.rowButtonLabelHeight)
             }
-            .buttonStyle(.glass)
+            .buttonStyle(.bordered)
             .accessibilityIdentifier("spelers.remove.\(player.number)")
         }
         .listRowBackground(player.id == model.editingId ? Color.accentColor.opacity(0.12) : nil)
