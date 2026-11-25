@@ -16,7 +16,7 @@ final class LiveUITests: XCTestCase {
                          "Roos", "Kato", "Nina"]
     private let numbers = ["4", "7", "8", "10", "11", "12", "13", "14", "15", "21", "23", "5", "6", "9", "17"]
 
-    override func setUpWithError() throws {
+    @MainActor override func setUp() async throws {
         continueAfterFailure = false
         storageDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("live-\(UUID().uuidString)", isDirectory: true)
@@ -26,7 +26,7 @@ final class LiveUITests: XCTestCase {
         app.launchEnvironment["VERVANGING_SEED"] = "7"
     }
 
-    override func tearDownWithError() throws {
+    @MainActor override func tearDown() async throws {
         app?.terminate()
         if let storageDir { try? FileManager.default.removeItem(at: storageDir) }
     }
@@ -172,7 +172,7 @@ final class LiveUITests: XCTestCase {
     }
 
     /// The height of one line of body text: the "Op het veld" heading, a single line in a font of the same size.
-    private func lineHeight() throws -> CGFloat {
+    @MainActor private func lineHeight() throws -> CGFloat {
         let heading = app.staticTexts["Op het veld"].firstMatch
         XCTAssertTrue(heading.waitForExistence(timeout: 5))
         return heading.frame.height
@@ -180,7 +180,7 @@ final class LiveUITests: XCTestCase {
 
     /// No name row is taller than one line (with its own padding): two lines would be about twice the line height.
     /// Each row still carries the whole name for VoiceOver.
-    private func assertOneLine(_ rows: [XCUIElement], line: CGFloat, rowPadding: CGFloat, whole: Set<String>,
+    @MainActor private func assertOneLine(_ rows: [XCUIElement], line: CGFloat, rowPadding: CGFloat, whole: Set<String>,
                                _ context: String) {
         XCTAssertFalse(rows.isEmpty, context)
         for row in rows {
@@ -223,7 +223,7 @@ final class LiveUITests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func plantRoster(_ count: Int, names: [String]? = nil) throws {
+    @MainActor private func plantRoster(_ count: Int, names: [String]? = nil) throws {
         let names = names ?? self.names
         let players = (0..<count).map { ["id": $0 + 1, "name": names[$0], "number": numbers[$0]] as [String: Any] }
         let object: [String: Any] = ["version": 1, "nextId": count + 1, "players": players]
@@ -231,7 +231,7 @@ final class LiveUITests: XCTestCase {
     }
 
     /// Opens setup, picks the basisvijf and taps Start: the live screen opens at block 1.
-    private func startMatch(basisvijf: [String]) throws {
+    @MainActor private func startMatch(basisvijf: [String]) throws {
         app.launch()
         XCTAssertTrue(app.navigationBars["Spelers"].waitForExistence(timeout: 10))
         let tab = app.buttons["Match"].firstMatch
@@ -244,17 +244,17 @@ final class LiveUITests: XCTestCase {
         XCTAssertTrue(wisselButton().waitForExistence(timeout: 5))
     }
 
-    private func goBackToSetup() {
+    @MainActor private func goBackToSetup() {
         let back = app.navigationBars.buttons["Match"].firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         back.tap()
         XCTAssertTrue(app.navigationBars["Match"].waitForExistence(timeout: 5))
     }
 
-    private func wisselButton() -> XCUIElement { app.buttons["live.wissel"] }
+    @MainActor private func wisselButton() -> XCUIElement { app.buttons["live.wissel"] }
 
     /// Taps Wissel (or Einde match) more than 600 ms after the last tap, and waits for the next block's title.
-    private func tapWissel(expecting title: String) {
+    @MainActor private func tapWissel(expecting title: String) {
         let wait = 0.7 - Date().timeIntervalSince(lastWissel)
         if wait > 0 { Thread.sleep(forTimeInterval: wait) }
         let button = wisselButton()
@@ -264,41 +264,41 @@ final class LiveUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 5), title)
     }
 
-    private func subTime() -> String? {
+    @MainActor private func subTime() -> String? {
         let text = app.staticTexts["live.subTime"]
         return text.waitForExistence(timeout: 5) ? text.label : nil
     }
 
-    private func message() -> String? {
+    @MainActor private func message() -> String? {
         let text = app.staticTexts["live.message"]
         return text.waitForExistence(timeout: 5) ? text.label : nil
     }
 
-    private func overviewCell(_ number: String) -> XCUIElement {
+    @MainActor private func overviewCell(_ number: String) -> XCUIElement {
         app.descendants(matching: .any)["live.overview.\(number)"]
     }
 
-    private func tableRow(_ number: String) -> XCUIElement {
+    @MainActor private func tableRow(_ number: String) -> XCUIElement {
         app.descendants(matching: .any)["live.minutes.\(number)"]
     }
 
     /// A cell's or row's value is "3:20" or "3:20, op het veld".
-    private func minutes(_ element: XCUIElement) -> String? {
+    @MainActor private func minutes(_ element: XCUIElement) -> String? {
         guard element.waitForExistence(timeout: 5), let value = element.value as? String else { return nil }
         return value.split(separator: ",").first.map(String.init)
     }
 
-    private func elements(_ prefix: String) -> [XCUIElement] {
+    @MainActor private func elements(_ prefix: String) -> [XCUIElement] {
         app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix))
             .allElementsBoundByIndex
     }
 
-    private func labels(_ prefix: String) -> [String] {
+    @MainActor private func labels(_ prefix: String) -> [String] {
         XCTAssertTrue(app.staticTexts["live.subTime"].waitForExistence(timeout: 5))
         return elements(prefix).map { $0.label }
     }
 
-    private func awakeProbe() -> XCUIElement { app.descendants(matching: .any)["debug.screenAwake"] }
+    @MainActor private func awakeProbe() -> XCUIElement { app.descendants(matching: .any)["debug.screenAwake"] }
 
     /// The Wissel bar's own controls, which lie inside the bar by design.
     private let barControls: Set<String> = ["live.undo", "live.wissel", "live.newMatch"]
@@ -306,7 +306,7 @@ final class LiveUITests: XCTestCase {
     /// Whether the element can be tapped where it is: on screen and, on the live screen, wholly above the Wissel bar (a
     /// tap on a row under the bar would land on Wissel; `isHittable` alone counts such a row as reachable). Only the
     /// bar's own controls, found by identifier, are accepted inside the bar; they only need to be hittable.
-    private func isReachable(_ element: XCUIElement) -> Bool {
+    @MainActor private func isReachable(_ element: XCUIElement) -> Bool {
         guard element.exists, element.isHittable else { return false }
         // The Start bar on setup floats over rows too (#150): a tap there would land on Start. Only its own buttons lie
         // inside it.
@@ -320,7 +320,7 @@ final class LiveUITests: XCTestCase {
     }
 
     /// Scrolls until the element is reachable: down first, then back up.
-    private func reveal(_ element: XCUIElement) {
+    @MainActor private func reveal(_ element: XCUIElement) {
         for i in 0..<12 {
             if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, isReachable(element) { return }
             app.swipeUp(velocity: .slow)
@@ -332,18 +332,18 @@ final class LiveUITests: XCTestCase {
         XCTAssertTrue(isReachable(element), "could not scroll to \(element)")
     }
 
-    private func tapReveal(_ element: XCUIElement) {
+    @MainActor private func tapReveal(_ element: XCUIElement) {
         reveal(element)
         element.tap()
     }
 
-    private func waitFor(_ element: XCUIElement, value: String) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, value: String) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: element)
         return XCTWaiter().wait(for: [expectation], timeout: 5) == .completed
     }
 
     /// Keeps a screenshot with the test result, and writes it to `TEST_RUNNER_VERVANGING_SHOTS` when that is set.
-    private func save(_ name: String) {
+    @MainActor private func save(_ name: String) {
         let shot = XCUIScreen.main.screenshot()
         let attachment = XCTAttachment(screenshot: shot)
         attachment.name = name
@@ -355,7 +355,7 @@ final class LiveUITests: XCTestCase {
         try? shot.pngRepresentation.write(to: url.appendingPathComponent("\(name).png"))
     }
 
-    private func waitFor(_ element: XCUIElement, enabled: Bool) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, enabled: Bool) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == %@", NSNumber(value: enabled)),
                                                     object: element)
         return XCTWaiter().wait(for: [expectation], timeout: 5) == .completed

@@ -18,7 +18,7 @@ final class LiveActionsUITests: XCTestCase {
     private let numbers = ["4", "7", "8", "10", "11", "12", "13", "14", "15", "21", "23", "5"]
     private let basisvijf = ["4", "7", "8", "10", "11"]
 
-    override func setUpWithError() throws {
+    @MainActor override func setUp() async throws {
         continueAfterFailure = false
         storageDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("live-actions-\(UUID().uuidString)", isDirectory: true)
@@ -28,7 +28,7 @@ final class LiveActionsUITests: XCTestCase {
         app.launchEnvironment["VERVANGING_SEED"] = "7"
     }
 
-    override func tearDownWithError() throws {
+    @MainActor override func tearDown() async throws {
         app?.terminate()
         if let storageDir { try? FileManager.default.removeItem(at: storageDir) }
     }
@@ -234,14 +234,14 @@ final class LiveActionsUITests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func plantRoster(_ count: Int) throws {
+    @MainActor private func plantRoster(_ count: Int) throws {
         let players = (0..<count).map { ["id": $0 + 1, "name": names[$0], "number": numbers[$0]] as [String: Any] }
         let object: [String: Any] = ["version": 1, "nextId": count + 1, "players": players]
         try JSONSerialization.data(withJSONObject: object).write(to: storageDir.appendingPathComponent("roster.json"))
     }
 
     /// Opens setup, picks the basisvijf and taps Start: the live screen opens at block 1.
-    private func startMatch() throws {
+    @MainActor private func startMatch() throws {
         app.launch()
         XCTAssertTrue(app.navigationBars["Spelers"].waitForExistence(timeout: 10))
         let tab = app.buttons["Match"].firstMatch
@@ -255,14 +255,14 @@ final class LiveActionsUITests: XCTestCase {
     }
 
     /// "#10 Noor" → "10".
-    private func number(_ label: String) -> String {
+    @MainActor private func number(_ label: String) -> String {
         String(label.dropFirst().prefix { $0 != " " })
     }
 
-    private func zoneControl(_ id: String) -> XCUIElement { app.descendants(matching: .any)[id] }
+    @MainActor private func zoneControl(_ id: String) -> XCUIElement { app.descendants(matching: .any)[id] }
 
     /// Picks an option in one of the zone's menus.
-    private func pick(_ option: String, in id: String) {
+    @MainActor private func pick(_ option: String, in id: String) {
         let menu = app.buttons[id]
         tapReveal(menu)
         let item = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", option, id)).firstMatch
@@ -270,37 +270,37 @@ final class LiveActionsUITests: XCTestCase {
         item.tap()
     }
 
-    private func chooseZone(_ player: String) {
+    @MainActor private func chooseZone(_ player: String) {
         pick(player, in: "live.zone.keep")
         XCTAssertTrue(zoneControl("live.zone.note").waitForExistence(timeout: 5), "In the zone chosen")
     }
 
-    private func chooseBench(_ player: String) {
+    @MainActor private func chooseBench(_ player: String) {
         pick(player, in: "live.zone.bench")
         XCTAssertTrue(waitFor(zoneControl("live.zone.note"), labelContaining: "\(player) blijft op de bank"))
     }
 
-    private func setExtra(_ on: Bool) {
+    @MainActor private func setExtra(_ on: Bool) {
         let toggle = app.switches["live.zone.extra"]
         reveal(toggle)
         if (toggle.value as? String == "1") != on { toggle.switches.firstMatch.tap() }
         XCTAssertTrue(waitFor(toggle, value: on ? "1" : "0"))
     }
 
-    private func zoneNote() -> String? {
+    @MainActor private func zoneNote() -> String? {
         let note = zoneControl("live.zone.note")
         return note.waitForExistence(timeout: 5) ? note.label : nil
     }
 
     /// The player the note says stays on the bench.
-    private func sitter() -> String? {
+    @MainActor private func sitter() -> String? {
         guard let note = zoneNote(), let comma = note.range(of: ", ", options: .backwards),
               let end = note.range(of: " blijft op de bank.") else { return nil }
         return String(note[comma.upperBound..<end.lowerBound])
     }
 
     /// Taps Wissel (or Einde match) more than 600 ms after the last tap, and waits for the next block's title.
-    private func tapWissel(expecting title: String) {
+    @MainActor private func tapWissel(expecting title: String) {
         let wait = 0.7 - Date().timeIntervalSince(lastWissel)
         if wait > 0 { Thread.sleep(forTimeInterval: wait) }
         let button = app.buttons["live.wissel"]
@@ -311,13 +311,13 @@ final class LiveActionsUITests: XCTestCase {
     }
 
     /// Wissel from `block` up to and including Einde match.
-    private func playToTheEnd(from block: Int) {
+    @MainActor private func playToTheEnd(from block: Int) {
         if block < 12 { for next in (block + 1)...12 { tapWissel(expecting: "Blok \(next) van 12") } }
         tapWissel(expecting: "Einde match")
         XCTAssertTrue(app.staticTexts["Minuten per speler"].waitForExistence(timeout: 5))
     }
 
-    private func undo(expecting title: String) {
+    @MainActor private func undo(expecting title: String) {
         let button = app.buttons["live.undo"]
         XCTAssertTrue(waitFor(button, enabled: true))
         button.tap()
@@ -325,40 +325,40 @@ final class LiveActionsUITests: XCTestCase {
         XCTAssertEqual(message(), "Ongedaan gemaakt.")
     }
 
-    private func message() -> String? {
+    @MainActor private func message() -> String? {
         let text = app.staticTexts["live.message"]
         return text.waitForExistence(timeout: 5) ? text.label : nil
     }
 
-    private func overviewCell(_ number: String) -> XCUIElement {
+    @MainActor private func overviewCell(_ number: String) -> XCUIElement {
         app.descendants(matching: .any)["live.overview.\(number)"]
     }
 
-    private func tableRow(_ number: String) -> XCUIElement {
+    @MainActor private func tableRow(_ number: String) -> XCUIElement {
         app.descendants(matching: .any)["live.minutes.\(number)"]
     }
 
     /// A row's whole value: "3:20", "3:20, op het veld" or "3:20, uit".
-    private func rowValue(_ number: String) -> String? {
+    @MainActor private func rowValue(_ number: String) -> String? {
         let row = tableRow(number)
         guard row.waitForExistence(timeout: 5) else { return nil }
         return row.value as? String
     }
 
     /// A cell's or row's minutes: "3:20" from "3:20, op het veld".
-    private func minutes(_ element: XCUIElement) -> String? {
+    @MainActor private func minutes(_ element: XCUIElement) -> String? {
         guard element.waitForExistence(timeout: 5), let value = element.value as? String else { return nil }
         return value.split(separator: ",").first.map(String.init)
     }
 
-    private func labels(_ prefix: String) -> [String] {
+    @MainActor private func labels(_ prefix: String) -> [String] {
         XCTAssertTrue(app.staticTexts["live.subTime"].waitForExistence(timeout: 5))
         return app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix))
             .allElementsBoundByIndex.map { $0.label }
     }
 
     /// Whether the element sits wholly between the navigation bar and the Wissel bar.
-    private func isVisible(_ element: XCUIElement) -> Bool {
+    @MainActor private func isVisible(_ element: XCUIElement) -> Bool {
         guard element.exists, element.isHittable else { return false }
         let bar = app.descendants(matching: .any)["live.actions"]
         let frame = element.frame
@@ -366,7 +366,7 @@ final class LiveActionsUITests: XCTestCase {
         return frame.minY >= top - 1 && frame.maxY <= bar.frame.minY + 1
     }
 
-    private func waitForVisible(_ element: XCUIElement) -> Bool {
+    @MainActor private func waitForVisible(_ element: XCUIElement) -> Bool {
         let deadline = Date().addingTimeInterval(5)
         repeat {
             if isVisible(element) { return true }
@@ -375,7 +375,7 @@ final class LiveActionsUITests: XCTestCase {
         return false
     }
 
-    private func scrollToTheBottom() {
+    @MainActor private func scrollToTheBottom() {
         let last = tableRow(numbers[numbers.count - 1])
         for _ in 0..<12 where !(last.exists && last.isHittable) { app.swipeUp(velocity: .fast) }
         app.swipeUp(velocity: .fast)
@@ -384,8 +384,8 @@ final class LiveActionsUITests: XCTestCase {
 
     /// Scrolls until the element is on screen, and on the live screen clear of the navigation bar and the Wissel bar (a
     /// tap on a row under the bar would land on Wissel): down first, then back up.
-    private func reveal(_ element: XCUIElement) {
-        func shown() -> Bool {
+    @MainActor private func reveal(_ element: XCUIElement) {
+        @MainActor func shown() -> Bool {
             guard element.exists, element.isHittable else { return false }
             // The Start bar on setup floats over rows too (#150): a tap there would land on Start. Only its own buttons
             // lie inside it.
@@ -406,23 +406,23 @@ final class LiveActionsUITests: XCTestCase {
         XCTAssertTrue(shown(), "could not scroll to \(element)")
     }
 
-    private func tapReveal(_ element: XCUIElement) {
+    @MainActor private func tapReveal(_ element: XCUIElement) {
         reveal(element)
         element.tap()
     }
 
-    private func waitFor(_ element: XCUIElement, value: String) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, value: String) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: element)
         return XCTWaiter().wait(for: [expectation], timeout: 5) == .completed
     }
 
-    private func waitFor(_ element: XCUIElement, labelContaining text: String) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, labelContaining text: String) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", text),
                                                     object: element)
         return XCTWaiter().wait(for: [expectation], timeout: 5) == .completed
     }
 
-    private func waitFor(_ element: XCUIElement, enabled: Bool) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, enabled: Bool) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == %@", NSNumber(value: enabled)),
                                                     object: element)
         return XCTWaiter().wait(for: [expectation], timeout: 5) == .completed
