@@ -98,7 +98,7 @@ private let a3Cases: [(String, Int, [Int])] = ["equal", "five"].flatMap { schedu
 
     // #169: 13 players in the 5-minute schedule can keep every sit at 15:00, every stint at 15:00 (the planner's stint
     // limit there: 3 blocks) and the cap of 3, with 3 subs at every change. The quick search ran out of nodes before
-    // it found such a plan and relaxed the sit limit (25:00 sits); the exhaustive search finds it. extraPriority [6]
+    // it found such a plan and relaxed the sit limit (25:00 sits); the complete search finds it. extraPriority [6]
     // gives no starter an extra block, [1] gives one starter one.
     @Test(arguments: [[Int](), [6], [1]])
     func thirteenPlayersInTheFiveMinuteScheduleKeepTheSitLimit(extraPriority: [Int]) throws {
@@ -115,7 +115,7 @@ private let a3Cases: [(String, Int, [Int])] = ["equal", "five"].flatMap { schedu
     }
 
     // With 14 or 15 players in the 5-minute schedule no plan keeps 15:00 sits under the cap of 3 (an exact search
-    // over every split of the extra blocks, #169): the exhaustive search says so, and the planner relaxes the sit
+    // over every split of the extra blocks, #169): the complete search proves it, and the planner relaxes the sit
     // limit (never the cap) and says so.
     @Test(arguments: [14, 15])
     func fourteenOrFifteenPlayersInTheFiveMinuteScheduleRelaxTheSitLimitNotTheSubCap(n: Int) throws {
@@ -126,18 +126,27 @@ private let a3Cases: [(String, Int, [Int])] = ["equal", "five"].flatMap { schedu
         }
     }
 
-    @Test func theExhaustiveFillGridFindsTheThirteenPlayerPlansTheQuickOneMissesAndNoneForFourteen() {
-        func fill(_ n: Int, _ extraPriority: [Int], exhaustive: Bool) -> [[Int]]? {
-            var random = SeededRandom(seed: 1)
-            let targets = Planner.blockTargets(range(n), totalPlaces: 40, random: &random, extraPriority: extraPriority)
-            return Planner.fillGrid(prefix: [[1, 2, 3, 4, 5]], players: range(n), targets: targets, blocks: 8,
-                                    maxSit: 3, maxStint: 3, random: &random, exhaustive: exhaustive)
-        }
-        for extraPriority in [[6], [1]] {
-            #expect(fill(13, extraPriority, exhaustive: false) == nil, "the quick search runs out of nodes")
-            let grid = fill(13, extraPriority, exhaustive: true)
-            #expect(grid != nil, "a plan for extraPriority \(extraPriority)")
-            if let grid {
+    /// The 5-minute schedule from start 1-5 with the strict walls (sit and stint 3 blocks), targets as makePlan gives
+    /// them, and the random generator after those targets.
+    private func fiveMinuteTargets(_ n: Int, _ extraPriority: [Int]) -> (targets: [Int: Int], random: SeededRandom) {
+        var random = SeededRandom(seed: 1)
+        let targets = Planner.blockTargets(range(n), totalPlaces: 40, random: &random, extraPriority: extraPriority)
+        return (targets, random)
+    }
+
+    @Test func completeFillFindsTheThirteenPlayerPlansTheQuickOneMissesAndProvesNoneForFourteenAndFifteen() {
+        for (extraPriority, nodes) in [([6], 1007), ([1], 1091)] {
+            let start = fiveMinuteTargets(13, extraPriority)
+            let targets = start.targets
+            var random = start.random
+            #expect(Planner.fillGrid(prefix: [[1, 2, 3, 4, 5]], players: range(13), targets: targets, blocks: 8,
+                                     maxSit: 3, maxStint: 3, random: &random) == nil,
+                    "the quick search runs out of nodes")
+            let result = Planner.completeFill(prefix: [[1, 2, 3, 4, 5]], players: range(13), targets: targets,
+                                              blocks: 8, maxSit: 3, maxStint: 3)
+            #expect(result.outcome == .found)
+            #expect(result.nodes == nodes, "the JS uses the same number of nodes")
+            if let grid = result.grid {
                 let stats = Planner.planStats(Plan(schedule: "five", blocks: 8, blockSeconds: 300, blocksPerQuarter: 2,
                                                    players: range(13), start: [1, 2, 3, 4, 5], grid: grid,
                                                    sitLimitRelaxed: false))
@@ -145,7 +154,50 @@ private let a3Cases: [(String, Int, [Int])] = ["equal", "five"].flatMap { schedu
                 #expect(stats.subsPerChange == [3, 3, 3, 3, 3, 3, 3])
             }
         }
-        #expect(fill(14, [], exhaustive: true) == nil)
+        for (n, nodes) in [(14, 286), (15, 466)] {
+            let (targets, _) = fiveMinuteTargets(n, [])
+            #expect(Planner.completeFill(prefix: [[1, 2, 3, 4, 5]], players: range(n), targets: targets, blocks: 8,
+                                         maxSit: 3, maxStint: 3)
+                == CompleteFillResult(outcome: .impossible, grid: nil, nodes: nodes))
+        }
+    }
+
+    // The live replan from #170's review: 11 players, equal schedule, seed 6, the sim actions wissel:keep=2, uit=1,
+    // terug=1, uit=9, terug=9, wissel:keep=2, uit=11, terug=11, uit=3, wissel:keep=2:extra, wissel:keep=2, terug=3,
+    // uit=10, uit=4; at the last uit, the match replans from these five blocks. With a budget of 50,000 nodes the
+    // complete search with the strict walls used to run out (it needed 57,800 nodes) and the stint wall was dropped
+    // without a proof. The bound on what each player can still reach proves it at once; only then is it dropped.
+    @Test func completeFillProvesTheReviewsLiveReplanImpossibleSoTheStintWallDropsWithAProof() throws {
+        let prefix = [[1, 2, 3, 4, 5], [1, 2, 3, 5, 8], [2, 3, 7, 8, 10], [2, 6, 7, 8, 10], [2, 6, 7, 9, 11]]
+        let available = [1, 2, 3, 5, 6, 7, 8, 9, 11]
+        let targets = [1: 7, 2: 7, 3: 6, 4: 1, 5: 6, 6: 6, 7: 6, 8: 6, 9: 7, 10: 2, 11: 6]
+        #expect(Planner.completeFill(prefix: prefix, players: range(11), available: available, targets: targets,
+                                     blocks: 12, maxSit: 4, maxStint: 3)
+            == CompleteFillResult(outcome: .impossible, grid: nil, nodes: 1))
+        var random = SeededRandom(seed: 5)
+        let result = try Planner.searchGrid(prefix: prefix, players: range(11), available: available,
+                                            targets: targets, blocks: 12, blockSeconds: 200, random: &random)
+        #expect(result?.level == 3, "the quick search without the stint wall")
+        #expect(result?.sitLimitRelaxed == false)
+    }
+
+    // The contract when the complete search runs out of nodes: nothing is known, and searchGrid still drops the limit
+    // so a plan or a live change never fails; it can then miss a plan that keeps the limit.
+    @Test func whenCompleteFillRunsOutOfNodesItSaysExhaustedAndSearchGridDropsTheLimitWithoutAProof() throws {
+        let start = fiveMinuteTargets(13, [6])
+        let targets = start.targets
+        var random = start.random
+        #expect(Planner.completeFill(prefix: [[1, 2, 3, 4, 5]], players: range(13), targets: targets, blocks: 8,
+                                     maxSit: 3, maxStint: 3, budget: 10)
+            == CompleteFillResult(outcome: .exhausted, grid: nil, nodes: 11))
+        var again = random
+        let tight = try Planner.searchGrid(prefix: [[1, 2, 3, 4, 5]], players: range(13), targets: targets, blocks: 8,
+                                           blockSeconds: 300, random: &random, completeBudget: 10)
+        #expect(tight?.level == 5)
+        #expect(tight?.sitLimitRelaxed == true, "a plan that keeps the sit limit exists, but this budget cannot find it")
+        let usual = try Planner.searchGrid(prefix: [[1, 2, 3, 4, 5]], players: range(13), targets: targets, blocks: 8,
+                                           blockSeconds: 300, random: &again)
+        #expect(usual?.sitLimitRelaxed == false, "the default budget finds it")
     }
 
     @Test func evenTargetsGivesThePlacesLeftToTheFewestBlocksFirstNothingToPlayersWhoAreOut() throws {
@@ -266,7 +318,7 @@ private let a3Cases: [(String, Int, [Int])] = ["equal", "five"].flatMap { schedu
              moves: [[3, 15], [12, 8], [11, 16], [13, 7]],
              grid: [[7, 8, 13, 15, 16], [7, 10, 11, 13, 14], [3, 4, 10, 11, 14], [3, 4, 5, 10, 12], [1, 2, 4, 5, 12],
                     [1, 2, 6, 9, 12], [2, 6, 9, 11, 14], [1, 3, 5, 6, 9]], relaxed: true),
-        // #169: the exhaustive search's plans for 13 players in the 5-minute schedule (no history fixture).
+        // #169: the complete search's plans for 13 players in the 5-minute schedule (no history fixture).
         Case(fixture: "none (h=0)", n: 13, start: [1, 2, 3, 4, 5], schedule: "five", seed: 1, priority: [6], moves: [],
              grid: [[1, 2, 3, 4, 5], [4, 5, 6, 7, 8], [6, 8, 9, 10, 11], [1, 10, 11, 12, 13], [1, 2, 3, 4, 13],
                     [2, 3, 5, 6, 7], [6, 7, 8, 9, 12], [9, 10, 11, 12, 13]], relaxed: false),

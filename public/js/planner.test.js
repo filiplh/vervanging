@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   makePlan, swapPlayers, planStats, blockTargets, seededRandom, PlanError, SCHEDULES, evenTargets, replanRemaining,
-  blockCounts, maxSubsFrom, repairRemaining, fillGrid,
+  blockCounts, maxSubsFrom, repairRemaining, fillGrid, completeFill, searchGrid,
 } from './planner.js';
 
 const range = (n) => Array.from({ length: n }, (_, i) => i + 1);
@@ -95,7 +95,7 @@ test('exactly five players: everyone plays every block', () => {
 
 // #169: 13 players in the 5-minute schedule can keep every sit at 15:00, every stint at 15:00 (the planner's stint
 // limit there: 3 blocks) and the cap of 3, with 3 subs at every change. The quick search ran out of nodes before it
-// found such a plan and relaxed the sit limit (25:00 sits); the exhaustive search finds it. extraPriority [6] gives no
+// found such a plan and relaxed the sit limit (25:00 sits); the complete search finds it. extraPriority [6] gives no
 // starter an extra block, [1] gives one starter one.
 for (const extraPriority of [[], [6], [1]]) {
   test(`13 players in the 5-minute schedule keep the 15:00 sit limit (extraPriority ${extraPriority.join(',') || 'none'})`, () => {
@@ -113,7 +113,7 @@ for (const extraPriority of [[], [6], [1]]) {
 }
 
 // With 14 or 15 players in the 5-minute schedule no plan keeps 15:00 sits under the cap of 3 (an exact search over
-// every split of the extra blocks, #169): the exhaustive search says so, and the planner relaxes the sit limit (never
+// every split of the extra blocks, #169): the complete search proves it, and the planner relaxes the sit limit (never
 // the cap) and says so.
 for (const n of [14, 15]) {
   test(`${n} players in the 5-minute schedule: the sit limit is relaxed, the sub cap is not`, () => {
@@ -125,21 +125,57 @@ for (const n of [14, 15]) {
   });
 }
 
-test('the exhaustive fillGrid finds the 13-player plans the quick one misses, and none for 14 players', () => {
-  const fill = (n, extraPriority, exhaustive) => {
-    const random = seededRandom(1);
-    const targets = blockTargets(range(n), 40, random, extraPriority);
-    return fillGrid({ prefix: [[1, 2, 3, 4, 5]], players: range(n), targets, blocks: 8, maxSit: 3, maxStint: 3, random, exhaustive });
-  };
-  for (const extraPriority of [[6], [1]]) {
-    assert.equal(fill(13, extraPriority, false), null, 'the quick search runs out of nodes');
-    const grid = fill(13, extraPriority, true);
-    assert.ok(grid, `a plan for extraPriority ${extraPriority}`);
-    const stats = planStats({ grid, players: range(13), blockSeconds: 300 });
+// The 5-minute schedule from start 1-5 with the strict walls (sit and stint 3 blocks), targets as makePlan gives them.
+const fiveMinuteFill = (n, extraPriority) => {
+  const random = seededRandom(1);
+  const targets = blockTargets(range(n), 40, random, extraPriority);
+  return { prefix: [[1, 2, 3, 4, 5]], players: range(n), targets, blocks: 8, maxSit: 3, maxStint: 3, random };
+};
+
+test('completeFill finds the 13-player plans the quick fillGrid misses, and proves none for 14 and 15 players', () => {
+  for (const [extraPriority, nodes] of [[[6], 1007], [[1], 1091]]) {
+    const { random, ...args } = fiveMinuteFill(13, extraPriority);
+    assert.equal(fillGrid({ ...args, random }), null, 'the quick search runs out of nodes');
+    const result = completeFill(args);
+    assert.equal(result.outcome, 'found');
+    assert.equal(result.nodes, nodes, 'the Swift twin uses the same number of nodes');
+    const stats = planStats({ grid: result.grid, players: range(13), blockSeconds: 300 });
     assert.ok(stats.longestBenchSeconds <= 900 && stats.longestStintSeconds <= 900);
     assert.deepEqual(stats.subsPerChange, [3, 3, 3, 3, 3, 3, 3]);
   }
-  assert.equal(fill(14, [], true), null);
+  for (const [n, nodes] of [[14, 286], [15, 466]]) {
+    const { random, ...args } = fiveMinuteFill(n, []);
+    assert.deepEqual(completeFill(args), { outcome: 'impossible', grid: null, nodes });
+  }
+});
+
+// The live replan from #170's review: 11 players, equal schedule, seed 6, the sim actions wissel:keep=2, uit=1,
+// terug=1, uit=9, terug=9, wissel:keep=2, uit=11, terug=11, uit=3, wissel:keep=2:extra, wissel:keep=2, terug=3,
+// uit=10, uit=4; at the last uit, match.js replans from these five blocks. With a budget of 50,000 nodes the complete
+// search with the strict walls used to run out (it needed 57,800 nodes) and the stint wall was dropped without a proof.
+// The bound on what each player can still reach proves it at once; only then is the stint wall dropped.
+test('completeFill proves the review\'s live replan impossible with the strict walls, so the stint wall drops with a proof', () => {
+  const input = {
+    prefix: [[1, 2, 3, 4, 5], [1, 2, 3, 5, 8], [2, 3, 7, 8, 10], [2, 6, 7, 8, 10], [2, 6, 7, 9, 11]],
+    players: range(11), available: [1, 2, 3, 5, 6, 7, 8, 9, 11],
+    targets: { 1: 7, 2: 7, 3: 6, 4: 1, 5: 6, 6: 6, 7: 6, 8: 6, 9: 7, 10: 2, 11: 6 }, blocks: 12,
+  };
+  assert.deepEqual(completeFill({ ...input, maxSit: 4, maxStint: 3 }), { outcome: 'impossible', grid: null, nodes: 1 });
+  const result = searchGrid({ ...input, blockSeconds: 200, random: seededRandom(5) });
+  assert.equal(result.level, 3, 'the quick search without the stint wall');
+  assert.equal(result.sitLimitRelaxed, false);
+});
+
+// The contract when the complete search runs out of nodes: nothing is known, and searchGrid still drops the limit so a
+// plan or a live change never fails; it can then miss a plan that keeps the limit.
+test('when completeFill runs out of nodes it says exhausted, and searchGrid drops the limit without a proof', () => {
+  const { random, ...args } = fiveMinuteFill(13, [6]);
+  assert.deepEqual(completeFill({ ...args, budget: 10 }), { outcome: 'exhausted', grid: null, nodes: 11 });
+  const tight = searchGrid({ ...args, blockSeconds: 300, random, completeBudget: 10 });
+  assert.equal(tight.level, 5);
+  assert.equal(tight.sitLimitRelaxed, true, 'a plan that keeps the sit limit exists, but this budget cannot find it');
+  const { random: again } = fiveMinuteFill(13, [6]);
+  assert.equal(searchGrid({ ...args, blockSeconds: 300, random: again }).sitLimitRelaxed, false, 'the default budget finds it');
 });
 
 test('evenTargets gives the places left to the fewest blocks first, nothing to players who are out', () => {
