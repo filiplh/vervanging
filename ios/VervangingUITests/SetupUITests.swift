@@ -17,7 +17,7 @@ final class SetupUITests: XCTestCase {
                          "Roos", "Kato", "Nina"]
     private let numbers = ["4", "7", "8", "10", "11", "12", "13", "14", "15", "21", "23", "5", "6", "9", "17"]
 
-    override func setUpWithError() throws {
+    @MainActor override func setUp() async throws {
         continueAfterFailure = false
         storageDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("setup-\(UUID().uuidString)", isDirectory: true)
@@ -27,7 +27,7 @@ final class SetupUITests: XCTestCase {
         app.launchEnvironment["VERVANGING_SEED"] = "7"
     }
 
-    override func tearDownWithError() throws {
+    @MainActor override func tearDown() async throws {
         app?.terminate()
         if let storageDir { try? FileManager.default.removeItem(at: storageDir) }
     }
@@ -208,83 +208,83 @@ final class SetupUITests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func plantRoster(_ count: Int) throws {
+    @MainActor private func plantRoster(_ count: Int) throws {
         let players = (0..<count).map { ["id": $0 + 1, "name": names[$0], "number": numbers[$0]] as [String: Any] }
         let object: [String: Any] = ["version": 1, "nextId": count + 1, "players": players]
         try JSONSerialization.data(withJSONObject: object).write(to: storageDir.appendingPathComponent("roster.json"))
     }
 
-    private func openSetup() {
+    @MainActor private func openSetup() {
         app.launch()
         XCTAssertTrue(app.navigationBars["Spelers"].waitForExistence(timeout: 10))
         openSetupTab()
     }
 
     /// The Match tab: in the tab bar on the iPhone 17 Pro, in the system's side rail on the iPhone Duo's outer screen.
-    private func openSetupTab() {
+    @MainActor private func openSetupTab() {
         let tab = app.buttons["Match"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 10))
         tab.tap()
         XCTAssertTrue(app.navigationBars["Match"].waitForExistence(timeout: 5))
     }
 
-    private func counts() -> XCUIElement { app.staticTexts["setup.counts"] }
+    @MainActor private func counts() -> XCUIElement { app.staticTexts["setup.counts"] }
 
     /// The counts line under the attendance heading, scrolled back to the top of the list first.
-    private func countsText() -> String? {
+    @MainActor private func countsText() -> String? {
         let text = counts()
         for _ in 0..<16 where !(text.exists && text.isHittable) { app.swipeDown(velocity: .fast) }
         return text.exists ? text.label : nil
     }
-    private func present(_ number: String) -> XCUIElement { app.buttons["setup.present.\(number)"] }
-    private func basis(_ number: String) -> XCUIElement { app.buttons["setup.basis.\(number)"] }
-    private func row(_ label: String) -> XCUIElement {
+    @MainActor private func present(_ number: String) -> XCUIElement { app.buttons["setup.present.\(number)"] }
+    @MainActor private func basis(_ number: String) -> XCUIElement { app.buttons["setup.basis.\(number)"] }
+    @MainActor private func row(_ label: String) -> XCUIElement {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'setup.row.' AND label == %@", label)).firstMatch
     }
 
-    private func gridRows() -> [XCUIElement] {
+    @MainActor private func gridRows() -> [XCUIElement] {
         let query = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'setup.row.'"))
         XCTAssertTrue(query.firstMatch.waitForExistence(timeout: 5))
         return query.allElementsBoundByIndex
     }
 
-    private func note() -> String? {
+    @MainActor private func note() -> String? {
         let text = app.staticTexts["setup.note"]
         reveal(text)
         return text.exists ? text.label : nil
     }
 
-    private func message() -> String? {
+    @MainActor private func message() -> String? {
         let text = app.staticTexts["setup.message"]
         return text.waitForExistence(timeout: 5) ? text.label : nil
     }
 
-    private func pickBasisvijf(_ numbers: [String]) {
+    @MainActor private func pickBasisvijf(_ numbers: [String]) {
         for number in numbers { tapReveal(basis(number)) }
     }
 
     /// A row's value is "5 blokken: 1, 2, 5, 6, 9 · 16:40".
-    private func blocks(_ row: XCUIElement) -> [Int] {
+    @MainActor private func blocks(_ row: XCUIElement) -> [Int] {
         guard let value = row.value as? String, let colon = value.firstIndex(of: ":"),
               let dot = value.range(of: " · ") else { return [] }
         return value[value.index(after: colon)..<dot.lowerBound].split(separator: ",")
             .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
 
-    private func minutes(_ row: XCUIElement) -> String? { (row.value as? String).flatMap(minutes(of:)) }
-    private func minutes(of value: String) -> String? {
+    @MainActor private func minutes(_ row: XCUIElement) -> String? { (row.value as? String).flatMap(minutes(of:)) }
+    @MainActor private func minutes(of value: String) -> String? {
         value.range(of: " · ").map { String(value[$0.upperBound...]) }
     }
 
     /// "#7 Fien" → "Fien".
-    private func name(_ label: String) -> String {
+    @MainActor private func name(_ label: String) -> String {
         label.split(separator: " ", maxSplits: 1).last.map(String.init) ?? label
     }
 
     /// Whether the element can be tapped where it is: hittable and, unless it is one of the Start bar's own buttons,
     /// clear of that bar (#150). `isHittable` alone counts a row under the bar as reachable, and a tap there lands on
     /// Start.
-    private func isReachable(_ element: XCUIElement) -> Bool {
+    @MainActor private func isReachable(_ element: XCUIElement) -> Bool {
         guard element.exists, element.isHittable else { return false }
         // Only controls get tapped; a tall element such as the plan grid only needs to be on screen.
         guard [.button, .switch, .textField].contains(element.elementType) else { return true }
@@ -294,7 +294,7 @@ final class SetupUITests: XCTestCase {
     }
 
     /// Scrolls the list until the element is on screen: down first, then back up.
-    private func reveal(_ element: XCUIElement) {
+    @MainActor private func reveal(_ element: XCUIElement) {
         for i in 0..<12 {
             if i == 0 ? element.waitForExistence(timeout: 2) : element.exists, isReachable(element) { return }
             app.swipeUp(velocity: .slow)
@@ -306,17 +306,17 @@ final class SetupUITests: XCTestCase {
         XCTAssertTrue(isReachable(element), "could not scroll to \(element)")
     }
 
-    private func tapReveal(_ element: XCUIElement) {
+    @MainActor private func tapReveal(_ element: XCUIElement) {
         reveal(element)
         element.tap()
     }
 
-    private func waitFor(_ element: XCUIElement, value: String) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, value: String) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: element)
         return XCTWaiter().wait(for: [expectation], timeout: 5) == .completed
     }
 
-    private func storedSetup() throws -> [String: Any] {
+    @MainActor private func storedSetup() throws -> [String: Any] {
         let data = try Data(contentsOf: setupFile)
         return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }

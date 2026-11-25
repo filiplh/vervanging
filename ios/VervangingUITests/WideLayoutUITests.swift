@@ -26,7 +26,7 @@ final class WideLayoutUITests: XCTestCase {
     private let extraNames = ["Fleur", "Roos", "Saar"]
     private let extraNumbers = ["16", "17", "18"]
 
-    override func setUpWithError() throws {
+    @MainActor override func setUp() async throws {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         storageDir = FileManager.default.temporaryDirectory
@@ -37,7 +37,7 @@ final class WideLayoutUITests: XCTestCase {
         app.launchEnvironment["VERVANGING_SEED"] = "7"
     }
 
-    override func tearDownWithError() throws {
+    @MainActor override func tearDown() async throws {
         XCUIDevice.shared.orientation = .portrait
         app?.terminate()
         if let storageDir { try? FileManager.default.removeItem(at: storageDir) }

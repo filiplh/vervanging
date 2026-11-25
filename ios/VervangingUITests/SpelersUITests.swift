@@ -11,7 +11,7 @@ final class SpelersUITests: XCTestCase {
 
     private var rosterFile: URL { storageDir.appendingPathComponent("roster.json") }
 
-    override func setUpWithError() throws {
+    @MainActor override func setUp() async throws {
         continueAfterFailure = false
         storageDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("spelers-\(UUID().uuidString)", isDirectory: true)
@@ -20,7 +20,7 @@ final class SpelersUITests: XCTestCase {
         app.launchEnvironment["VERVANGING_STORAGE_DIR"] = storageDir.path
     }
 
-    override func tearDownWithError() throws {
+    @MainActor override func tearDown() async throws {
         app?.terminate()
         if let storageDir { try? FileManager.default.removeItem(at: storageDir) }
     }
@@ -552,26 +552,26 @@ final class SpelersUITests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func launch() {
+    @MainActor private func launch() {
         app.launch()
         XCTAssertTrue(app.navigationBars["Spelers"].waitForExistence(timeout: 10))
     }
 
-    private func field(_ id: String) -> XCUIElement { app.textFields[id] }
+    @MainActor private func field(_ id: String) -> XCUIElement { app.textFields[id] }
 
-    private func row(_ number: String) -> XCUIElement {
+    @MainActor private func row(_ number: String) -> XCUIElement {
         app.descendants(matching: .any)["spelers.player.\(number)"].firstMatch
     }
 
     /// Adds a player and waits until she is listed and the form is empty again, so the next step starts from the
     /// settled screen.
-    private func addPlayer(_ name: String, _ number: String) {
+    @MainActor private func addPlayer(_ name: String, _ number: String) {
         add(name, number)
         expectRow(number, containing: name)
         expectValue(field("spelers.name"), "Voornaam", "the form is cleared after adding")
     }
 
-    private func add(_ name: String, _ number: String) {
+    @MainActor private func add(_ name: String, _ number: String) {
         replace(field("spelers.name"), with: name)
         replace(field("spelers.number"), with: number)
         tap(submitButton)
@@ -579,18 +579,18 @@ final class SpelersUITests: XCTestCase {
 
     /// The form's Toevoegen / Bewaren button. Tapped by its identifier: while the number field is focused, the
     /// keyboard toolbar carries a button with the same label (#145).
-    private var submitButton: XCUIElement { app.buttons["spelers.submit"] }
+    @MainActor private var submitButton: XCUIElement { app.buttons["spelers.submit"] }
 
     /// The edit sheet (#149), found by its title.
-    private var sheet: XCUIElement { app.navigationBars["Speler wijzigen"] }
-    private var saveButton: XCUIElement { app.buttons["spelers.sheet.save"] }
-    private var cancelButton: XCUIElement { app.buttons["spelers.sheet.cancel"] }
+    @MainActor private var sheet: XCUIElement { app.navigationBars["Speler wijzigen"] }
+    @MainActor private var saveButton: XCUIElement { app.buttons["spelers.sheet.save"] }
+    @MainActor private var cancelButton: XCUIElement { app.buttons["spelers.sheet.cancel"] }
 
     /// Whether the element is on screen and can be tapped; false when the list has unloaded it.
-    private func inView(_ element: XCUIElement) -> Bool { element.exists && element.isHittable }
+    @MainActor private func inView(_ element: XCUIElement) -> Bool { element.exists && element.isHittable }
 
     /// Hides the keyboard in the sheet with its Klaar button, when the keyboard is up.
-    private func hideSheetKeyboard(file: StaticString = #filePath, line: UInt = #line) {
+    @MainActor private func hideSheetKeyboard(file: StaticString = #filePath, line: UInt = #line) {
         let done = app.buttons["spelers.sheet.keyboardDone"]
         if done.exists {
             done.tap()
@@ -599,7 +599,7 @@ final class SpelersUITests: XCTestCase {
     }
 
     /// Drags the sheet down by its title bar, as a coach closes it with a swipe.
-    private func swipeSheetDown() {
+    @MainActor private func swipeSheetDown() {
         XCTAssertTrue(sheet.waitForExistence(timeout: Self.timeout))
         let from = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         let to = from.withOffset(CGVector(dx: 0, dy: app.frame.height))
@@ -607,17 +607,17 @@ final class SpelersUITests: XCTestCase {
     }
 
     /// The software keyboard, shown while a field is being edited.
-    private var keyboard: XCUIElement { app.keyboards.firstMatch }
+    @MainActor private var keyboard: XCUIElement { app.keyboards.firstMatch }
 
     /// Whether the text field has the keyboard focus.
-    private func hasFocus(_ element: XCUIElement) -> Bool {
+    @MainActor private func hasFocus(_ element: XCUIElement) -> Bool {
         (element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false
     }
 
     /// Taps a button in a player's row. After Toevoegen the keyboard stays up (quick entry), and on a shorter screen
     /// such as the iPhone 17 Pro the keyboard toolbar covers the first rows, so a tap would land on the toolbar. Hide
     /// the keyboard with Klaar first, as a coach would (#145).
-    private func tapInRow(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+    @MainActor private func tapInRow(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let done = app.buttons["spelers.keyboardDone"]
         if done.exists {
             done.tap()
@@ -627,7 +627,7 @@ final class SpelersUITests: XCTestCase {
     }
 
     /// Taps an element once it is there, instead of failing at once when the screen is still catching up.
-    private func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+    @MainActor private func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(element.waitForExistence(timeout: Self.timeout), "\(element) never appeared", file: file, line: line)
         element.tap()
     }
@@ -638,7 +638,7 @@ final class SpelersUITests: XCTestCase {
     private static let timeout: TimeInterval = 5
 
     /// Polls `condition` (every 0.1 s) until it holds or `timeout` has passed; true when it held.
-    private func waitUntil(_ timeout: TimeInterval = SpelersUITests.timeout, _ condition: () -> Bool) -> Bool {
+    @MainActor private func waitUntil(_ timeout: TimeInterval = SpelersUITests.timeout, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() {
             if Date() >= deadline { return false }
@@ -647,7 +647,7 @@ final class SpelersUITests: XCTestCase {
         return true
     }
 
-    private func expectShown(
+    @MainActor private func expectShown(
         _ element: XCUIElement, _ message: String = "", file: StaticString = #filePath, line: UInt = #line
     ) {
         XCTAssertTrue(
@@ -656,7 +656,7 @@ final class SpelersUITests: XCTestCase {
         )
     }
 
-    private func expectGone(
+    @MainActor private func expectGone(
         _ element: XCUIElement, _ message: String = "", file: StaticString = #filePath, line: UInt = #line
     ) {
         XCTAssertTrue(
@@ -666,7 +666,7 @@ final class SpelersUITests: XCTestCase {
     }
 
     /// Waits for a text field to hold `expected` (an empty field reads as its placeholder), then asserts it.
-    private func expectValue(
+    @MainActor private func expectValue(
         _ element: XCUIElement, _ expected: String, _ message: String = "",
         file: StaticString = #filePath, line: UInt = #line
     ) {
@@ -675,7 +675,7 @@ final class SpelersUITests: XCTestCase {
     }
 
     /// Waits for the validation message (under the add form, or `id`) to read `expected`, then asserts it.
-    private func expectMessage(
+    @MainActor private func expectMessage(
         _ expected: String, in id: String = "spelers.message", file: StaticString = #filePath, line: UInt = #line
     ) {
         let text = app.staticTexts[id]
@@ -685,7 +685,7 @@ final class SpelersUITests: XCTestCase {
     }
 
     /// Waits for the player's row to exist and, when given, to carry `name` in its label.
-    private func expectRow(
+    @MainActor private func expectRow(
         _ number: String, containing name: String? = nil, file: StaticString = #filePath, line: UInt = #line
     ) {
         let element = row(number)
@@ -696,7 +696,7 @@ final class SpelersUITests: XCTestCase {
     }
 
     /// Clears a text field and types the new text.
-    private func replace(_ field: XCUIElement, with text: String) {
+    @MainActor private func replace(_ field: XCUIElement, with text: String) {
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         if let current = field.value as? String, !current.isEmpty, current != field.placeholderValue {
@@ -705,12 +705,12 @@ final class SpelersUITests: XCTestCase {
         if !text.isEmpty { field.typeText(text) }
     }
 
-    private func storedRoster() throws -> [String: Any] {
+    @MainActor private func storedRoster() throws -> [String: Any] {
         let data = try Data(contentsOf: rosterFile)
         return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
-    private func plant(players: [(id: Int, name: String, number: String)]) throws {
+    @MainActor private func plant(players: [(id: Int, name: String, number: String)]) throws {
         let object: [String: Any] = [
             "version": 1,
             "nextId": (players.map(\.id).max() ?? 0) + 1,

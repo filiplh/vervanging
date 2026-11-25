@@ -17,7 +17,7 @@ final class EndUITests: XCTestCase {
     private let numbers = ["4", "7", "8", "10", "11", "12", "13", "14", "15", "21", "23", "5"]
     private let basisvijf = ["4", "7", "8", "10", "11"]
 
-    override func setUpWithError() throws {
+    @MainActor override func setUp() async throws {
         continueAfterFailure = false
         storageDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("end-\(UUID().uuidString)", isDirectory: true)
@@ -27,7 +27,7 @@ final class EndUITests: XCTestCase {
         app.launchEnvironment["VERVANGING_SEED"] = "7"
     }
 
-    override func tearDownWithError() throws {
+    @MainActor override func tearDown() async throws {
         app?.terminate()
         if let storageDir { try? FileManager.default.removeItem(at: storageDir) }
     }
@@ -182,27 +182,27 @@ final class EndUITests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func element(_ id: String) -> XCUIElement { app.descendants(matching: .any)[id].firstMatch }
+    @MainActor private func element(_ id: String) -> XCUIElement { app.descendants(matching: .any)[id].firstMatch }
 
-    private func plantRoster(_ count: Int) throws {
+    @MainActor private func plantRoster(_ count: Int) throws {
         let players = (0..<count).map { ["id": $0 + 1, "name": names[$0], "number": numbers[$0]] as [String: Any] }
         let object: [String: Any] = ["version": 1, "nextId": count + 1, "players": players]
         try JSONSerialization.data(withJSONObject: object).write(to: storageDir.appendingPathComponent("roster.json"))
     }
 
-    private func plantHistory(_ seconds: [String: Int]) throws {
+    @MainActor private func plantHistory(_ seconds: [String: Int]) throws {
         let object: [String: Any] = ["version": 1, "useHistory": false, "clearedAt": NSNull(),
                                      "matches": [["id": "2026-11-01T10:00:00.000Z", "seconds": seconds]]]
         try JSONSerialization.data(withJSONObject: object).write(to: storageDir.appendingPathComponent("history.json"))
     }
 
-    private func storedHistory() throws -> [String: Any] {
+    @MainActor private func storedHistory() throws -> [String: Any] {
         let data = try Data(contentsOf: storageDir.appendingPathComponent("history.json"))
         return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
     /// Opens setup, picks the basisvijf and taps Start: the live screen opens at block 1.
-    private func startMatch() throws {
+    @MainActor private func startMatch() throws {
         app.launch()
         XCTAssertTrue(app.navigationBars["Spelers"].waitForExistence(timeout: 10))
         openSetupTab()
@@ -212,14 +212,14 @@ final class EndUITests: XCTestCase {
         XCTAssertTrue(app.buttons["live.wissel"].waitForExistence(timeout: 5))
     }
 
-    private func openSetupTab() {
+    @MainActor private func openSetupTab() {
         let tab = app.buttons["Match"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 10))
         tab.tap()
         XCTAssertTrue(app.navigationBars["Match"].waitForExistence(timeout: 5))
     }
 
-    private func openSpelers() {
+    @MainActor private func openSpelers() {
         let tab = app.buttons["Spelers"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 10))
         tab.tap()
@@ -227,7 +227,7 @@ final class EndUITests: XCTestCase {
     }
 
     /// Taps Wissel (or Einde match) more than 600 ms after the last tap, and waits for the next block's title.
-    private func tapWissel(expecting title: String) {
+    @MainActor private func tapWissel(expecting title: String) {
         let wait = 0.7 - Date().timeIntervalSince(lastWissel)
         if wait > 0 { Thread.sleep(forTimeInterval: wait) }
         let button = app.buttons["live.wissel"]
@@ -238,8 +238,8 @@ final class EndUITests: XCTestCase {
     }
 
     /// Scrolls until the element is on screen, and on the live screen clear of the Wissel bar: down first, then up.
-    private func reveal(_ element: XCUIElement) {
-        func shown() -> Bool {
+    @MainActor private func reveal(_ element: XCUIElement) {
+        @MainActor func shown() -> Bool {
             guard element.exists, element.isHittable else { return false }
             // The Start bar on setup floats over rows too (#150): a tap there would land on Start. Only its own buttons
             // lie inside it.
@@ -261,28 +261,28 @@ final class EndUITests: XCTestCase {
         XCTAssertTrue(shown(), "could not scroll to \(element)")
     }
 
-    private func tapReveal(_ element: XCUIElement) {
+    @MainActor private func tapReveal(_ element: XCUIElement) {
         reveal(element)
         element.tap()
     }
 
-    private func wait(_ element: XCUIElement, _ predicate: NSPredicate) -> Bool {
+    @MainActor private func wait(_ element: XCUIElement, _ predicate: NSPredicate) -> Bool {
         XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: element)], timeout: 5) == .completed
     }
 
-    private func waitFor(_ element: XCUIElement, label: String) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, label: String) -> Bool {
         wait(element, NSPredicate(format: "label == %@", label))
     }
 
-    private func waitFor(_ element: XCUIElement, labelContaining text: String) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, labelContaining text: String) -> Bool {
         wait(element, NSPredicate(format: "label CONTAINS %@", text))
     }
 
-    private func waitFor(_ element: XCUIElement, enabled: Bool) -> Bool {
+    @MainActor private func waitFor(_ element: XCUIElement, enabled: Bool) -> Bool {
         wait(element, NSPredicate(format: "enabled == %@", NSNumber(value: enabled)))
     }
 
-    private func waitForGone(_ element: XCUIElement) -> Bool {
+    @MainActor private func waitForGone(_ element: XCUIElement) -> Bool {
         wait(element, NSPredicate(format: "exists == false"))
     }
 }

@@ -18,7 +18,7 @@ final class TabBarUITests: XCTestCase {
     private var storageDir: URL!
     private var app: XCUIApplication!
 
-    override func setUpWithError() throws {
+    @MainActor override func setUp() async throws {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         storageDir = FileManager.default.temporaryDirectory
@@ -29,7 +29,7 @@ final class TabBarUITests: XCTestCase {
         app.launchEnvironment["VERVANGING_SEED"] = "7"
     }
 
-    override func tearDownWithError() throws {
+    @MainActor override func tearDown() async throws {
         XCUIDevice.shared.orientation = .portrait
         app?.terminate()
         if let storageDir { try? FileManager.default.removeItem(at: storageDir) }
