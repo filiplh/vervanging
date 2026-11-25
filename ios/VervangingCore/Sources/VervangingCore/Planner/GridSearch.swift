@@ -1,6 +1,6 @@
 import Foundation
 
-/// What `searchGrid` gives: the grid, whether the 15:00 sit limit had to go, and the level that found it (0 to 3).
+/// What `searchGrid` gives: the grid, whether the 15:00 sit limit had to go, and the level that found it (0 to 5).
 public struct GridSearchResult: Equatable, Sendable {
     public var grid: [[Int]]
     public var sitLimitRelaxed: Bool
@@ -55,12 +55,18 @@ extension Planner {
     /// a target, and every player on the prefix must be in `players`. Returns the full grid, or nil when none is found
     /// within `budget` search nodes.
     ///
-    /// Draws one value per player from `random` for the tie-breaking noise, as the JS does. The search works on each
-    /// player's place in `players` rather than the number, which keeps the debug build quick; the order in which it
-    /// tries line-ups is the JS order.
+    /// By default it tries only the `candidatesPerK` best line-ups per sub count, so nil can also mean "not found".
+    /// With `exhaustive` (#169) it tries every line-up the limits allow and never searches the same state twice: the
+    /// state is what each player still needs, their sit and stint so far and whether they may play, so two players with
+    /// the same state are interchangeable. Nil then means no such plan exists, unless the budget ran out.
+    ///
+    /// Draws one value per player from `random` for the tie-breaking noise, as the JS does; with `exhaustive` it draws
+    /// none and the noise is 0, as in the JS. The search works on each player's place in `players` rather than the
+    /// number, which keeps the debug build quick; the order in which it tries line-ups is the JS order.
     public static func fillGrid(prefix: [[Int]], players: [Int], available: [Int]? = nil, targets: [Int: Int],
                                 blocks: Int, maxSit: Int, maxStint: Int, maxSubs: Int = Planner.maxSubs,
-                                budget: Int = Planner.nodeBudget, random: inout SeededRandom) -> [[Int]]? {
+                                budget: Int = Planner.nodeBudget, random: inout SeededRandom,
+                                exhaustive: Bool = false) -> [[Int]]? {
         let n = players.count
         var index: [Int: Int] = [:]
         for (i, p) in players.enumerated() where index[p] == nil { index[p] = i }
@@ -79,9 +85,20 @@ extension Planner {
         }
         let availableSet = Set(available ?? players)
         let avail = players.map { availableSet.contains($0) }
-        let noise = players.map { _ in random.next() * 1e-3 }
+        let noise = exhaustive ? [Double](repeating: 0, count: n) : players.map { _ in random.next() * 1e-3 }
         var grid = prefix
         var nodes = 0
+        // With `exhaustive`: the states from which no plan can be completed. Blocks fill one by one, so the players'
+        // states are enough without the grid itself; their order does not count. The JS keys the same states.
+        var failed = Set<[Int]>()
+        func stateKey() -> [Int] {
+            var codes = (0..<n).map { i in
+                ((((target[i] - played[i] + 64) * 128 + sit[i]) * 128 + stint[i]) * 2 + (avail[i] ? 1 : 0)) * 2
+                    + (target[i] > 0 ? 1 : 0)
+            }
+            codes.sort()
+            return [grid.count] + codes
+        }
 
         // left = blocks still to fill after the one just placed
         func feasible(_ left: Int) -> Bool {
@@ -99,6 +116,8 @@ extension Planner {
 
         func step() -> Bool {
             if grid.count == blocks { return true }
+            let key = exhaustive ? stateKey() : []
+            if exhaustive && failed.contains(key) { return false }
             nodes += 1
             if nodes > budget { return false }
             let left = blocks - grid.count // including the block being chosen
@@ -141,6 +160,17 @@ extension Planner {
                     inSums.append(ins.reduce(0.0) { $0 + urgency[$1] })
                 }
                 // Candidate c pairs outPicks[c / inPicks.count] with inPicks[c % inPicks.count], in the JS order.
+                if exhaustive {
+                    // Every candidate, best score first; ties keep the JS order, as its stable sort does.
+                    let all = (0..<(outPicks.count * inPicks.count)).map { c in
+                        (c: c, score: inSums[c % inPicks.count] - outSums[c / inPicks.count])
+                    }
+                    for (c, _) in all.sorted(by: { $0.score > $1.score || ($0.score == $1.score && $0.c < $1.c) }) {
+                        let outs = outPicks[c / inPicks.count]
+                        candidates.append(current.filter { !outs.contains($0) } + inPicks[c % inPicks.count])
+                    }
+                    continue
+                }
                 // The JS sorts them all, best score first with ties in that order (its sort is stable), and keeps the
                 // first candidatesPerK; keeping the best ones in a short ordered list gives the same ones in the same
                 // order without sorting them all.
@@ -183,6 +213,7 @@ extension Planner {
                 (played, sit, stint) = saved
                 if nodes > budget { return false }
             }
+            if exhaustive { failed.insert(key) }
             return false
         }
 
@@ -190,9 +221,13 @@ extension Planner {
     }
 
     /// Tries a cap of 2 subs with the strict limits, then a cap of 3, then drops the stint limit, then the sit limit
-    /// (never the cap of 3; plan assumption A3). `level` in the result says how far it went (0 to 3). With `maxLevel`,
-    /// it goes no further than that level and gives nil when no plan is found up to it, the last level included (#41);
-    /// without `maxLevel`, it throws PlanError when no level finds a plan. All levels draw from the same `random`.
+    /// (never the cap of 3; plan assumption A3). A limit is dropped only after an exhaustive search with it found
+    /// nothing (#169): the quick search alone gave up 15:00 sits for 13 players in the 5-minute schedule, where plans
+    /// exist. The exhaustive level for a limit comes right after the quick one and draws nothing from `random`, so a
+    /// plan found before it stays the same. `level` in the result says how far it went (0 to 5). With `maxLevel`, it
+    /// goes no further than that level and gives nil when no plan is found up to it, the last level included (#41);
+    /// without `maxLevel`, it throws PlanError when no level finds a plan. The quick levels draw from the same
+    /// `random`.
     public static func searchGrid(prefix: [[Int]], players: [Int], available: [Int]? = nil, targets: [Int: Int],
                                   blocks: Int, blockSeconds: Int, random: inout SeededRandom,
                                   maxLevel: Int? = nil) throws(PlanError) -> GridSearchResult? {
@@ -200,17 +235,21 @@ extension Planner {
         let stintBlocks = max(1, maxStintSeconds / blockSeconds)
         let stint = max(stintBlocks, 3)
         // A cap of 2 first: 3 subs only where 2 cannot keep the limits (decision #21).
-        let levels: [(maxSubs: Int, maxSit: Int, maxStint: Int, budget: Int, sitLimitRelaxed: Bool)] = [
-            (2, sitBlocks, stint, twoSubBudget, false),
-            (3, sitBlocks, stint, nodeBudget, false),
-            (3, sitBlocks, blocks, nodeBudget, false),
-            (3, blocks, blocks, nodeBudget, true),
+        let levels: [(maxSubs: Int, maxSit: Int, maxStint: Int, budget: Int, sitLimitRelaxed: Bool,
+                      exhaustive: Bool)] = [
+            (2, sitBlocks, stint, twoSubBudget, false, false),
+            (3, sitBlocks, stint, nodeBudget, false, false),
+            (3, sitBlocks, stint, exhaustiveBudget, false, true),
+            (3, sitBlocks, blocks, nodeBudget, false, false),
+            (3, sitBlocks, blocks, exhaustiveBudget, false, true),
+            (3, blocks, blocks, nodeBudget, true, false),
         ]
         for (index, level) in levels.enumerated() {
             if let maxLevel, index > maxLevel { return nil }
             if let grid = fillGrid(prefix: prefix, players: players, available: available, targets: targets,
                                    blocks: blocks, maxSit: level.maxSit, maxStint: level.maxStint,
-                                   maxSubs: level.maxSubs, budget: level.budget, random: &random) {
+                                   maxSubs: level.maxSubs, budget: level.budget, random: &random,
+                                   exhaustive: level.exhaustive) {
                 return GridSearchResult(grid: grid, sitLimitRelaxed: level.sitLimitRelaxed, level: index)
             }
         }

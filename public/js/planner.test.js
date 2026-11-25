@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   makePlan, swapPlayers, planStats, blockTargets, seededRandom, PlanError, SCHEDULES, evenTargets, replanRemaining,
-  blockCounts, maxSubsFrom, repairRemaining,
+  blockCounts, maxSubsFrom, repairRemaining, fillGrid,
 } from './planner.js';
 
 const range = (n) => Array.from({ length: n }, (_, i) => i + 1);
@@ -93,12 +93,53 @@ test('exactly five players: everyone plays every block', () => {
   assert.ok(stats.subsPerChange.every((k) => k === 0));
 });
 
-// Above the plan's 8-12 range, the 5-minute schedule cannot keep sits at 15:00 under the cap of 3: the planner
-// relaxes the sit limit (never the cap) and says so.
-test('13 players in the 5-minute schedule: the sit limit is relaxed, the sub cap is not', () => {
-  const plan = makePlan({ players: range(13), start: [1, 2, 3, 4, 5], schedule: 'five', seed: 1 });
-  assert.equal(plan.sitLimitRelaxed, true);
-  assert.ok(Math.max(...planStats(plan).subsPerChange) <= 3);
+// #169: 13 players in the 5-minute schedule can keep every sit at 15:00, every stint at 15:00 (the planner's stint
+// limit there: 3 blocks) and the cap of 3, with 3 subs at every change. The quick search ran out of nodes before it
+// found such a plan and relaxed the sit limit (25:00 sits); the exhaustive search finds it. extraPriority [6] gives no
+// starter an extra block, [1] gives one starter one.
+for (const extraPriority of [[], [6], [1]]) {
+  test(`13 players in the 5-minute schedule keep the 15:00 sit limit (extraPriority ${extraPriority.join(',') || 'none'})`, () => {
+    for (let seed = 1; seed <= 5; seed++) {
+      const plan = makePlan({ players: range(13), start: [1, 2, 3, 4, 5], schedule: 'five', seed, extraPriority });
+      const stats = planStats(plan);
+      assert.equal(plan.sitLimitRelaxed, false, `seed ${seed}`);
+      assert.ok(stats.longestBenchSeconds <= 900, `seed ${seed}: nobody sits more than 15:00 in a row`);
+      assert.ok(stats.longestStintSeconds <= 900, `seed ${seed}: nobody plays more than 15:00 in a row`);
+      assert.ok(Math.max(...stats.subsPerChange) <= 3, `seed ${seed}: never more than 3 subs per change`);
+      const minutes = Object.values(stats.minutes);
+      assert.ok(Math.max(...minutes) - Math.min(...minutes) <= 300, `seed ${seed}: shares differ by at most one block`);
+    }
+  });
+}
+
+// With 14 or 15 players in the 5-minute schedule no plan keeps 15:00 sits under the cap of 3 (an exact search over
+// every split of the extra blocks, #169): the exhaustive search says so, and the planner relaxes the sit limit (never
+// the cap) and says so.
+for (const n of [14, 15]) {
+  test(`${n} players in the 5-minute schedule: the sit limit is relaxed, the sub cap is not`, () => {
+    for (let seed = 1; seed <= 5; seed++) {
+      const plan = makePlan({ players: range(n), start: [1, 2, 3, 4, 5], schedule: 'five', seed });
+      assert.equal(plan.sitLimitRelaxed, true, `seed ${seed}`);
+      assert.ok(Math.max(...planStats(plan).subsPerChange) <= 3, `seed ${seed}`);
+    }
+  });
+}
+
+test('the exhaustive fillGrid finds the 13-player plans the quick one misses, and none for 14 players', () => {
+  const fill = (n, extraPriority, exhaustive) => {
+    const random = seededRandom(1);
+    const targets = blockTargets(range(n), 40, random, extraPriority);
+    return fillGrid({ prefix: [[1, 2, 3, 4, 5]], players: range(n), targets, blocks: 8, maxSit: 3, maxStint: 3, random, exhaustive });
+  };
+  for (const extraPriority of [[6], [1]]) {
+    assert.equal(fill(13, extraPriority, false), null, 'the quick search runs out of nodes');
+    const grid = fill(13, extraPriority, true);
+    assert.ok(grid, `a plan for extraPriority ${extraPriority}`);
+    const stats = planStats({ grid, players: range(13), blockSeconds: 300 });
+    assert.ok(stats.longestBenchSeconds <= 900 && stats.longestStintSeconds <= 900);
+    assert.deepEqual(stats.subsPerChange, [3, 3, 3, 3, 3, 3, 3]);
+  }
+  assert.equal(fill(14, [], true), null);
 });
 
 test('evenTargets gives the places left to the fewest blocks first, nothing to players who are out', () => {

@@ -53,9 +53,13 @@ export const EXAMPLES = [
   ['plan-five-12-use-history-catchup', ['plan', ...P(12, '1,2,3,4,5', 'five', '--history', FIXTURE('history-catchup.json'), '--use-history')]],
   ['plan-equal-12-use-history-reward', ['plan', ...P(12, '1,2,3,4,5', 'equal', '--history', FIXTURE('history-reward.json'), '--use-history')]],
   ['plan-equal-11-use-history-empty', ['plan', ...P(11, '1,2,3,4,5', 'equal', '--history', FIXTURE('history-empty.json'), '--use-history')]],
+  // #169: 13 players in the 5-minute schedule keep the 15:00 sit limit (the exhaustive search finds the plan).
+  ['plan-five-13', ['plan', ...P(13, '1,2,3,4,5', 'five')]],
   ['plan-five-16-sit-relaxed', ['plan', ...P(16, '15,8,16,7,13', 'five', '--seed', '3')]],
   ['plan-five-16-use-history-sit-relaxed', ['plan', ...P(16, '15,8,16,7,13', 'five', '--seed', '3', '--history', FIXTURE('history-sit-relaxed.json'), '--use-history')]],
-  ['invalid-plan-equal-16-no-plan', ['plan', ...P(16, '1,2,3,4,5', 'equal', '--history', FIXTURE('history-sit-relaxed.json'), '--use-history')]],
+  // Was invalid-plan-equal-16-no-plan: since #169 the exhaustive search finds a plan within every limit here.
+  ['plan-equal-16-use-history', ['plan', ...P(16, '1,2,3,4,5', 'equal', '--history', FIXTURE('history-sit-relaxed.json'), '--use-history')]],
+  ['invalid-plan-equal-17-no-plan', ['plan', ...P(17, '1,2,3,4,5', 'equal')]],
   // The match engine: wissel, undo, in the zone, Extra minuten, uit and terug, the last block.
   ['match-equal-10-start', ['match', ...P(10, '1,2,3,4,5', 'equal')]],
   ['match-equal-10-wissel', ['match', ...P(10, '1,2,3,4,5', 'equal', '--actions', 'wissel')]],

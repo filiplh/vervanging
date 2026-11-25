@@ -96,12 +96,56 @@ private let a3Cases: [(String, Int, [Int])] = ["equal", "five"].flatMap { schedu
         #expect(stats.subsPerChange.allSatisfy { $0 == 0 })
     }
 
-    // Above the plan's 8-12 range, the 5-minute schedule cannot keep sits at 15:00 under the cap of 3: the planner
-    // relaxes the sit limit (never the cap) and says so.
-    @Test func thirteenPlayersInTheFiveMinuteScheduleRelaxTheSitLimitNotTheSubCap() throws {
-        let plan = try plan(13, schedule: "five")
-        #expect(plan.sitLimitRelaxed == true)
-        #expect(Planner.planStats(plan).subsPerChange.max()! <= 3)
+    // #169: 13 players in the 5-minute schedule can keep every sit at 15:00, every stint at 15:00 (the planner's stint
+    // limit there: 3 blocks) and the cap of 3, with 3 subs at every change. The quick search ran out of nodes before
+    // it found such a plan and relaxed the sit limit (25:00 sits); the exhaustive search finds it. extraPriority [6]
+    // gives no starter an extra block, [1] gives one starter one.
+    @Test(arguments: [[Int](), [6], [1]])
+    func thirteenPlayersInTheFiveMinuteScheduleKeepTheSitLimit(extraPriority: [Int]) throws {
+        for seed in 1...5 {
+            let plan = try plan(13, schedule: "five", seed: seed, extraPriority: extraPriority)
+            let stats = Planner.planStats(plan)
+            #expect(plan.sitLimitRelaxed == false, "seed \(seed)")
+            #expect(stats.longestBenchSeconds <= 900, "seed \(seed): nobody sits more than 15:00 in a row")
+            #expect(stats.longestStintSeconds <= 900, "seed \(seed): nobody plays more than 15:00 in a row")
+            #expect(stats.subsPerChange.max()! <= 3, "seed \(seed): never more than 3 subs per change")
+            let minutes = Array(stats.minutes.values)
+            #expect(minutes.max()! - minutes.min()! <= 300, "seed \(seed): shares differ by at most one block")
+        }
+    }
+
+    // With 14 or 15 players in the 5-minute schedule no plan keeps 15:00 sits under the cap of 3 (an exact search
+    // over every split of the extra blocks, #169): the exhaustive search says so, and the planner relaxes the sit
+    // limit (never the cap) and says so.
+    @Test(arguments: [14, 15])
+    func fourteenOrFifteenPlayersInTheFiveMinuteScheduleRelaxTheSitLimitNotTheSubCap(n: Int) throws {
+        for seed in 1...5 {
+            let plan = try plan(n, schedule: "five", seed: seed)
+            #expect(plan.sitLimitRelaxed == true, "seed \(seed)")
+            #expect(Planner.planStats(plan).subsPerChange.max()! <= 3, "seed \(seed)")
+        }
+    }
+
+    @Test func theExhaustiveFillGridFindsTheThirteenPlayerPlansTheQuickOneMissesAndNoneForFourteen() {
+        func fill(_ n: Int, _ extraPriority: [Int], exhaustive: Bool) -> [[Int]]? {
+            var random = SeededRandom(seed: 1)
+            let targets = Planner.blockTargets(range(n), totalPlaces: 40, random: &random, extraPriority: extraPriority)
+            return Planner.fillGrid(prefix: [[1, 2, 3, 4, 5]], players: range(n), targets: targets, blocks: 8,
+                                    maxSit: 3, maxStint: 3, random: &random, exhaustive: exhaustive)
+        }
+        for extraPriority in [[6], [1]] {
+            #expect(fill(13, extraPriority, exhaustive: false) == nil, "the quick search runs out of nodes")
+            let grid = fill(13, extraPriority, exhaustive: true)
+            #expect(grid != nil, "a plan for extraPriority \(extraPriority)")
+            if let grid {
+                let stats = Planner.planStats(Plan(schedule: "five", blocks: 8, blockSeconds: 300, blocksPerQuarter: 2,
+                                                   players: range(13), start: [1, 2, 3, 4, 5], grid: grid,
+                                                   sitLimitRelaxed: false))
+                #expect(stats.longestBenchSeconds <= 900 && stats.longestStintSeconds <= 900)
+                #expect(stats.subsPerChange == [3, 3, 3, 3, 3, 3, 3])
+            }
+        }
+        #expect(fill(14, [], exhaustive: true) == nil)
     }
 
     @Test func evenTargetsGivesThePlacesLeftToTheFewestBlocksFirstNothingToPlayersWhoAreOut() throws {
@@ -222,6 +266,13 @@ private let a3Cases: [(String, Int, [Int])] = ["equal", "five"].flatMap { schedu
              moves: [[3, 15], [12, 8], [11, 16], [13, 7]],
              grid: [[7, 8, 13, 15, 16], [7, 10, 11, 13, 14], [3, 4, 10, 11, 14], [3, 4, 5, 10, 12], [1, 2, 4, 5, 12],
                     [1, 2, 6, 9, 12], [2, 6, 9, 11, 14], [1, 3, 5, 6, 9]], relaxed: true),
+        // #169: the exhaustive search's plans for 13 players in the 5-minute schedule (no history fixture).
+        Case(fixture: "none (h=0)", n: 13, start: [1, 2, 3, 4, 5], schedule: "five", seed: 1, priority: [6], moves: [],
+             grid: [[1, 2, 3, 4, 5], [4, 5, 6, 7, 8], [6, 8, 9, 10, 11], [1, 10, 11, 12, 13], [1, 2, 3, 4, 13],
+                    [2, 3, 5, 6, 7], [6, 7, 8, 9, 12], [9, 10, 11, 12, 13]], relaxed: false),
+        Case(fixture: "none (h=1)", n: 13, start: [1, 2, 3, 4, 5], schedule: "five", seed: 1, priority: [1], moves: [],
+             grid: [[1, 2, 3, 4, 5], [1, 5, 6, 7, 8], [7, 8, 9, 10, 11], [2, 10, 11, 12, 13], [2, 3, 4, 5, 13],
+                    [1, 3, 4, 6, 7], [1, 6, 8, 9, 12], [9, 10, 11, 12, 13]], relaxed: false),
     ]
 
     @Test(arguments: cases)

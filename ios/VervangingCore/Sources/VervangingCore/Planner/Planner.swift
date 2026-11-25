@@ -64,6 +64,7 @@ public enum Planner {
     public static let nodeBudget = 50_000
     static let twoSubBudget = 3_000
     static let candidatesPerK = 24
+    static let exhaustiveBudget = 50_000
 
     static func scheduleOf(_ name: String) throws(PlanError) -> ScheduleShape {
         guard let schedule = schedules[name] else { throw PlanError("unknown schedule \"\(name)\": use equal or five") }

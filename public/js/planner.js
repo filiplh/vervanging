@@ -13,6 +13,7 @@ export const MAX_STINT_SECONDS = 600;
 const NODE_BUDGET = 50000;
 const TWO_SUB_BUDGET = 3000;
 const CANDIDATES_PER_K = 24;
+const EXHAUSTIVE_BUDGET = 50000;
 
 export class PlanError extends Error {}
 
@@ -79,7 +80,12 @@ function combinations(list, k) {
 // Fills blocks prefix.length .. blocks-1 so every player reaches its target, with at most MAX_SUBS changes per sub
 // moment (trying 2 first, then 1, then 3, then 0), no sit longer than maxSit blocks and no stint longer than maxStint
 // blocks. `available` limits who may play the remaining blocks. Returns the full grid or null.
-export function fillGrid({ prefix, players, available = players, targets, blocks, maxSit, maxStint, maxSubs = MAX_SUBS, budget = NODE_BUDGET, random }) {
+// By default it tries only the CANDIDATES_PER_K best line-ups per sub count, so null can also mean "not found". With
+// `exhaustive` (#169) it tries every line-up the limits allow and never searches the same state twice: the state is
+// what each player still needs, their sit and stint so far and whether they may play, so two players with the same
+// state are interchangeable. Null then means no such plan exists, unless the budget ran out. It draws no noise from
+// `random` and ties keep the order of the line-ups.
+export function fillGrid({ prefix, players, available = players, targets, blocks, maxSit, maxStint, maxSubs = MAX_SUBS, budget = NODE_BUDGET, random, exhaustive = false }) {
   const played = Object.fromEntries(players.map((p) => [p, 0]));
   const sit = Object.fromEntries(players.map((p) => [p, 0]));
   const stint = Object.fromEntries(players.map((p) => [p, 0]));
@@ -93,9 +99,15 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
     }
   }
   const avail = new Set(available);
-  const noise = Object.fromEntries(players.map((p) => [p, random() * 1e-3]));
+  const noise = Object.fromEntries(players.map((p) => [p, exhaustive ? 0 : random() * 1e-3]));
   const grid = prefix.map((c) => c.slice());
   let nodes = 0;
+  const failed = new Set(); // with `exhaustive`: the states (stateKey) from which no plan can be completed
+  // Blocks fill one by one, so a player's state is enough without the grid itself; the order of players does not count.
+  const stateKey = () => grid.length + ':' + players
+    .map((p) => ((((targets[p] - played[p] + 64) * 128 + sit[p]) * 128 + stint[p]) * 2 + (avail.has(p) ? 1 : 0)) * 2
+      + (targets[p] > 0 ? 1 : 0))
+    .sort((a, b) => a - b).join(',');
 
   const feasible = (left) => {
     // left = blocks still to fill after the one just placed
@@ -113,6 +125,8 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
 
   const step = () => {
     if (grid.length === blocks) return true;
+    const key = exhaustive ? stateKey() : null;
+    if (exhaustive && failed.has(key)) return false;
     if (++nodes > budget) return false;
     const left = blocks - grid.length; // including the block being chosen
     const current = grid[grid.length - 1];
@@ -142,7 +156,7 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
         }
       }
       perK.sort((a, b) => b.score - a.score);
-      candidates.push(...perK.slice(0, CANDIDATES_PER_K));
+      candidates.push(...(exhaustive ? perK : perK.slice(0, CANDIDATES_PER_K)));
     }
     for (const { next } of candidates) {
       const saved = players.map((p) => [played[p], sit[p], stint[p]]);
@@ -159,6 +173,7 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
       players.forEach((p, i) => { [played[p], sit[p], stint[p]] = saved[i]; });
       if (nodes > budget) return false;
     }
+    if (exhaustive) failed.add(key);
     return false;
   };
 
@@ -166,9 +181,12 @@ export function fillGrid({ prefix, players, available = players, targets, blocks
 }
 
 // Tries a cap of 2 subs with the strict limits, then a cap of 3, then drops the stint limit, then the sit limit
-// (never the cap of 3; plan assumption A3). `level` in the result says how far it went (0 to 3). With `maxLevel`, it
-// goes no further than that level and gives null when no plan is found up to it, the last level included (#41);
-// without `maxLevel`, it throws PlanError when no level finds a plan.
+// (never the cap of 3; plan assumption A3). A limit is dropped only after an exhaustive search with it found nothing
+// (#169): the quick search alone gave up 15:00 sits for 13 players in the 5-minute schedule, where plans exist. The
+// exhaustive level for a limit comes right after the quick one and draws nothing from `random`, so a plan found
+// before it stays the same. `level` in the result says how far it went (0 to 5). With `maxLevel`, it goes no further
+// than that level and gives null when no plan is found up to it, the last level included (#41); without `maxLevel`,
+// it throws PlanError when no level finds a plan.
 export function searchGrid({ prefix, players, available, targets, blocks, blockSeconds, random, maxLevel = null }) {
   const sitBlocks = Math.floor(MAX_SIT_SECONDS / blockSeconds);
   const stintBlocks = Math.max(1, Math.floor(MAX_STINT_SECONDS / blockSeconds));
@@ -177,7 +195,9 @@ export function searchGrid({ prefix, players, available, targets, blocks, blockS
   const levels = [
     { maxSubs: 2, maxSit: sitBlocks, maxStint: stint, budget: TWO_SUB_BUDGET, sitLimitRelaxed: false },
     { maxSubs: 3, maxSit: sitBlocks, maxStint: stint, budget: NODE_BUDGET, sitLimitRelaxed: false },
+    { maxSubs: 3, maxSit: sitBlocks, maxStint: stint, budget: EXHAUSTIVE_BUDGET, sitLimitRelaxed: false, exhaustive: true },
     { maxSubs: 3, maxSit: sitBlocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: false },
+    { maxSubs: 3, maxSit: sitBlocks, maxStint: blocks, budget: EXHAUSTIVE_BUDGET, sitLimitRelaxed: false, exhaustive: true },
     { maxSubs: 3, maxSit: blocks, maxStint: blocks, budget: NODE_BUDGET, sitLimitRelaxed: true },
   ];
   for (const [index, level] of levels.entries()) {
