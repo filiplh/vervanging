@@ -4,8 +4,8 @@ A phone app for the coach of a development-focused U14 basketball team (12 playe
 match it plans who plays when in fixed time blocks, so everyone gets fair minutes; during the match the coach follows
 the plan with one tap per substitution and can keep a player "in the zone" without breaking fairness. On-screen text
 is Dutch. It runs as a web app today; phase 3 rebuilds it as a native iPhone app, which also pilots the Apple
-account and an iOS release pipeline for the commercial app Zappo.
-Status: phase 3 · Built from: [grill 2026-11-22 whole product](grill/2026-11-22-whole-product.md), [grill 2026-11-22 phase 2](grill/2026-11-22-phase-2.md), [grill 2026-11-23 phase 3](grill/2026-11-23-phase-3-native-ios.md) · Last changed: 2026-11-23
+account and an iOS release pipeline for the commercial app Zappo; phase 6 gives the native app its own look.
+Status: phase 3 · Built from: [grill 2026-11-22 whole product](grill/2026-11-22-whole-product.md), [grill 2026-11-22 phase 2](grill/2026-11-22-phase-2.md), [grill 2026-11-23 phase 3](grill/2026-11-23-phase-3-native-ios.md) · Last changed: 2026-11-26
 
 ## Summary
 | Topic | Decision |
@@ -20,6 +20,7 @@ Status: phase 3 · Built from: [grill 2026-11-22 whole product](grill/2026-11-22
 | Stack | Static HTML/CSS/JS, no build, no dependencies, on a Cloudflare Worker; manual releases (#1, #3) |
 | Phase 3 | A native iPhone app in `ios/` with the same features: SwiftUI and Liquid Glass, iOS 27, the rules ported to Swift and refereed by shared examples; data on the phone; the web app stays live (#29–#47) |
 | Pilot | Phase 4 ships through TestFlight from CI, phase 5 through App Review to a free App Store release; both wait for the Apple organisation account (#44) |
+| Look | Phase 6 gives the native app the Wisselbord look (a referee's substitution board: near-black board, big numbers, ▼ eruit / ▲ erin, amber for time) and recolours today's icon to match; it does not wait for the Apple account; the web app keeps its look (#49–#52) |
 
 ## Scope
 ### Who it is for
@@ -101,6 +102,10 @@ feeling".
 | 46 | Name and icon | "Vervanging" under the icon; a new layered iOS 27 icon (light, dark, tinted, clear), 2–3 drafts, the owner picks | An icon item in phase 3 | Decided | [phase 3 D22](grill/2026-11-23-phase-3-native-ios.md#decisions) |
 | 47 | How the factory runs phase 3 | Team mode with roles `ios` (`ios/**`) and `web` (`public/**`, `shared/**`, `scripts/**`, `wrangler.jsonc`); this Mac capped at 2 builders in the owner's machine settings | Parallel builders; role files | Decided (role paths: agent's call) | [phase 3 D25](grill/2026-11-23-phase-3-native-ios.md#decisions) |
 | 48 | History at the switch to the store build | The free-ID build (`.dev` bundle ID) and the TestFlight or App Store build are separate apps on the phone; the history built on the free-ID build does not move to the store build, and the coach starts fresh again | No export or import code in phase 4 | Decided | owner on [plan PR #90](https://github.com/filiplh/vervanging/pull/90#issuecomment-7106544862), 2026-11-23 (raised by the lead after the grill) |
+| 49 | The native app's look | Wisselbord, from the redesign spike's three directions: a near-black board with big compressed numbers, ▼ eruit in red and ▲ erin in green, amber only for time, blocks as an LED strip; glass stays in the bars (#37); built as phase 6, after phase 3's exit test, without waiting for the Apple account; the web app keeps its look (#45) | Every native screen and its UI tests change once | Decided | owner, 2026-11-26 · [redesign spike, owner's decisions](spikes/2026-redesign.md#the-owners-decisions-2026-11-26) |
+| 50 | The icon in the new look | Today's icon (#46, #118) keeps its shapes and layers and takes the Wisselbord colours (dark background, not black; board colours on the glass layers); the spike's own icon idea is not used | A recolour, no new drawing | Decided (exact colours: agent's call, the owner sees them in the PR) | owner, 2026-11-26 · [redesign spike, owner's decisions](spikes/2026-redesign.md#the-owners-decisions-2026-11-26) |
+| 51 | One live screen | The spike's "Wissel moment" focus state (minutes hidden, the board grown) is not built: the app does not know when the referee whistles (no game clock, ADR-001), so it would need its own tap or a guess, and it would hide the minutes when the coach may want them | The live screen keeps one layout | Agent's call, to confirm | lead, 2026-11-26, after the owner asked why the proofs had an extra screen · [redesign spike, owner's decisions](spikes/2026-redesign.md#the-owners-decisions-2026-11-26) |
+| 52 | Copy in the new look | Today's sentences stay word for word (#39); new copy is limited to short column labels in the new tables ("Nr", "Naam", "Seizoen"); the proofs' other new phrases are dropped (list in the spike) | The owner writes no new copy for phase 6 | Agent's call, to confirm | lead, 2026-11-26, after the owner asked what the copy needs · [redesign spike, new words](spikes/2026-redesign.md#new-words-on-screen) |
 
 ## Architecture
 - [ADR-001](adr/001-fixed-blocks-no-game-clock.md) Fixed time blocks, no game clock (accepted): playing time is
@@ -114,7 +119,7 @@ feeling".
 Index: [adr/README.md](adr/README.md).
 
 ## Glossary
-[GLOSSARY.md](GLOSSARY.md): blok, schema, wissel, in the zone, extra minuten, uit / terug, basisvijf, shared examples.
+[GLOSSARY.md](GLOSSARY.md): blok, schema, wissel, in the zone, extra minuten, uit / terug, basisvijf, shared examples, Wisselbord.
 
 ## Assumptions to test
 | # | Assumption | How to test | Owner | Tested in | Source |
@@ -125,6 +130,7 @@ Index: [adr/README.md](adr/README.md).
 | A5 | ⚠ A free Apple ID can install the app on the owner's iPhone through Xcode; the install expires after 7 days, at most 3 such apps per phone, Developer Mode must be on; the app needs no paid-only capability | The owner's first install on the 17 Pro; the expiry noted a week later | owner | Phase 3 (free-ID install) | [phase 3 A1](grill/2026-11-23-phase-3-native-ios.md#assumptions-to-test) |
 | A6 | ⚠ The iPhone Duo's screens in the simulator match the real device closely enough that layouts checked there hold | Not testable without a Duo; revisit if the owner or Zappo's users get one | owner | not before a real Duo | [phase 3 A2](grill/2026-11-23-phase-3-native-ios.md#assumptions-to-test) |
 | A7 | This Mac carries Xcode builds and simulator runs beside the owner's other work, with 2 builders and one heavy run at a time | The lead notes build and test times on the first two Swift items (Xcode project, first rules slice) and reports them; if the Mac struggles, the owner slows other projects or lowers the cap | owner, lead | Phase 3 (first items) | [phase 3 A3](grill/2026-11-23-phase-3-native-ios.md#assumptions-to-test) |
+| A8 | ⚠ The near-black board (#49) stays readable at a glance in the sports hall under its normal lights (matches are indoors; sunlight is not tested) | At the phase 6 exit match the coach reads the next wissel from the board at every change and notes each change where the board could not be read at a glance (glare, reflection, size); passes with none noted | owner (coach) | Phase 6 exit | [redesign spike, judged](spikes/2026-redesign.md#judged) |
 | A3 | A plan meeting #21 exists for 8–12 players in both schedules, with any starting five | Unit tests over 8–12 players and several starting fives, both schedules; on failure the planner relaxes the sit limit, never the sub cap, and says so | builder | Phase 0 (planner) | [grill A3](grill/2026-11-22-whole-product.md#assumptions-to-test) |
 
 ## Parked
@@ -132,6 +138,7 @@ Index: [adr/README.md](adr/README.md).
 | --- | --- | --- | --- | --- |
 | P1 | Apple organisation enrolment (stuck; the owner has emailed Apple support) | owner | Phases 4 and 5: TestFlight, App Store Connect, distribution signing | [phase 3 P1](grill/2026-11-23-phase-3-native-ios.md#parked) |
 | P2 | Filing the factory's iOS request (store-app deploy contract, an `ios-app-store` recipe, Swift/Xcode stack and mixed repo, revisit factory #51) in vegvisir-factory | owner | Phase 4's CI and release items | [phase 3 P2](grill/2026-11-23-phase-3-native-ios.md#parked) |
+| P3 | A rules goal that a player ideally plays no more than 2 blocks in a row and sits no more than 2 blocks in a row (the owner's investigation of 2026-11-25); the current rules stay until the coach has used the native app at a few live matches | owner (coach) | Nothing now; any change to the rules (#20–#22, #36) | owner, 2026-11-26 · [redesign spike, owner's decisions](spikes/2026-redesign.md#the-owners-decisions-2026-11-26) |
 
 ## Risks
 | Risk | What it would look like | Mitigation |
@@ -146,6 +153,7 @@ Index: [adr/README.md](adr/README.md).
 | A port bug | The native planner gives a plan the web app would not, and the coach loses trust | Exact shared examples (#35); the phase 3 exit test at a real match |
 | Glass hard to read in the hall | Names or the Wissel button get lost behind Liquid Glass under bright lights | The phase 3 exit test runs at a real match with Reduce Transparency off |
 | Mac overloaded | Xcode and simulator runs slow down or flake with parallel builders | 2 builders, one heavy run at a time (#47); A7 measures it |
+| The new look breaks a working screen | A restyled live screen loses a control, a label or a tap the coach relied on | Phase 6 keeps today's screens, copy and accessibility identifiers; the UI tests run on every item; the exit test is a real match (risk: agent's call, from #49 and the [redesign spike](spikes/2026-redesign.md#judged)) |
 | History lost at the switch to the store build | The `.dev` build and the store build have different bundle IDs, so a history built on the free-ID build does not carry over | Accepted (#48): a fresh start again at the switch, as with #33 |
 
 ## Plan of attack
@@ -156,7 +164,8 @@ because every screen depends on it, and its tests settle A3. Phase 2 answers wha
 match: a deliberate way to reward a player with extra minutes, and the minutes at a glance, during a match and over the
 season. Phase 3 rebuilds the app natively on the iPhone, rules first, because every screen depends on them
 and the shared examples prove them identical; it needs no Apple account. Phases 4 and 5 walk the release pipeline
-(TestFlight, then the App Store) once the account works.
+(TestFlight, then the App Store) once the account works. Phase 6 restyles the native app in the Wisselbord look; it
+starts after phase 3's exit test and does not wait for the account, so it may run before or beside phases 4 and 5.
 
 ### Phase 0: plan and play a match
 Goal: the coach can enter the roster, set up a match and follow the plan with one tap per sub on their phone, at the
@@ -244,4 +253,29 @@ listing) has been walked once.
       App Store Connect asks for (⚠ to confirm when the account works) (#44)
 - [ ] Submit for App Review and release (#44)
 - **Exit:** The owner installs vervanging from the App Store on their iPhone 17 Pro and plans a match with it.
+  Checked by the owner.
+
+### Phase 6: the Wisselbord look (draft)
+Goal: the native app looks like a referee's substitution board, so the coach reads who goes off, who comes on and when
+in one glance pitch-side, with every screen's features, copy and rules unchanged. Starts after phase 3's exit test
+(#109); does not wait for the Apple account (P1). The look, its colours and the work list are in the
+[redesign spike](spikes/2026-redesign.md).
+- [ ] Design tokens: colour sets with light, dark and increased-contrast values, and type helpers (SF Pro Compressed for
+      numbers, Condensed for labels, through text styles), replacing literal colours (#49)
+- [ ] The live screen: the time board with the LED strip, the substitution board (▼ Eruit / ▲ Erin) with In the zone and
+      Extra minuten, and the minutes as a stat sheet with Uit / Terug; the time never reads as a running clock (ADR-001);
+      one layout, no focus state (#49, #51)
+- [ ] Setup and the plan: the table with a present check and a "B" key, and the dot-matrix plan with swaps (#49)
+- [ ] Spelers: big numbers, season bars, and a visible way to edit and delete (#49)
+- [ ] The wide layout for the iPhone Duo's inner screen in the new look (#41, #49, A6)
+- [ ] The app icon recoloured to the new look, in light, dark, tinted and clear (#50)
+- [ ] Accessibility pass: Accessibility sizes, VoiceOver labels for drawn elements, Reduce Motion and Reduce
+      Transparency, and a test that every token pair meets 4.5:1 for text (#49)
+- **Exit:** At a real match or scrimmage in the sports hall, on the owner's iPhone 17 Pro, the coach runs the whole
+  match in the restyled app, using Wissel at every change and In the zone, Extra minuten and uit/terug at least once. At
+  every change the coach reads the next wissel from the board without opening another view, and notes each change
+  where it could not be read at a glance; none noted (A8). In the simulator, on the iPhone 17 Pro and on both iPhone
+  Duo screens, in light and dark, at Accessibility L, and with Increase Contrast, Reduce Transparency and Reduce Motion
+  on, every screen shows every control and label uncut and every action can be done; with VoiceOver one whole wissel
+  (read the board, tap Wissel, undo) is done without sight of the screen. The home screen shows the recoloured icon.
   Checked by the owner.
