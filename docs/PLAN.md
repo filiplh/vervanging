@@ -130,7 +130,7 @@ Index: [adr/README.md](adr/README.md).
 | A5 | ⚠ A free Apple ID can install the app on the owner's iPhone through Xcode; the install expires after 7 days, at most 3 such apps per phone, Developer Mode must be on; the app needs no paid-only capability | The owner's first install on the 17 Pro; the expiry noted a week later | owner | Phase 3 (free-ID install) | [phase 3 A1](grill/2026-11-23-phase-3-native-ios.md#assumptions-to-test) |
 | A6 | ⚠ The iPhone Duo's screens in the simulator match the real device closely enough that layouts checked there hold | Not testable without a Duo; revisit if the owner or Zappo's users get one | owner | not before a real Duo | [phase 3 A2](grill/2026-11-23-phase-3-native-ios.md#assumptions-to-test) |
 | A7 | This Mac carries Xcode builds and simulator runs beside the owner's other work, with 2 builders and one heavy run at a time | The lead notes build and test times on the first two Swift items (Xcode project, first rules slice) and reports them; if the Mac struggles, the owner slows other projects or lowers the cap | owner, lead | Phase 3 (first items) | [phase 3 A3](grill/2026-11-23-phase-3-native-ios.md#assumptions-to-test) |
-| A8 | ⚠ The near-black board (#49) stays readable in a bright sports hall and in sun, without more reflections than a white page | The phase 6 exit test at a real match; the coach notes any glance that failed | owner (coach) | Phase 6 exit | [redesign spike, judged](spikes/2026-redesign.md#judged) |
+| A8 | ⚠ The near-black board (#49) stays readable at a glance in the sports hall under its normal lights (matches are indoors; sunlight is not tested) | At the phase 6 exit match the coach reads the next wissel from the board at every change and notes each change where the board could not be read at a glance (glare, reflection, size); passes with none noted | owner (coach) | Phase 6 exit | [redesign spike, judged](spikes/2026-redesign.md#judged) |
 | A3 | A plan meeting #21 exists for 8–12 players in both schedules, with any starting five | Unit tests over 8–12 players and several starting fives, both schedules; on failure the planner relaxes the sit limit, never the sub cap, and says so | builder | Phase 0 (planner) | [grill A3](grill/2026-11-22-whole-product.md#assumptions-to-test) |
 
 ## Parked
@@ -153,7 +153,7 @@ Index: [adr/README.md](adr/README.md).
 | A port bug | The native planner gives a plan the web app would not, and the coach loses trust | Exact shared examples (#35); the phase 3 exit test at a real match |
 | Glass hard to read in the hall | Names or the Wissel button get lost behind Liquid Glass under bright lights | The phase 3 exit test runs at a real match with Reduce Transparency off |
 | Mac overloaded | Xcode and simulator runs slow down or flake with parallel builders | 2 builders, one heavy run at a time (#47); A7 measures it |
-| The new look breaks a working screen | A restyled live screen loses a control, a label or a tap the coach relied on | Phase 6 keeps today's screens, copy and accessibility identifiers; the UI tests run on every item; the exit test is a real match |
+| The new look breaks a working screen | A restyled live screen loses a control, a label or a tap the coach relied on | Phase 6 keeps today's screens, copy and accessibility identifiers; the UI tests run on every item; the exit test is a real match (risk: agent's call, from #49 and the [redesign spike](spikes/2026-redesign.md#judged)) |
 | History lost at the switch to the store build | The `.dev` build and the store build have different bundle IDs, so a history built on the free-ID build does not carry over | Accepted (#48): a fresh start again at the switch, as with #33 |
 
 ## Plan of attack
@@ -271,9 +271,11 @@ in one glance pitch-side, with every screen's features, copy and rules unchanged
 - [ ] The app icon recoloured to the new look, in light, dark, tinted and clear (#50)
 - [ ] Accessibility pass: Accessibility sizes, VoiceOver labels for drawn elements, Reduce Motion and Reduce
       Transparency, and a test that every token pair meets 4.5:1 for text (#49)
-- **Exit:** At a real match or scrimmage, on the owner's iPhone 17 Pro, the coach runs the whole match in the restyled
-  app, using Wissel at every change and In the zone, Extra minuten and uit/terug at least once, and reads the next
-  wissel from the board without opening another view (A8). Every screen has been seen in the simulator on the iPhone 17
-  Pro and on both iPhone Duo screens, in light and dark, at Accessibility L and with Increase Contrast, Reduce
-  Transparency and Reduce Motion on, and with VoiceOver through one whole wissel. The home screen shows the recoloured
-  icon. Checked by the owner.
+- **Exit:** At a real match or scrimmage in the sports hall, on the owner's iPhone 17 Pro, the coach runs the whole
+  match in the restyled app, using Wissel at every change and In the zone, Extra minuten and uit/terug at least once. At
+  every change the coach reads the next wissel from the board without opening another view, and notes each change
+  where it could not be read at a glance; none noted (A8). In the simulator, on the iPhone 17 Pro and on both iPhone
+  Duo screens, in light and dark, at Accessibility L, and with Increase Contrast, Reduce Transparency and Reduce Motion
+  on, every screen shows every control and label uncut and every action can be done; with VoiceOver one whole wissel
+  (read the board, tap Wissel, undo) is done without sight of the screen. The home screen shows the recoloured icon.
+  Checked by the owner.

@@ -31,6 +31,8 @@ P3 cite this section.
   make the icon you suggested. Make it a new phase / milestone"
 - "we park the max-2-blocks-in-a-row idea and we're going with current rules for now. first need to use the app a
   couple of times in live setting."
+- "what do you want from me concerning the dutch copy?" (about the new Dutch copy the redesign page said the proofs
+  added; answered by [New words on screen](#new-words-on-screen) and plan decision #52)
 
 The "extra screen" is the proofs' **Wissel moment** (`wisselbord-wissel-*.png`), a focus state of the live screen in
 which the minutes are hidden and the substitution board grows. It was the design agent's own idea. The plan leaves it
